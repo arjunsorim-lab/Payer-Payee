@@ -5,8 +5,12 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .claim_mapper import build_member_documents, normalize_claim
-from .db import close_mongo, connect_mongo, get_mongo_config
+try:
+    from .claim_mapper import build_member_documents, normalize_claim
+    from .db import close_mongo, connect_mongo, get_mongo_config
+except ImportError:
+    from claim_mapper import build_member_documents, normalize_claim
+    from db import close_mongo, connect_mongo, get_mongo_config
 
 DEFAULT_CSV_PATH = "/Users/user/Downloads/EDI_834_837_20 members(837_Claims).csv"
 

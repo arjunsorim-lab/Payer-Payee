@@ -6,7 +6,10 @@ from bson import ObjectId
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-from .db import connect_mongo, get_mongo_config
+try:
+    from .db import connect_mongo, get_mongo_config
+except ImportError:
+    from db import connect_mongo, get_mongo_config
 
 app = Flask(__name__)
 CORS(app, origins=os.getenv("CORS_ORIGIN", "*").split(","))

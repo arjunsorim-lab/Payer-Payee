@@ -4,15 +4,15 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "frontend": "vite",
+    "dev": "npm run frontend",
+    "frontend": "vite --config frontend/vite.config.js",
     "backend": "node --watch backend/server.js",
     "backend:start": "node backend/server.js",
     "dev:all": "concurrently -k -n backend,frontend -c blue,green \"npm:backend\" \"npm:frontend\"",
     "import:mongo": "node backend/importClaims.js",
-    "build": "vite build",
+    "build": "vite build --config frontend/vite.config.js",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview --config frontend/vite.config.js"
   },
   "dependencies": {
     "cors": "^2.8.6",

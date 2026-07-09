@@ -2,6 +2,7 @@ import cors from 'cors'
 import 'dotenv/config'
 import express from 'express'
 import { closeMongo, connectMongo, getMongoConfig } from './db.js'
+import { buildPredictionSummary, buildRiskQueue, predictClaim } from '../shared/predictionEngine.js'
 
 const app = express()
 const port = Number(process.env.PORT || 4000)
@@ -210,6 +211,63 @@ app.get('/api/dashboard', async (req, res, next) => {
         plans: plans.filter(Boolean).sort(),
         providerGroups: providerGroups.filter(Boolean).sort(),
       },
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.get('/api/predictions/dashboard', async (req, res, next) => {
+  try {
+    const db = await connectMongo()
+    const query = buildClaimQuery(req.query)
+    const claims = await db.collection('claims').find(query).sort({ dos: -1, claimId: 1 }).toArray()
+    const allClaims = await db.collection('claims').find({}).toArray()
+
+    res.json({
+      summary: buildPredictionSummary(claims, allClaims),
+      riskQueue: buildRiskQueue(claims, allClaims, Number(req.query.limit) || 10),
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.get('/api/predictions/risk-queue', async (req, res, next) => {
+  try {
+    const db = await connectMongo()
+    const query = buildClaimQuery(req.query)
+    const claims = await db.collection('claims').find(query).sort({ dos: -1, claimId: 1 }).toArray()
+    const allClaims = await db.collection('claims').find({}).toArray()
+
+    res.json({
+      total: claims.length,
+      items: buildRiskQueue(claims, allClaims, Number(req.query.limit) || 25),
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.get('/api/predictions/claims/:claimNumber', async (req, res, next) => {
+  try {
+    const db = await connectMongo()
+    const claimNumber = req.params.claimNumber
+    const [claim, allClaims] = await Promise.all([
+      db.collection('claims').findOne({
+        $or: [{ number: claimNumber }, { claimId: claimNumber }],
+      }),
+      db.collection('claims').find({}).toArray(),
+    ])
+
+    if (!claim) {
+      res.status(404).json({ message: 'Claim not found' })
+      return
+    }
+
+    res.json({
+      claim,
+      prediction: predictClaim(claim, allClaims),
     })
   } catch (error) {
     next(error)

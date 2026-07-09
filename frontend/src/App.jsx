@@ -38,12 +38,14 @@ import {
 } from 'lucide-react'
 import './App.css'
 import { claimsData } from './data/claimsData'
+import { buildPredictionSummary, predictClaim } from '../../shared/predictionEngine'
 
 const navSections = [
   {
     title: 'Patient',
     items: [
       { label: 'Patient 360', icon: Users, view: 'member' },
+      { label: 'Predictions', icon: TrendingUp, view: 'predictions' },
       { label: 'Encounters', icon: CalendarDays, view: 'member' },
       { label: 'Claims', icon: FileText, view: 'claims' },
       { label: 'Payments', icon: CircleDollarSign, view: 'member' },
@@ -115,6 +117,10 @@ function formatCompactCurrency(value) {
 
 function formatPercent(value) {
   return `${Number.isFinite(value) ? value.toFixed(1) : '0.0'}%`
+}
+
+function formatRange(range) {
+  return `${formatCurrency(range.low)} - ${formatCurrency(range.high)}`
 }
 
 function formatDate(value) {
@@ -224,6 +230,19 @@ function buildDashboardMetrics(rows) {
   ]
 }
 
+function getDashboardMetricDescription(label) {
+  const descriptions = {
+    'Total Charges': 'Total billed amount for all claims matching the selected date, payer, plan, provider, and filter settings.',
+    'Total Allowed': 'Amount expected to be allowed by payers after contracted rates and claim edits are applied.',
+    'Total Paid': 'Amount paid by payers across the filtered claims.',
+    'Patient Responsibility': 'Member balance assigned to patients, including deductible, copay, coinsurance, or non-covered portions.',
+    'Total Adjustments': 'Difference between billed charges and allowed amounts, usually contract write-off or claim adjustment.',
+    'Total Claims': 'Number of claims included in the current dashboard filters.',
+  }
+
+  return descriptions[label] || 'Metric calculated from the current dashboard filters.'
+}
+
 function buildProviderKpis(claim) {
   const providerClaims = claimsData.filter((row) => row.billingProvider === claim.billingProvider)
   const totalAllowed = sum(providerClaims, 'allowed')
@@ -249,45 +268,74 @@ function buildProviderKpis(claim) {
 
 function App() {
   const [activeView, setActiveView] = useState('home')
+  const [activeNav, setActiveNav] = useState('home')
   const [selectedMemberId, setSelectedMemberId] = useState(null)
   const [selectedClaim, setSelectedClaim] = useState(null)
+  const [selectedPredictionClaim, setSelectedPredictionClaim] = useState(null)
   const [searchQuery, setSearchQuery] = useState('')
 
   const openClaimDetail = (claim) => {
+    setSelectedPredictionClaim(null)
     setSelectedMemberId(null)
     setSelectedClaim(claim)
     setActiveView('claims')
+    setActiveNav('Claims')
   }
 
   const openAllClaims = () => {
+    setSelectedPredictionClaim(null)
     setSelectedMemberId(null)
     setSelectedClaim(null)
     setActiveView('claims')
+    setActiveNav('Claims')
   }
 
   const openMemberDetail = (memberId) => {
+    setSelectedPredictionClaim(null)
     setSelectedMemberId(memberId)
     setSelectedClaim(null)
+    setActiveView('member')
+    setActiveNav('Patient 360')
   }
 
   const backToEncounters = () => {
+    setSelectedPredictionClaim(null)
     setSelectedMemberId(null)
     setSelectedClaim(null)
   }
 
   const updateSearchQuery = (value) => {
     setSearchQuery(value)
+    if (activeView === 'predictions') {
+      setSelectedPredictionClaim(null)
+      return
+    }
     if (value.trim()) {
       setSelectedMemberId(null)
       setSelectedClaim(null)
       if (activeView !== 'claims') {
         setActiveView('member')
+        setActiveNav('Patient 360')
       }
     }
   }
 
-  const navigate = (view) => {
+  const openPredictionDetail = (claim) => {
+    setSelectedPredictionClaim(claim)
+    setSelectedMemberId(null)
+    setSelectedClaim(null)
+    setActiveView('predictions')
+    setActiveNav('Predictions')
+  }
+
+  const backToPredictions = () => {
+    setSelectedPredictionClaim(null)
+  }
+
+  const navigate = (view, navKey = view) => {
     setActiveView(view)
+    setActiveNav(navKey)
+    setSelectedPredictionClaim(null)
     if (view === 'member') {
       backToEncounters()
     } else if (view === 'claims') {
@@ -298,7 +346,7 @@ function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar activeView={activeView} onNavigate={navigate} />
+      <Sidebar activeNav={activeNav} onNavigate={navigate} />
       <main className="workspace">
         {activeView === 'home' ? (
           <ExecutiveDashboard
@@ -311,10 +359,19 @@ function App() {
                 setSelectedMemberId(null)
                 setSelectedClaim(null)
                 setActiveView('member')
+                setActiveNav('Patient 360')
               }
             }}
             onOpenClaim={openClaimDetail}
             onViewAllClaims={openAllClaims}
+          />
+        ) : activeView === 'predictions' ? (
+          <PredictionsWorkspace
+            selectedClaim={selectedPredictionClaim}
+            searchQuery={searchQuery}
+            onSearchChange={updateSearchQuery}
+            onOpenPrediction={openPredictionDetail}
+            onBackToPredictions={backToPredictions}
           />
         ) : activeView === 'claims' ? (
           <ClaimsWorkspace
@@ -340,19 +397,19 @@ function App() {
   )
 }
 
-function Sidebar({ activeView, onNavigate }) {
+function Sidebar({ activeNav, onNavigate }) {
   return (
     <aside className="sidebar">
-      <button className="brand-button" type="button" onClick={() => onNavigate('home')}>
+      <button className="brand-button" type="button" onClick={() => onNavigate('home', 'home')}>
         <span className="brand-primary">Claims</span>
         <span className="brand-accent">AI</span>
         <span className="brand-ring" aria-hidden="true"></span>
       </button>
 
       <button
-        className={`nav-link home-link ${activeView === 'home' ? 'active' : ''}`}
+        className={`nav-link home-link ${activeNav === 'home' ? 'active' : ''}`}
         type="button"
-        onClick={() => onNavigate('home')}
+        onClick={() => onNavigate('home', 'home')}
       >
         <Home size={18} />
         Home
@@ -363,19 +420,13 @@ function Sidebar({ activeView, onNavigate }) {
           <p className="nav-heading">{section.title}</p>
           {section.items.map((item) => {
             const Icon = item.icon
-            const isPatient360 = item.label === 'Patient 360'
-            const isDashboard = item.label === 'Dashboards'
-            const isClaims = item.label === 'Claims'
-            const active =
-              (activeView === 'member' && isPatient360) ||
-              (activeView === 'home' && isDashboard) ||
-              (activeView === 'claims' && isClaims)
+            const active = activeNav === item.label
 
             return (
               <button
                 className={`nav-link ${active ? 'active' : ''}`}
                 type="button"
-                onClick={() => onNavigate(item.view)}
+                onClick={() => onNavigate(item.view, item.label)}
                 key={item.label}
               >
                 <Icon size={17} />
@@ -413,7 +464,7 @@ function TopBar({ searchQuery, onSearchChange }) {
           type="search"
           value={searchQuery}
           onChange={(event) => onSearchChange(event.target.value)}
-          placeholder="Search patients by name or member ID..."
+          placeholder="Search patients by name or member ID"
           aria-label="Search patients by name or member ID"
         />
         <kbd>/</kbd>
@@ -536,6 +587,183 @@ function ClaimsWorkspace({ selectedClaim, searchQuery, onSearchChange, onOpenCla
   )
 }
 
+function PredictionsWorkspace({ selectedClaim, searchQuery, onSearchChange, onOpenPrediction, onBackToPredictions }) {
+  const [riskFilter, setRiskFilter] = useState('At Risk')
+  const [payerFilter, setPayerFilter] = useState('All Payers')
+  const [sortBy, setSortBy] = useState('Highest Risk')
+  const normalizedQuery = searchQuery.trim().toLowerCase()
+  const predictionRows = claimsData.map((claim) => ({ claim, prediction: predictClaim(claim, claimsData) }))
+
+  const filteredRows = predictionRows
+    .filter(({ claim, prediction }) => {
+      const matchesSearch = !normalizedQuery || [
+        claim.number,
+        claim.patient,
+        claim.memberId,
+        claim.payer,
+        claim.billingProvider,
+        claim.cptCode,
+        claim.cptDescription,
+        claim.diagnosisCode,
+        claim.diagnosisDescription,
+      ].some((value) => value?.toString().toLowerCase().includes(normalizedQuery))
+      const matchesPayer = payerFilter === 'All Payers' || claim.payer === payerFilter
+      const matchesRisk = riskFilter === 'All' ||
+        (riskFilter === 'At Risk' && prediction.risks.overall.level !== 'Low') ||
+        prediction.risks.overall.level === riskFilter
+
+      return matchesSearch && matchesPayer && matchesRisk
+    })
+    .sort((a, b) => {
+      if (sortBy === 'Predicted Paid') {
+        return b.prediction.money.predictedPaid - a.prediction.money.predictedPaid
+      }
+      if (sortBy === 'Newest DOS') {
+        return b.claim.dos.localeCompare(a.claim.dos)
+      }
+      return b.prediction.risks.overall.score - a.prediction.risks.overall.score
+    })
+
+  const summary = buildPredictionSummary(filteredRows.map(({ claim }) => claim), claimsData)
+  const displayedRows = filteredRows.slice(0, 50)
+
+  return (
+    <>
+      <TopBar searchQuery={searchQuery} onSearchChange={onSearchChange} />
+      <section className="predictions-page">
+        {selectedClaim ? (
+          <PredictionDetailPage claim={selectedClaim} onBackToPredictions={onBackToPredictions} />
+        ) : (
+          <>
+            <div className="predictions-header">
+              <div>
+                <h1>Predictions</h1>
+                <p>Payment forecasts and at-risk claim worklists generated from the current 837 claim data.</p>
+              </div>
+              <div className="prediction-controls">
+                <label className="prediction-select">
+                  <span>Risk</span>
+                  <select value={riskFilter} onChange={(event) => setRiskFilter(event.target.value)}>
+                    <option>At Risk</option>
+                    <option>High</option>
+                    <option>Medium</option>
+                    <option>Low</option>
+                    <option>All</option>
+                  </select>
+                  <ChevronDown size={16} />
+                </label>
+                <label className="prediction-select">
+                  <span>Payer</span>
+                  <select value={payerFilter} onChange={(event) => setPayerFilter(event.target.value)}>
+                    {payerOptions.map((option) => (
+                      <option key={option}>{option}</option>
+                    ))}
+                  </select>
+                  <ChevronDown size={16} />
+                </label>
+                <label className="prediction-select">
+                  <span>Sort</span>
+                  <select value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
+                    <option>Highest Risk</option>
+                    <option>Predicted Paid</option>
+                    <option>Newest DOS</option>
+                  </select>
+                  <ChevronDown size={16} />
+                </label>
+              </div>
+            </div>
+
+            <PredictionSummary summary={summary} />
+            <AtRiskClaimsQueue
+              title="Prediction Queue"
+              subtitle={`${filteredRows.length.toLocaleString()} matching claim${filteredRows.length === 1 ? '' : 's'} from the current database`}
+              items={displayedRows}
+              onOpenClaim={onOpenPrediction}
+              emptyMessage="No claims match the current prediction filters."
+            />
+          </>
+        )}
+      </section>
+    </>
+  )
+}
+
+function PredictionDetailPage({ claim, onBackToPredictions }) {
+  const prediction = predictClaim(claim, claimsData)
+  const topDrivers = prediction.riskDrivers.slice(0, 6)
+
+  return (
+    <>
+      <div className="patient-header-row prediction-detail-nav">
+        <button className="back-link" type="button" onClick={onBackToPredictions}>
+          <ArrowLeft size={16} />
+          Back to Predictions
+        </button>
+        <div className="data-stamp">
+          Forecast generated from {prediction.peerCount.toLocaleString()} peer claim{prediction.peerCount === 1 ? '' : 's'}
+          <RefreshCw size={15} />
+        </div>
+      </div>
+
+      <Card className="prediction-detail-hero">
+        <div>
+          <span className={`claim-status ${statusClass(claim.status)}`}>{statusLabel(claim.status)}</span>
+          <h1>Prediction Detail - {claim.number}</h1>
+          <p>{claim.patient} · {claim.memberId} · {claim.payer} · {getService(claim)}</p>
+        </div>
+        <RiskBadge level={prediction.risks.overall.level} score={prediction.risks.overall.score} />
+      </Card>
+
+      <div className="prediction-detail-grid">
+        <PaymentForecastCard prediction={prediction} />
+        <Card className="prediction-driver-card">
+          <div className="prediction-card-header">
+            <div>
+              <h2>Driver Breakdown</h2>
+              <p>Dominant risk signals ranked for this claim.</p>
+            </div>
+            <span>{prediction.confidence} confidence</span>
+          </div>
+          <div className="prediction-driver-grid">
+            {topDrivers.map((driver) => (
+              <div className="prediction-driver-item" key={driver.label}>
+                <div>
+                  <strong>{driver.label}</strong>
+                  <RiskBadge level={riskLevelForScore(driver.score)} score={driver.score} />
+                </div>
+                <p>{driver.reason}</p>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </div>
+
+      <Card className="prediction-action-card">
+        <div className="prediction-card-header">
+          <div>
+            <h2>Recommended Actions</h2>
+            <p>Situation-specific fixes based on the highest current risk drivers.</p>
+          </div>
+          <span>{prediction.fixes.length} action{prediction.fixes.length === 1 ? '' : 's'}</span>
+        </div>
+        <ol>
+          {prediction.fixes.map((fix) => (
+            <li key={fix}>{fix}</li>
+          ))}
+        </ol>
+      </Card>
+
+      <SelectedClaimDetail claim={claim} />
+    </>
+  )
+}
+
+function riskLevelForScore(score) {
+  if (score >= 50) return 'High'
+  if (score >= 35) return 'Medium'
+  return 'Low'
+}
+
 function filterClaimsByTime(claims, timeFilter) {
   if (timeFilter === 'Latest Month') {
     const latestMonth = defaultDateRange.to.slice(0, 7)
@@ -576,6 +804,8 @@ function ClaimsTableFooter({ currentPage, pageCount, pageSize, totalCount, onPag
 }
 
 function ClaimDetailPage({ claim, onBackToClaims }) {
+  const prediction = predictClaim(claim, claimsData)
+
   return (
     <>
       <div className="patient-header-row">
@@ -591,6 +821,7 @@ function ClaimDetailPage({ claim, onBackToClaims }) {
 
       <div className="claim-detail-layout">
         <SelectedClaimDetail claim={claim} />
+        <PaymentForecastCard claim={claim} prediction={prediction} />
         <ClaimReasonCard claim={claim} />
       </div>
     </>
@@ -782,7 +1013,7 @@ function ExecutiveDashboard({ searchQuery, onSearchChange, onSearchSubmit, onOpe
                 onSearchSubmit?.(event.currentTarget.value)
               }
             }}
-            placeholder="Search patients by name or member ID..."
+            placeholder="Search patients by name or member ID"
             aria-label="Search patients by name or member ID"
           />
           <kbd>/</kbd>
@@ -1004,6 +1235,87 @@ function SelectedClaimDetail({ claim }) {
         <ClaimInfoPanel title="Service Details" rows={clinicalFacts} />
       </div>
     </div>
+  )
+}
+
+function PaymentForecastCard({ prediction }) {
+  const moneyCards = [
+    { label: 'Expected Allowed', value: formatCurrency(prediction.money.predictedAllowed), note: `${prediction.money.allowedRate}% allowed rate` },
+    { label: 'Expected Paid', value: formatCurrency(prediction.money.predictedPaid), note: `Range ${formatRange(prediction.money.paidRange)}` },
+    { label: 'Patient Balance', value: formatCurrency(prediction.money.predictedPatientResp), note: `${prediction.money.patientToAllowedRate}% of allowed` },
+    { label: 'Expected Adjustment', value: formatCurrency(prediction.money.predictedAdjustment), note: `${prediction.money.adjustmentRate}% write-off` },
+  ]
+  const riskRows = [
+    ['Denial Risk', prediction.risks.denial],
+    ['Adjustment Risk', prediction.risks.adjustment],
+    ['Collection Risk', prediction.risks.collection],
+    ['COB / Forwarded Risk', prediction.risks.cob],
+    ['Repeat Claim Risk', prediction.risks.repeat],
+    ['Provider Risk', prediction.risks.provider],
+  ]
+
+  return (
+    <Card className="payment-forecast-card">
+      <div className="forecast-header">
+        <div>
+          <span>Prediction MVP</span>
+          <h2>Payment Forecast & Claim Risk</h2>
+          <p>{prediction.outcome.explanation} Confidence: {prediction.confidence}.</p>
+        </div>
+        <RiskBadge level={prediction.risks.overall.level} score={prediction.risks.overall.score} />
+      </div>
+
+      <div className="forecast-money-grid">
+        {moneyCards.map((item) => (
+          <div className="forecast-money-card" key={item.label}>
+            <span>{item.label}</span>
+            <strong>{item.value}</strong>
+            <small>{item.note}</small>
+          </div>
+        ))}
+      </div>
+
+      <div className="forecast-detail-grid">
+        <div className="forecast-risk-panel">
+          <h3>Risk Signals</h3>
+          <div className="forecast-risk-list">
+            {riskRows.map(([label, risk]) => (
+              <div key={label}>
+                <span>{label}</span>
+                <RiskBadge level={risk.level} score={risk.score} />
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="forecast-risk-panel">
+          <h3>Likely Outcome</h3>
+          <strong>{prediction.outcome.likely}</strong>
+          <p>{prediction.risks.denial.reason}</p>
+          {prediction.resubmissionSuccess ? (
+            <p>Resubmission success estimate: {prediction.resubmissionSuccess.score}%.</p>
+          ) : null}
+        </div>
+
+        <div className="forecast-risk-panel">
+          <h3>Fix Before Submit</h3>
+          <ul>
+            {prediction.fixes.map((fix) => (
+              <li key={fix}>{fix}</li>
+            ))}
+          </ul>
+        </div>
+      </div>
+
+      <div className="forecast-reasons-block">
+        <h3>Why This Prediction</h3>
+        <ul>
+          {prediction.reasons.map((reason) => (
+            <li key={reason}>{reason}</li>
+          ))}
+        </ul>
+      </div>
+    </Card>
   )
 }
 
@@ -1457,9 +1769,20 @@ function ClaimFlow() {
 }
 
 function DashboardMetric({ label, value, note, icon: Icon, tone }) {
+  const description = getDashboardMetricDescription(label)
+  const tooltipId = `metric-tip-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
+
   return (
     <Card className="dashboard-metric">
-      <Info className="metric-info" size={18} />
+      <button
+        className="metric-info-button"
+        type="button"
+        aria-label={`${label} information`}
+        aria-describedby={tooltipId}
+      >
+        <Info size={18} />
+      </button>
+      <span className="metric-tooltip" id={tooltipId} role="tooltip">{description}</span>
       <div>
         <span>{label}</span>
         <strong>{value}</strong>
@@ -1469,6 +1792,106 @@ function DashboardMetric({ label, value, note, icon: Icon, tone }) {
         <Icon size={30} />
       </span>
     </Card>
+  )
+}
+
+function PredictionSummary({ summary }) {
+  const cards = [
+    { label: 'Predicted Paid', value: formatCurrency(summary.totalPredictedPaid), note: 'historical peer forecast', tone: 'green' },
+    { label: 'Predicted Adjustment', value: formatCurrency(summary.totalPredictedAdjustment), note: 'expected write-off', tone: 'orange' },
+    { label: 'At-Risk Claims', value: summary.atRiskCount.toLocaleString(), note: `${summary.highRiskCount} high, ${summary.denialQueueCount} denial queue`, tone: 'violet' },
+    { label: 'Average Risk', value: `${summary.averageOverallRisk}%`, note: 'overall claim risk score', tone: 'blue' },
+  ]
+
+  return (
+    <div className="prediction-summary-grid">
+      {cards.map((card) => (
+        <Card className={`prediction-summary-card ${card.tone}`} key={card.label}>
+          <span>{card.label}</span>
+          <strong>{card.value}</strong>
+          <small>{card.note}</small>
+        </Card>
+      ))}
+    </div>
+  )
+}
+
+function AtRiskClaimsQueue({
+  items,
+  onOpenClaim,
+  title = 'At-Risk Claims Queue',
+  subtitle,
+  emptyMessage = 'No at-risk claims match the current filters.',
+}) {
+  return (
+    <Card className="risk-queue-card">
+      <div className="risk-queue-heading">
+        <div>
+          <h2>{title}</h2>
+          {subtitle ? <p>{subtitle}</p> : null}
+        </div>
+      </div>
+      <div className="risk-queue-table-wrap">
+        <table className="data-table risk-queue-table">
+          <thead>
+            <tr>
+              <th>Claim</th>
+              <th>Patient</th>
+              <th>Overall Risk</th>
+              <th>Forecast</th>
+              <th>Prediction Reasons</th>
+              <th>Recommended Fix</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.length ? items.map(({ claim, prediction }) => (
+              <tr key={claim.number}>
+                <td>
+                  <button className="claim-link-button" type="button" onClick={() => onOpenClaim?.(claim)}>
+                    {claim.number}
+                  </button>
+                  <span>{claim.payer}</span>
+                </td>
+                <td>{claim.patient}</td>
+                <td>
+                  <RiskBadge level={prediction.risks.overall.level} score={prediction.risks.overall.score} />
+                </td>
+                <td className="risk-forecast-cell">
+                  <strong>{formatCurrency(prediction.money.predictedPaid)}</strong>
+                  <span>{prediction.outcome.likely} · {prediction.confidence}</span>
+                </td>
+                <td>
+                  <ul className="queue-reason-list">
+                    {prediction.reasons.slice(0, 2).map((reason) => (
+                      <li key={reason}>{reason}</li>
+                    ))}
+                  </ul>
+                </td>
+                <td>
+                  <ul className="queue-fix-list">
+                    {prediction.fixes.slice(0, 2).map((fix) => (
+                      <li key={fix}>{fix}</li>
+                    ))}
+                  </ul>
+                </td>
+              </tr>
+            )) : (
+              <tr>
+                <td className="empty-table-cell" colSpan={6}>{emptyMessage}</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  )
+}
+
+function RiskBadge({ level, score }) {
+  return (
+    <span className={`risk-badge ${level.toLowerCase()}`}>
+      {level} · {score}%
+    </span>
   )
 }
 

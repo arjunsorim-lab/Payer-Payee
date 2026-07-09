@@ -4,6 +4,7 @@ import { parse } from 'csv-parse/sync'
 import 'dotenv/config'
 import { buildMemberDocuments, normalizeClaim } from './claimMapper.js'
 import { closeMongo, connectMongo, getMongoConfig } from './db.js'
+import { predictClaim } from '../shared/predictionEngine.js'
 
 const defaultCsvPath = '/Users/user/Downloads/EDI_834_837_20 members(837_Claims).csv'
 const csvPath = process.argv[2] || process.env.CSV_PATH || defaultCsvPath
@@ -19,6 +20,7 @@ function chunk(items, size) {
 async function ensureIndexes(db) {
   const claims = db.collection('claims')
   const members = db.collection('members')
+  const predictions = db.collection('claim_predictions')
 
   await claims.createIndex({ claimId: 1 }, { unique: true })
   await claims.createIndex({ number: 1 }, { unique: true })
@@ -29,6 +31,11 @@ async function ensureIndexes(db) {
 
   await members.createIndex({ memberId: 1 }, { unique: true })
   await members.createIndex({ patient: 'text', memberId: 'text' })
+
+  await predictions.createIndex({ claimId: 1 }, { unique: true })
+  await predictions.createIndex({ number: 1 }, { unique: true })
+  await predictions.createIndex({ memberId: 1, dos: -1 })
+  await predictions.createIndex({ 'prediction.risks.overall.score': -1 })
 }
 
 async function bulkUpsert(collection, documents, keyField) {
@@ -76,6 +83,18 @@ async function main() {
 
   const claimResult = await bulkUpsert(db.collection('claims'), claims, 'claimId')
   const memberResult = await bulkUpsert(db.collection('members'), members, 'memberId')
+  const predictionDocs = claims.map((claim) => ({
+    claimId: claim.claimId,
+    number: claim.number,
+    memberId: claim.memberId,
+    patient: claim.patient,
+    payer: claim.payer,
+    billingProvider: claim.billingProvider,
+    dos: claim.dos,
+    prediction: predictClaim(claim, claims),
+    predictedAt: new Date(),
+  }))
+  const predictionResult = await bulkUpsert(db.collection('claim_predictions'), predictionDocs, 'claimId')
 
   if (process.env.SYNC_DELETE === 'true') {
     await db.collection('claims').deleteMany({ claimId: { $nin: claims.map((claim) => claim.claimId) } })
@@ -103,6 +122,7 @@ async function main() {
     importedMembers: members.length,
     claimResult,
     memberResult,
+    predictionResult,
     totals: totals[0] || {},
   }, null, 2))
 }

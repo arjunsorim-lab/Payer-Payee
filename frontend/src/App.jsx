@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
   ArrowRight,
@@ -37,7 +37,6 @@ import {
   Users,
 } from 'lucide-react'
 import './App.css'
-import { claimsData } from './data/claimsData'
 import { buildPredictionSummary, predictClaim } from '../../shared/predictionEngine'
 
 const navSections = [
@@ -80,14 +79,87 @@ const navSections = [
   },
 ]
 
-const defaultDateRange = getDateRange(claimsData)
-const recentClaims = claimsData.slice(0, 10)
-const recentEncounters = claimsData.slice(0, 14)
-const payerOptions = ['All Payers', ...uniqueValues(claimsData, 'payer')]
-const planOptions = ['All Plans', ...uniqueValues(claimsData, 'filingIndicator')]
-const providerOptions = ['All Groups', ...uniqueValues(claimsData, 'billingProvider')]
-const members = buildMembers(claimsData)
-const membersById = new Map(members.map((member) => [member.memberId, member]))
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:4000'
+const EMPTY_DATE_RANGE = { from: '', to: '' }
+const CLICKABLE_NAV_LABELS = new Set(['Patient 360', 'Predictions', 'Claims'])
+const VALID_VIEWS = new Set(['home', 'member', 'predictions', 'claims'])
+
+function buildDataModel(claimsData) {
+  const defaultDateRange = getDateRange(claimsData)
+  const members = buildMembers(claimsData)
+
+  return {
+    claimsData,
+    defaultDateRange,
+    recentClaims: claimsData.slice(0, 10),
+    payerOptions: ['All Payers', ...uniqueValues(claimsData, 'payer')],
+    planOptions: ['All Plans', ...uniqueValues(claimsData, 'filingIndicator')],
+    providerOptions: ['All Groups', ...uniqueValues(claimsData, 'billingProvider')],
+    members,
+    membersById: new Map(members.map((member) => [member.memberId, member])),
+  }
+}
+
+const EMPTY_DATA_MODEL = buildDataModel([])
+const DataContext = createContext(EMPTY_DATA_MODEL)
+
+function useAppData() {
+  return useContext(DataContext)
+}
+
+async function fetchJson(path) {
+  const response = await fetch(`${API_BASE_URL}${path}`)
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`)
+  }
+  return response.json()
+}
+
+function findClaimByNumber(claimsData, claimNumber) {
+  return claimsData.find((claim) => claim.number === claimNumber || claim.claimId === claimNumber) || null
+}
+
+function getNavForView(view) {
+  if (view === 'member') return 'Patient 360'
+  if (view === 'predictions') return 'Predictions'
+  if (view === 'claims') return 'Claims'
+  return 'home'
+}
+
+function routeToHash(route) {
+  const params = new URLSearchParams()
+  const view = VALID_VIEWS.has(route.activeView) ? route.activeView : 'home'
+  params.set('view', view)
+
+  if (view === 'member' && route.selectedMemberId) {
+    params.set('member', route.selectedMemberId)
+  }
+  if (view === 'claims' && route.selectedClaim?.number) {
+    params.set('claim', route.selectedClaim.number)
+  }
+  if (view === 'predictions' && route.selectedPredictionClaim?.number) {
+    params.set('prediction', route.selectedPredictionClaim.number)
+  }
+
+  return `#${params.toString()}`
+}
+
+function routeFromHash(hash, claimsData) {
+  const params = new URLSearchParams(hash.replace(/^#/, ''))
+  const requestedView = params.get('view') || 'home'
+  const activeView = VALID_VIEWS.has(requestedView) ? requestedView : 'home'
+  const selectedClaim = activeView === 'claims' ? findClaimByNumber(claimsData, params.get('claim')) : null
+  const selectedPredictionClaim = activeView === 'predictions' ? findClaimByNumber(claimsData, params.get('prediction')) : null
+  const selectedMemberId = activeView === 'member' ? params.get('member') : null
+
+  return {
+    activeView,
+    activeNav: getNavForView(activeView),
+    selectedMemberId,
+    selectedClaim,
+    selectedPredictionClaim,
+  }
+}
 
 function uniqueValues(rows, key) {
   return [...new Set(rows.map((row) => row[key]).filter(Boolean))].sort((a, b) => a.localeCompare(b))
@@ -95,6 +167,7 @@ function uniqueValues(rows, key) {
 
 function getDateRange(rows) {
   const dates = rows.map((row) => row.dos).filter(Boolean).sort()
+  if (!dates.length) return EMPTY_DATE_RANGE
   return { from: dates[0], to: dates[dates.length - 1] }
 }
 
@@ -158,6 +231,11 @@ function getDiagnosis(claim) {
 
 function getService(claim) {
   return `${claim.placeOfServiceCode} - ${claim.placeOfService}`.trim()
+}
+
+function getPayerContact(payer) {
+  const slug = String(payer || 'payer').toLowerCase().replace(/[^a-z0-9]+/g, '')
+  return `claims@${slug || 'payer'}.com`
 }
 
 function buildMembers(rows) {
@@ -243,7 +321,7 @@ function getDashboardMetricDescription(label) {
   return descriptions[label] || 'Metric calculated from the current dashboard filters.'
 }
 
-function buildProviderKpis(claim) {
+function buildProviderKpis(claim, claimsData) {
   const providerClaims = claimsData.filter((row) => row.billingProvider === claim.billingProvider)
   const totalAllowed = sum(providerClaims, 'allowed')
   const totalPaid = sum(providerClaims, 'paid')
@@ -273,35 +351,119 @@ function App() {
   const [selectedClaim, setSelectedClaim] = useState(null)
   const [selectedPredictionClaim, setSelectedPredictionClaim] = useState(null)
   const [searchQuery, setSearchQuery] = useState('')
+  const [claimsData, setClaimsData] = useState([])
+  const [dataLoading, setDataLoading] = useState(true)
+  const [dataError, setDataError] = useState('')
+  const dataModel = useMemo(() => buildDataModel(claimsData), [claimsData])
+  const routeInitializedRef = useRef(false)
+
+  const setRouteState = (route, historyMode = 'push') => {
+    const nextRoute = {
+      activeView: route.activeView || 'home',
+      activeNav: route.activeNav || getNavForView(route.activeView || 'home'),
+      selectedMemberId: route.selectedMemberId || null,
+      selectedClaim: route.selectedClaim || null,
+      selectedPredictionClaim: route.selectedPredictionClaim || null,
+    }
+
+    setActiveView(nextRoute.activeView)
+    setActiveNav(nextRoute.activeNav)
+    setSelectedMemberId(nextRoute.selectedMemberId)
+    setSelectedClaim(nextRoute.selectedClaim)
+    setSelectedPredictionClaim(nextRoute.selectedPredictionClaim)
+
+    if (historyMode) {
+      const hash = routeToHash(nextRoute)
+      if (window.location.hash !== hash) {
+        if (historyMode === 'replace') {
+          window.history.replaceState(null, '', hash)
+        } else {
+          window.history.pushState(null, '', hash)
+        }
+      }
+    }
+  }
+
+  useEffect(() => {
+    let active = true
+
+    fetchJson('/api/claims?limit=2000')
+      .then((payload) => {
+        if (!active) return
+        setClaimsData(payload.items || [])
+        setDataError('')
+      })
+      .catch((error) => {
+        if (!active) return
+        setDataError(error.message)
+      })
+      .finally(() => {
+        if (active) setDataLoading(false)
+      })
+
+    return () => {
+      active = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (dataLoading || dataError) return undefined
+
+    const applyBrowserRoute = () => {
+      setRouteState(routeFromHash(window.location.hash, claimsData), null)
+    }
+
+    if (!routeInitializedRef.current) {
+      routeInitializedRef.current = true
+      if (window.location.hash) {
+        applyBrowserRoute()
+      } else {
+        setRouteState({
+          activeView,
+          activeNav,
+          selectedMemberId,
+          selectedClaim,
+          selectedPredictionClaim,
+        }, 'replace')
+      }
+    }
+
+    window.addEventListener('popstate', applyBrowserRoute)
+    window.addEventListener('hashchange', applyBrowserRoute)
+    return () => {
+      window.removeEventListener('popstate', applyBrowserRoute)
+      window.removeEventListener('hashchange', applyBrowserRoute)
+    }
+  }, [dataLoading, dataError, claimsData, activeView, activeNav, selectedMemberId, selectedClaim, selectedPredictionClaim])
 
   const openClaimDetail = (claim) => {
-    setSelectedPredictionClaim(null)
-    setSelectedMemberId(null)
-    setSelectedClaim(claim)
-    setActiveView('claims')
-    setActiveNav('Claims')
+    setRouteState({
+      activeView: 'claims',
+      activeNav: 'Claims',
+      selectedClaim: claim,
+    })
   }
 
   const openAllClaims = () => {
-    setSelectedPredictionClaim(null)
-    setSelectedMemberId(null)
-    setSelectedClaim(null)
-    setActiveView('claims')
-    setActiveNav('Claims')
+    setRouteState({
+      activeView: 'claims',
+      activeNav: 'Claims',
+    })
   }
 
   const openMemberDetail = (memberId) => {
-    setSelectedPredictionClaim(null)
-    setSelectedMemberId(memberId)
-    setSelectedClaim(null)
-    setActiveView('member')
-    setActiveNav('Patient 360')
+    setRouteState({
+      activeView: 'member',
+      activeNav: 'Patient 360',
+      selectedMemberId: memberId,
+    })
   }
 
   const backToEncounters = () => {
-    setSelectedPredictionClaim(null)
-    setSelectedMemberId(null)
-    setSelectedClaim(null)
+    setRouteState({
+      activeView: 'member',
+      activeNav: 'Patient 360',
+    })
   }
 
   const updateSearchQuery = (value) => {
@@ -314,86 +476,91 @@ function App() {
       setSelectedMemberId(null)
       setSelectedClaim(null)
       if (activeView !== 'claims') {
-        setActiveView('member')
-        setActiveNav('Patient 360')
+        setRouteState({
+          activeView: 'member',
+          activeNav: 'Patient 360',
+        })
       }
     }
   }
 
   const openPredictionDetail = (claim) => {
-    setSelectedPredictionClaim(claim)
-    setSelectedMemberId(null)
-    setSelectedClaim(null)
-    setActiveView('predictions')
-    setActiveNav('Predictions')
+    setRouteState({
+      activeView: 'predictions',
+      activeNav: 'Predictions',
+      selectedPredictionClaim: claim,
+    })
   }
 
   const backToPredictions = () => {
-    setSelectedPredictionClaim(null)
+    setRouteState({
+      activeView: 'predictions',
+      activeNav: 'Predictions',
+    })
   }
 
   const navigate = (view, navKey = view) => {
-    setActiveView(view)
-    setActiveNav(navKey)
-    setSelectedPredictionClaim(null)
-    if (view === 'member') {
-      backToEncounters()
-    } else if (view === 'claims') {
-      setSelectedClaim(null)
-      setSelectedMemberId(null)
-    }
+    if (!VALID_VIEWS.has(view)) return
+    setRouteState({
+      activeView: view,
+      activeNav: navKey,
+    })
   }
 
   return (
-    <div className="app-shell">
-      <Sidebar activeNav={activeNav} onNavigate={navigate} />
-      <main className="workspace">
-        {activeView === 'home' ? (
-          <ExecutiveDashboard
-            searchQuery={searchQuery}
-            onSearchChange={setSearchQuery}
-            onSearchSubmit={(value) => {
-              const query = value.trim()
-              if (query) {
-                setSearchQuery(query)
-                setSelectedMemberId(null)
-                setSelectedClaim(null)
-                setActiveView('member')
-                setActiveNav('Patient 360')
-              }
-            }}
-            onOpenClaim={openClaimDetail}
-            onViewAllClaims={openAllClaims}
-          />
-        ) : activeView === 'predictions' ? (
-          <PredictionsWorkspace
-            selectedClaim={selectedPredictionClaim}
-            searchQuery={searchQuery}
-            onSearchChange={updateSearchQuery}
-            onOpenPrediction={openPredictionDetail}
-            onBackToPredictions={backToPredictions}
-          />
-        ) : activeView === 'claims' ? (
-          <ClaimsWorkspace
-            selectedClaim={selectedClaim}
-            searchQuery={searchQuery}
-            onSearchChange={updateSearchQuery}
-            onOpenClaim={openClaimDetail}
-            onViewAllClaims={openAllClaims}
-          />
-        ) : (
-          <PatientWorkspace
-            selectedClaim={selectedClaim}
-            selectedMemberId={selectedMemberId}
-            searchQuery={searchQuery}
-            onSearchChange={updateSearchQuery}
-            onSelectMember={openMemberDetail}
-            onOpenClaim={openClaimDetail}
-            onBackToEncounters={backToEncounters}
-          />
-        )}
-      </main>
-    </div>
+    <DataContext.Provider value={dataModel}>
+      <div className="app-shell">
+        <Sidebar activeNav={activeNav} onNavigate={navigate} />
+        <main className="workspace">
+          {dataLoading ? (
+            <>
+              <TopBar />
+              <section className="patient-page">
+                <Card className="state-card">Loading MongoDB claim data...</Card>
+              </section>
+            </>
+          ) : dataError ? (
+            <>
+              <TopBar />
+              <section className="patient-page">
+                <Card className="state-card">
+                  Unable to load claims from the backend API: {dataError}
+                </Card>
+              </section>
+            </>
+          ) : activeView === 'home' ? (
+            <ExecutiveDashboard
+              onOpenClaim={openClaimDetail}
+              onViewAllClaims={openAllClaims}
+            />
+          ) : activeView === 'predictions' ? (
+            <PredictionsWorkspace
+              selectedClaim={selectedPredictionClaim}
+              searchQuery={searchQuery}
+              onOpenPrediction={openPredictionDetail}
+              onBackToPredictions={backToPredictions}
+            />
+          ) : activeView === 'claims' ? (
+            <ClaimsWorkspace
+              selectedClaim={selectedClaim}
+              searchQuery={searchQuery}
+              onSearchChange={updateSearchQuery}
+              onOpenClaim={openClaimDetail}
+            />
+          ) : (
+            <PatientWorkspace
+              selectedClaim={selectedClaim}
+              selectedMemberId={selectedMemberId}
+              searchQuery={searchQuery}
+              onSearchChange={updateSearchQuery}
+              onSelectMember={openMemberDetail}
+              onOpenClaim={openClaimDetail}
+              onBackToEncounters={backToEncounters}
+            />
+          )}
+        </main>
+      </div>
+    </DataContext.Provider>
   )
 }
 
@@ -421,12 +588,17 @@ function Sidebar({ activeNav, onNavigate }) {
           {section.items.map((item) => {
             const Icon = item.icon
             const active = activeNav === item.label
+            const enabled = CLICKABLE_NAV_LABELS.has(item.label)
 
             return (
               <button
-                className={`nav-link ${active ? 'active' : ''}`}
+                className={`nav-link ${active ? 'active' : ''} ${enabled ? '' : 'disabled'}`}
                 type="button"
-                onClick={() => onNavigate(item.view, item.label)}
+                aria-disabled={!enabled}
+                disabled={!enabled}
+                onClick={() => {
+                  if (enabled) onNavigate(item.view, item.label)
+                }}
                 key={item.label}
               >
                 <Icon size={17} />
@@ -440,35 +612,13 @@ function Sidebar({ activeNav, onNavigate }) {
   )
 }
 
-function TopBar({ searchQuery, onSearchChange }) {
-  const inputRef = useRef(null)
-
-  useEffect(() => {
-    const handleKeyDown = (event) => {
-      if (event.key === '/' && document.activeElement !== inputRef.current) {
-        event.preventDefault()
-        inputRef.current?.focus()
-      }
-    }
-
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [])
-
+function TopBar() {
   return (
     <header className="topbar">
-      <label className="search-field">
-        <Search size={18} />
-        <input
-          ref={inputRef}
-          type="search"
-          value={searchQuery}
-          onChange={(event) => onSearchChange(event.target.value)}
-          placeholder="Search patients by name or member ID"
-          aria-label="Search patients by name or member ID"
-        />
-        <kbd>/</kbd>
-      </label>
+      <div className="topbar-welcome">
+        <span>Welcome Back</span>
+        <strong>Alex Admin</strong>
+      </div>
       <div className="topbar-actions">
         <button className="icon-button has-alert" type="button" aria-label="Notifications">
           <Bell size={19} />
@@ -488,11 +638,12 @@ function TopBar({ searchQuery, onSearchChange }) {
 }
 
 function PatientWorkspace({ selectedClaim, selectedMemberId, searchQuery, onSearchChange, onSelectMember, onOpenClaim, onBackToEncounters }) {
+  const { membersById } = useAppData()
   const selectedMember = selectedMemberId ? membersById.get(selectedMemberId) : null
 
   return (
     <>
-      <TopBar searchQuery={searchQuery} onSearchChange={onSearchChange} />
+      <TopBar />
       <section className="patient-page">
         {selectedMember ? (
           <MemberDetail
@@ -503,25 +654,36 @@ function PatientWorkspace({ selectedClaim, selectedMemberId, searchQuery, onSear
             onOpenClaim={onOpenClaim}
           />
         ) : (
-          <EncounterSearch searchQuery={searchQuery} onSelectMember={onSelectMember} onOpenClaim={onOpenClaim} />
+          <EncounterSearch
+            searchQuery={searchQuery}
+            onSearchChange={onSearchChange}
+            onSelectMember={onSelectMember}
+            onOpenClaim={onOpenClaim}
+          />
         )}
       </section>
     </>
   )
 }
 
-function ClaimsWorkspace({ selectedClaim, searchQuery, onSearchChange, onOpenClaim, onViewAllClaims }) {
+function ClaimsWorkspace({ selectedClaim, searchQuery, onSearchChange, onOpenClaim }) {
+  const { claimsData, defaultDateRange } = useAppData()
   const [timeFilter, setTimeFilter] = useState('All Time')
   const [currentPage, setCurrentPage] = useState(1)
   const pageSize = 10
   const normalizedQuery = searchQuery.trim().toLowerCase()
-  const searchedClaims = normalizedQuery
-    ? claimsData.filter((claim) => (
-      claim.patient.toLowerCase().includes(normalizedQuery) ||
-      claim.memberId.toLowerCase().includes(normalizedQuery)
-    ))
-    : claimsData
-  const filteredClaims = filterClaimsByTime(searchedClaims, timeFilter)
+  const searchedClaims = useMemo(() => (
+    normalizedQuery
+      ? claimsData.filter((claim) => (
+        claim.patient.toLowerCase().includes(normalizedQuery) ||
+        claim.memberId.toLowerCase().includes(normalizedQuery)
+      ))
+      : claimsData
+  ), [claimsData, normalizedQuery])
+  const filteredClaims = useMemo(
+    () => filterClaimsByTime(searchedClaims, timeFilter, defaultDateRange),
+    [searchedClaims, timeFilter, defaultDateRange],
+  )
   const pageCount = Math.max(1, Math.ceil(filteredClaims.length / pageSize))
   const safePage = Math.min(currentPage, pageCount)
   const pagedClaims = filteredClaims.slice((safePage - 1) * pageSize, safePage * pageSize)
@@ -532,10 +694,10 @@ function ClaimsWorkspace({ selectedClaim, searchQuery, onSearchChange, onOpenCla
 
   return (
     <>
-      <TopBar searchQuery={searchQuery} onSearchChange={onSearchChange} />
+      <TopBar />
       <section className="claims-page">
         {selectedClaim ? (
-          <ClaimDetailPage claim={selectedClaim} onBackToClaims={onViewAllClaims} />
+          <ClaimDetailPage claim={selectedClaim} />
         ) : (
           <>
             <div className="claims-directory-header">
@@ -587,14 +749,20 @@ function ClaimsWorkspace({ selectedClaim, searchQuery, onSearchChange, onOpenCla
   )
 }
 
-function PredictionsWorkspace({ selectedClaim, searchQuery, onSearchChange, onOpenPrediction, onBackToPredictions }) {
+function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, onBackToPredictions }) {
+  const { claimsData, payerOptions } = useAppData()
   const [riskFilter, setRiskFilter] = useState('At Risk')
   const [payerFilter, setPayerFilter] = useState('All Payers')
   const [sortBy, setSortBy] = useState('Highest Risk')
+  const [currentPage, setCurrentPage] = useState(1)
+  const pageSize = 8
   const normalizedQuery = searchQuery.trim().toLowerCase()
-  const predictionRows = claimsData.map((claim) => ({ claim, prediction: predictClaim(claim, claimsData) }))
+  const predictionRows = useMemo(
+    () => claimsData.map((claim) => ({ claim, prediction: predictClaim(claim, claimsData) })),
+    [claimsData],
+  )
 
-  const filteredRows = predictionRows
+  const filteredRows = useMemo(() => predictionRows
     .filter(({ claim, prediction }) => {
       const matchesSearch = !normalizedQuery || [
         claim.number,
@@ -622,14 +790,26 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onSearchChange, onOp
         return b.claim.dos.localeCompare(a.claim.dos)
       }
       return b.prediction.risks.overall.score - a.prediction.risks.overall.score
-    })
+    }), [predictionRows, normalizedQuery, payerFilter, riskFilter, sortBy])
 
-  const summary = buildPredictionSummary(filteredRows.map(({ claim }) => claim), claimsData)
-  const displayedRows = filteredRows.slice(0, 50)
+  const summary = useMemo(
+    () => buildPredictionSummary(filteredRows.map(({ claim }) => claim), claimsData),
+    [filteredRows, claimsData],
+  )
+  const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize))
+  const safePage = Math.min(currentPage, pageCount)
+  const displayedRows = useMemo(
+    () => filteredRows.slice((safePage - 1) * pageSize, safePage * pageSize),
+    [filteredRows, safePage],
+  )
+
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [searchQuery, riskFilter, payerFilter, sortBy])
 
   return (
     <>
-      <TopBar searchQuery={searchQuery} onSearchChange={onSearchChange} />
+      <TopBar />
       <section className="predictions-page">
         {selectedClaim ? (
           <PredictionDetailPage claim={selectedClaim} onBackToPredictions={onBackToPredictions} />
@@ -680,6 +860,15 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onSearchChange, onOp
               items={displayedRows}
               onOpenClaim={onOpenPrediction}
               emptyMessage="No claims match the current prediction filters."
+              footer={(
+                <ClaimsTableFooter
+                  currentPage={safePage}
+                  pageCount={pageCount}
+                  pageSize={pageSize}
+                  totalCount={filteredRows.length}
+                  onPageChange={setCurrentPage}
+                />
+              )}
             />
           </>
         )}
@@ -689,6 +878,7 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onSearchChange, onOp
 }
 
 function PredictionDetailPage({ claim, onBackToPredictions }) {
+  const { claimsData } = useAppData()
   const prediction = predictClaim(claim, claimsData)
   const topDrivers = prediction.riskDrivers.slice(0, 6)
 
@@ -764,7 +954,9 @@ function riskLevelForScore(score) {
   return 'Low'
 }
 
-function filterClaimsByTime(claims, timeFilter) {
+function filterClaimsByTime(claims, timeFilter, defaultDateRange) {
+  if (!defaultDateRange.to) return claims
+
   if (timeFilter === 'Latest Month') {
     const latestMonth = defaultDateRange.to.slice(0, 7)
     return claims.filter((claim) => claim.dos.startsWith(latestMonth))
@@ -803,22 +995,12 @@ function ClaimsTableFooter({ currentPage, pageCount, pageSize, totalCount, onPag
   )
 }
 
-function ClaimDetailPage({ claim, onBackToClaims }) {
+function ClaimDetailPage({ claim }) {
+  const { claimsData } = useAppData()
   const prediction = predictClaim(claim, claimsData)
 
   return (
     <>
-      <div className="patient-header-row">
-        <button className="back-link" type="button" onClick={onBackToClaims}>
-          <ArrowLeft size={16} />
-          Back to Claims
-        </button>
-        <div className="data-stamp">
-          Claim submitted {formatDate(claim.submissionDate)}
-          <RefreshCw size={15} />
-        </div>
-      </div>
-
       <div className="claim-detail-layout">
         <SelectedClaimDetail claim={claim} />
         <PaymentForecastCard claim={claim} prediction={prediction} />
@@ -828,16 +1010,31 @@ function ClaimDetailPage({ claim, onBackToClaims }) {
   )
 }
 
-function EncounterSearch({ searchQuery, onSelectMember, onOpenClaim }) {
+function EncounterSearch({ searchQuery, onSearchChange, onSelectMember, onOpenClaim }) {
+  const { claimsData } = useAppData()
+  const [statusFilter, setStatusFilter] = useState('All Statuses')
+  const [currentPage, setCurrentPage] = useState(1)
+  const pageSize = 10
   const normalizedQuery = searchQuery.trim().toLowerCase()
-  const filteredEncounters = normalizedQuery
-    ? claimsData
-      .filter((claim) => (
+  const statusOptions = useMemo(() => ['All Statuses', ...uniqueValues(claimsData, 'status')], [claimsData])
+  const filteredEncounters = useMemo(() => claimsData.filter((claim) => {
+      const matchesSearch = !normalizedQuery || (
         claim.patient.toLowerCase().includes(normalizedQuery) ||
         claim.memberId.toLowerCase().includes(normalizedQuery)
-      ))
-      .slice(0, 50)
-    : recentEncounters
+      )
+      const matchesStatus = statusFilter === 'All Statuses' || claim.status === statusFilter
+      return matchesSearch && matchesStatus
+    }), [claimsData, normalizedQuery, statusFilter])
+  const pageCount = Math.max(1, Math.ceil(filteredEncounters.length / pageSize))
+  const safePage = Math.min(currentPage, pageCount)
+  const pagedEncounters = useMemo(
+    () => filteredEncounters.slice((safePage - 1) * pageSize, safePage * pageSize),
+    [filteredEncounters, safePage],
+  )
+
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [searchQuery, statusFilter])
 
   return (
     <>
@@ -846,18 +1043,51 @@ function EncounterSearch({ searchQuery, onSelectMember, onOpenClaim }) {
           <h1>Patient 360</h1>
           <p>Recent encounters from the current 837 claims database</p>
         </div>
-        <div className="data-stamp">
-          Data as of {formatDate(defaultDateRange.to)}
-          <RefreshCw size={15} />
+        <div className="patient-grid-controls">
+          <label className="claims-directory-search patient-search-inline">
+            <Search size={18} />
+            <input
+              type="search"
+              value={searchQuery}
+              onChange={(event) => onSearchChange(event.target.value)}
+              placeholder="Search patient name or member ID"
+              aria-label="Search patients by name or member ID"
+            />
+          </label>
+          <label className="claims-time-filter">
+            <span>Status:</span>
+            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+              {statusOptions.map((option) => (
+                <option key={option}>{option}</option>
+              ))}
+            </select>
+            <ChevronDown size={16} />
+          </label>
         </div>
       </div>
 
-      <RecentEncounters claims={filteredEncounters} onSelectMember={onSelectMember} onOpenClaim={onOpenClaim} />
+      <RecentEncounters
+        title="All Encounters"
+        claims={pagedEncounters}
+        onSelectMember={onSelectMember}
+        onOpenClaim={onOpenClaim}
+        emptyMessage="No encounters match that patient name, member ID, or status."
+        footer={(
+          <ClaimsTableFooter
+            currentPage={safePage}
+            pageCount={pageCount}
+            pageSize={pageSize}
+            totalCount={filteredEncounters.length}
+            onPageChange={setCurrentPage}
+          />
+        )}
+      />
     </>
   )
 }
 
 function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMember, onOpenClaim }) {
+  const { defaultDateRange } = useAppData()
   const latestClaim = selectedClaim || member.latestClaim
   const memberStats = buildMemberStats(member)
 
@@ -949,7 +1179,7 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
             <TrendCard member={member} />
           </div>
 
-          <RecentEncounters claims={member.claims.slice(0, 8)} onSelectMember={onSelectMember} onOpenClaim={onOpenClaim} />
+          <RecentEncounters title="Member Encounters" claims={member.claims.slice(0, 8)} onSelectMember={onSelectMember} onOpenClaim={onOpenClaim} />
           <ClaimTimeline claim={latestClaim} />
         </div>
 
@@ -962,13 +1192,18 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
   )
 }
 
-function ExecutiveDashboard({ searchQuery, onSearchChange, onSearchSubmit, onOpenClaim, onViewAllClaims }) {
+function ExecutiveDashboard({ onOpenClaim, onViewAllClaims }) {
+  const { claimsData, defaultDateRange, payerOptions, planOptions, providerOptions } = useAppData()
   const [openMenu, setOpenMenu] = useState(null)
   const [dateRange, setDateRange] = useState(defaultDateRange)
   const [payer, setPayer] = useState('All Payers')
   const [plan, setPlan] = useState('All Plans')
   const [providerGroup, setProviderGroup] = useState('All Groups')
   const [filters, setFilters] = useState({ deniedOnly: false, highValue: false })
+
+  useEffect(() => {
+    setDateRange(defaultDateRange)
+  }, [defaultDateRange])
 
   const filteredClaims = claimsData.filter((claim) => {
     if (claim.dos < dateRange.from || claim.dos > dateRange.to) return false
@@ -993,31 +1228,10 @@ function ExecutiveDashboard({ searchQuery, onSearchChange, onSearchSubmit, onOpe
   return (
     <section className="executive-page">
       <header className="executive-topbar">
-        <form
-          className="dashboard-search-panel home-topbar-search"
-          onSubmit={(event) => {
-            event.preventDefault()
-            const formData = new FormData(event.currentTarget)
-            onSearchSubmit?.(formData.get('patientSearch')?.toString() ?? '')
-          }}
-        >
-          <Search size={22} />
-          <input
-            name="patientSearch"
-            type="search"
-            value={searchQuery}
-            onChange={(event) => onSearchChange(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault()
-                onSearchSubmit?.(event.currentTarget.value)
-              }
-            }}
-            placeholder="Search patients by name or member ID"
-            aria-label="Search patients by name or member ID"
-          />
-          <kbd>/</kbd>
-        </form>
+        <div className="topbar-welcome executive-welcome">
+          <span>Welcome Back</span>
+          <strong>Alex Admin</strong>
+        </div>
         <div className="executive-actions">
           <button className="icon-button has-alert" type="button" aria-label="Notifications">
             <Bell size={21} />
@@ -1172,6 +1386,7 @@ function MetricCard({ label, value, delta, dir = 'up', note, compact = false }) 
 }
 
 function SelectedClaimDetail({ claim }) {
+  const payerContact = getPayerContact(claim.payer)
   const financialSummary = [
     { label: 'Total Charge', value: formatCurrency(claim.totalCharge), note: `${claim.units || 1} unit(s) billed`, tone: 'blue' },
     { label: 'Allowed', value: formatCurrency(claim.allowed), note: `${formatCurrency(claim.adjustment)} adjusted`, tone: 'teal' },
@@ -1192,6 +1407,7 @@ function SelectedClaimDetail({ claim }) {
     ['Rendering Provider', claim.renderingProvider],
     ['Rendering NPI', claim.renderingProviderNpi],
     ['Payer', claim.payer],
+    ['Payer Contact', payerContact],
     ['Payer ID', claim.payerId],
   ]
   const clinicalFacts = [
@@ -1207,15 +1423,18 @@ function SelectedClaimDetail({ claim }) {
     <div className="claim-detail-stack">
       <Card className="claim-hero-card">
         <div className="claim-hero-main">
-          <span className={`claim-status ${statusClass(claim.status)}`} title={claim.status}>{statusLabel(claim.status)}</span>
           <h1>{claim.number}</h1>
-          <p>{claim.patient} · {claim.memberId} · {claim.payer}</p>
+          <p>{claim.patient} · {claim.memberId} · {claim.payer} · {payerContact}</p>
         </div>
         <div className="claim-hero-meta">
           <span>DOS</span>
           <strong>{formatDate(claim.dos)}</strong>
           <span>Submitted</span>
           <strong>{formatDate(claim.submissionDate)}</strong>
+          <span>Status</span>
+          <strong className="claim-hero-status">
+            <span className={`claim-status ${statusClass(claim.status)}`} title={claim.status}>{statusLabel(claim.status)}</span>
+          </strong>
         </div>
       </Card>
 
@@ -1446,10 +1665,18 @@ function PaymentOverview({ member }) {
 function TrendCard({ member }) {
   const latestClaims = member.claims.slice(0, 6).reverse()
   const maxValue = Math.max(...latestClaims.map((claim) => Math.max(claim.paid, claim.patientResp)), 1)
+  const axisMax = Math.ceil(maxValue / 100) * 100 || 100
+  const yScale = (value) => 182 - (value / axisMax) * 140
+  const axisTicks = [
+    { label: formatCompactCurrency(axisMax), y: 42 },
+    { label: formatCompactCurrency(axisMax * 0.66), y: 88 },
+    { label: formatCompactCurrency(axisMax * 0.33), y: 134 },
+    { label: '$0', y: 182 },
+  ]
   const points = latestClaims.map((claim, index) => {
     const x = 90 + index * 100
-    const paidY = 170 - (claim.paid / maxValue) * 122
-    const respY = 170 - (claim.patientResp / maxValue) * 122
+    const paidY = yScale(claim.paid)
+    const respY = yScale(claim.patientResp)
     return { claim, x, paidY, respY }
   })
   const paidPath = points.map((point, index) => `${index === 0 ? 'M' : 'L'}${point.x} ${point.paidY}`).join(' ')
@@ -1463,7 +1690,7 @@ function TrendCard({ member }) {
         <span><span className="line-key blue"></span>Patient Responsibility</span>
       </div>
       <svg className="trend-svg" viewBox="0 0 640 220" role="img" aria-label="Paid and patient responsibility trend">
-        {[42, 82, 122, 162].map((y) => (
+        {axisTicks.map(({ y }) => (
           <line key={y} x1="58" x2="608" y1={y} y2={y} className="grid-line" />
         ))}
         <line x1="58" x2="608" y1="182" y2="182" className="axis-line" />
@@ -1483,18 +1710,25 @@ function TrendCard({ member }) {
         {points.map((point) => (
           <text key={point.claim.number} x={point.x} y="206" textAnchor="middle" className="x-label">{formatDate(point.claim.dos).replace(', 2026', '')}</text>
         ))}
-        {['$6K', '$4K', '$2K', '$0'].map((label, index) => (
-          <text key={label} x="34" y={46 + index * 40} textAnchor="middle" className="y-label">{label}</text>
+        {axisTicks.map(({ label, y }) => (
+          <text key={`${label}-${y}`} x="34" y={y + 4} textAnchor="middle" className="y-label">{label}</text>
         ))}
       </svg>
     </Card>
   )
 }
 
-function RecentEncounters({ claims, onSelectMember, onOpenClaim }) {
+function RecentEncounters({
+  claims,
+  title = 'All Encounters',
+  onSelectMember,
+  onOpenClaim,
+  emptyMessage = 'No encounters match that patient name or member ID.',
+  footer,
+}) {
   return (
     <Card className="encounters-card">
-      <SectionTitle title="Recent Encounters" action="View All Encounters" />
+      <SectionTitle title={title} />
       <div className="table-wrap">
         <table className="data-table encounters-table">
           <thead>
@@ -1539,12 +1773,13 @@ function RecentEncounters({ claims, onSelectMember, onOpenClaim }) {
               </tr>
             )) : (
               <tr>
-                <td className="empty-table-cell" colSpan="10">No patients match that name or member ID.</td>
+                <td className="empty-table-cell" colSpan="10">{emptyMessage}</td>
               </tr>
             )}
           </tbody>
         </table>
       </div>
+      {footer}
     </Card>
   )
 }
@@ -1620,7 +1855,8 @@ function ProviderInformation({ claim }) {
 }
 
 function ProviderKpis({ claim }) {
-  const providerKpis = buildProviderKpis(claim)
+  const { claimsData } = useAppData()
+  const providerKpis = buildProviderKpis(claim, claimsData)
 
   return (
     <Card className="provider-kpis">
@@ -1682,8 +1918,9 @@ function SelectMenu({ label, value, menuKey, openMenu, setOpenMenu, options, onC
 }
 
 function DateMenu({ dateRange, onChange }) {
-  const latestMonthStart = `${defaultDateRange.to.slice(0, 8)}01`
-  const latestYearStart = `${defaultDateRange.to.slice(0, 4)}-01-01`
+  const { defaultDateRange } = useAppData()
+  const latestMonthStart = defaultDateRange.to ? `${defaultDateRange.to.slice(0, 8)}01` : ''
+  const latestYearStart = defaultDateRange.to ? `${defaultDateRange.to.slice(0, 4)}-01-01` : ''
   const presets = [
     ['Full Range', defaultDateRange.from, defaultDateRange.to],
     ['Latest Month', latestMonthStart, defaultDateRange.to],
@@ -1822,6 +2059,7 @@ function AtRiskClaimsQueue({
   title = 'At-Risk Claims Queue',
   subtitle,
   emptyMessage = 'No at-risk claims match the current filters.',
+  footer,
 }) {
   return (
     <Card className="risk-queue-card">
@@ -1883,6 +2121,7 @@ function AtRiskClaimsQueue({
           </tbody>
         </table>
       </div>
+      {footer}
     </Card>
   )
 }
@@ -1896,7 +2135,7 @@ function RiskBadge({ level, score }) {
 }
 
 function RecentClaims({
-  claims = recentClaims,
+  claims,
   title = 'Recent Claims',
   featured = false,
   compact = false,
@@ -1905,6 +2144,8 @@ function RecentClaims({
   emptyMessage = 'No claims match the current filters.',
   footer,
 }) {
+  const { recentClaims } = useAppData()
+  const tableClaims = claims || recentClaims
   const emptyColSpan = compact ? 8 : 10
 
   return (
@@ -1927,7 +2168,7 @@ function RecentClaims({
             </tr>
           </thead>
           <tbody>
-            {claims.length ? claims.map((claim) => (
+            {tableClaims.length ? tableClaims.map((claim) => (
               <tr key={claim.number}>
                 <td>
                   <button className="claim-link-button" type="button" onClick={() => onOpenClaim?.(claim)}>

@@ -6,21 +6,16 @@
   "scripts": {
     "dev": "npm run frontend",
     "frontend": "vite --config frontend/vite.config.js",
-    "backend": "node --watch backend/server.js",
-    "backend:start": "node backend/server.js",
+    "backend": "python3 -m backend.app",
+    "backend:start": "gunicorn backend.app:app --bind 0.0.0.0:${PORT:-4000}",
     "dev:all": "concurrently -k -n backend,frontend -c blue,green \"npm:backend\" \"npm:frontend\"",
-    "import:mongo": "node backend/importClaims.js",
+    "import:mongo": "python3 -m backend.import_claims",
     "build": "vite build --config frontend/vite.config.js",
     "lint": "oxlint",
     "preview": "vite preview --config frontend/vite.config.js"
   },
   "dependencies": {
-    "cors": "^2.8.6",
-    "csv-parse": "^7.0.1",
-    "dotenv": "^17.4.2",
-    "express": "^5.2.1",
     "lucide-react": "^1.23.0",
-    "mongodb": "^7.5.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },

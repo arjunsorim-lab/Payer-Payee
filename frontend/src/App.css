@@ -126,6 +126,23 @@ button {
   background: #f1f6fd;
 }
 
+.nav-link.disabled,
+.nav-link:disabled {
+  cursor: default;
+  color: #7b8799;
+  opacity: 0.72;
+}
+
+.nav-link.disabled:hover,
+.nav-link:disabled:hover {
+  background: transparent;
+}
+
+.nav-link.disabled svg,
+.nav-link:disabled svg {
+  color: #8a95a8;
+}
+
 .nav-link.active {
   background: #e8f1ff;
   color: var(--blue-dark);
@@ -220,6 +237,28 @@ kbd {
   align-items: center;
   gap: 14px;
   min-width: 0;
+}
+
+.topbar-welcome {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.topbar-welcome span {
+  color: #64708a;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.topbar-welcome strong {
+  color: #10182f;
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.executive-welcome strong {
+  font-size: 21px;
 }
 
 .topbar-spacer {
@@ -321,6 +360,19 @@ kbd {
   margin-bottom: 14px;
 }
 
+.patient-grid-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  min-width: min(700px, 55vw);
+}
+
+.patient-search-inline {
+  flex: 1 1 360px;
+  min-width: 260px;
+}
+
 .search-results-header h1 {
   color: #10182f;
   font-size: 24px;
@@ -389,6 +441,12 @@ kbd {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
+}
+
+.state-card {
+  padding: 28px;
+  color: #33415c;
+  font-weight: 800;
 }
 
 .member-card {
@@ -970,6 +1028,18 @@ dd {
   color: #111a34;
   font-size: 13px;
   text-align: right;
+}
+
+.claim-hero-status {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.claim-hero-status .claim-status {
+  max-width: 190px;
+  justify-content: center;
+  white-space: normal;
+  text-align: center;
 }
 
 .claim-financial-grid {
@@ -1616,13 +1686,14 @@ dd {
 .dashboard-header-card {
   width: 100%;
   min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(310px, 0.9fr) minmax(760px, 1.8fr);
-  align-items: start;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
   gap: 22px;
 }
 
 .dashboard-title-group {
+  flex: 0 1 420px;
   min-width: 0;
   padding-top: 3px;
 }
@@ -1694,22 +1765,42 @@ dd {
 }
 
 .dashboard-controls {
-  justify-self: end;
-  width: 100%;
-  display: grid;
-  grid-template-columns:
-    minmax(260px, 1.35fr)
-    minmax(120px, 0.72fr)
-    minmax(120px, 0.72fr)
-    minmax(146px, 0.82fr)
-    minmax(104px, 0.58fr)
-    64px
-    112px;
+  flex: 1 1 920px;
+  display: flex;
+  flex-wrap: wrap;
   align-items: stretch;
-  justify-content: end;
+  justify-content: flex-end;
   gap: 10px;
   min-width: 0;
   max-width: 1120px;
+}
+
+.dashboard-controls .control-wrap {
+  padding-left: 0;
+}
+
+.dashboard-controls .date-control {
+  flex: 1 1 300px;
+}
+
+.dashboard-controls .select-control {
+  flex: 0 1 142px;
+}
+
+.dashboard-controls .provider-select {
+  flex-basis: 174px;
+}
+
+.dashboard-controls .filter-control {
+  flex: 0 0 116px;
+}
+
+.dashboard-controls .text-button {
+  flex: 0 0 64px;
+}
+
+.dashboard-controls .export-button {
+  flex: 0 0 118px;
 }
 
 .control-wrap {
@@ -2884,6 +2975,12 @@ dd {
     justify-content: flex-start;
   }
 
+  .patient-grid-controls {
+    width: 100%;
+    min-width: 0;
+    justify-content: flex-start;
+  }
+
   .claim-financial-grid,
   .forecast-money-grid,
   .prediction-summary-grid,
@@ -2956,6 +3053,7 @@ dd {
   }
 
   .claims-directory-controls,
+  .patient-grid-controls,
   .prediction-controls,
   .claims-table-footer {
     align-items: stretch;

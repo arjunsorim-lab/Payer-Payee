@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: payer-payee
+    runtime: python
+    plan: free
+    autoDeploy: true
+    buildCommand: pip install -r backend/requirements.txt && npm ci && npm run build
+    startCommand: gunicorn backend.app:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: MONGODB_DB
+        value: PayerPayee
+      - key: CORS_ORIGIN
+        value: https://payer-payee-1.onrender.com
+      - key: MONGODB_URI
+        sync: false

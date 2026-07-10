@@ -1,9 +1,10 @@
 import os
 import re
 from datetime import datetime
+from pathlib import Path
 
 from bson import ObjectId
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 try:
@@ -11,7 +12,9 @@ try:
 except ImportError:
     from db import connect_mongo, get_mongo_config
 
-app = Flask(__name__)
+FRONTEND_DIST_DIR = Path(__file__).resolve().parent.parent / "dist"
+
+app = Flask(__name__, static_folder=None)
 CORS(app, origins=os.getenv("CORS_ORIGIN", "*").split(","))
 
 
@@ -318,6 +321,30 @@ def get_claim_prediction(claim_number):
         "claim": claim,
         "prediction": stored_or_basic_prediction(prediction_doc, claim),
     })
+
+
+@app.get("/")
+def serve_frontend_index():
+    index_file = FRONTEND_DIST_DIR / "index.html"
+    if not index_file.is_file():
+        return json_response({"message": "Frontend build not found. Run npm run build before starting the server."}, 404)
+    return send_from_directory(FRONTEND_DIST_DIR, "index.html")
+
+
+@app.get("/<path:asset_path>")
+def serve_frontend_asset(asset_path):
+    if asset_path.startswith("api/"):
+        return json_response({"message": "Not found"}, 404)
+
+    requested_file = FRONTEND_DIST_DIR / asset_path
+    if requested_file.is_file():
+        return send_from_directory(FRONTEND_DIST_DIR, asset_path)
+
+    index_file = FRONTEND_DIST_DIR / "index.html"
+    if index_file.is_file():
+        return send_from_directory(FRONTEND_DIST_DIR, "index.html")
+
+    return json_response({"message": "Frontend build not found. Run npm run build before starting the server."}, 404)
 
 
 @app.errorhandler(Exception)

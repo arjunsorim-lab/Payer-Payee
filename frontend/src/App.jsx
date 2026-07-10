@@ -79,7 +79,12 @@ const navSections = [
   },
 ]
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:4000'
+const RUNTIME_API_BASE_URL = typeof window !== 'undefined' ? window.__PAYER_PAYEE_API_URL__ : ''
+const API_BASE_URL = (
+  RUNTIME_API_BASE_URL
+  || import.meta.env.VITE_API_BASE_URL
+  || (import.meta.env.DEV ? 'http://127.0.0.1:4000' : '')
+).replace(/\/$/, '')
 const EMPTY_DATE_RANGE = { from: '', to: '' }
 const CLICKABLE_NAV_LABELS = new Set(['Patient 360', 'Predictions', 'Claims'])
 const VALID_VIEWS = new Set(['home', 'member', 'predictions', 'claims'])

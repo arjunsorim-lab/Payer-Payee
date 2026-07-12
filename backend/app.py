@@ -6,6 +6,7 @@ from pathlib import Path
 from bson import ObjectId
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
+from werkzeug.exceptions import HTTPException
 
 try:
     from .db import connect_mongo, get_mongo_config
@@ -349,6 +350,8 @@ def serve_frontend_asset(asset_path):
 
 @app.errorhandler(Exception)
 def handle_error(error):
+    if isinstance(error, HTTPException):
+        return json_response({"message": error.description}, error.code)
     app.logger.exception(error)
     return json_response({"message": "Internal server error"}, 500)
 

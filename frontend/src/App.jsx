@@ -80,11 +80,13 @@ const navSections = [
 ]
 
 const RUNTIME_API_BASE_URL = typeof window !== 'undefined' ? window.__PAYER_PAYEE_API_URL__ : ''
-const API_BASE_URL = (
+const CONFIGURED_API_BASE_URL = (
   RUNTIME_API_BASE_URL
   || import.meta.env.VITE_API_BASE_URL
-  || (import.meta.env.DEV ? 'http://127.0.0.1:4000' : '')
 ).replace(/\/$/, '')
+const LOCAL_API_BASE_URL = 'http://127.0.0.1:4000'
+const RENDER_API_BASE_URL = 'https://payer-payee.onrender.com'
+const CLAIMS_CACHE_KEY = 'payerpayee.claims.v1'
 const EMPTY_DATE_RANGE = { from: '', to: '' }
 const CLICKABLE_NAV_LABELS = new Set(['Patient 360', 'Predictions', 'Claims'])
 const VALID_VIEWS = new Set(['home', 'member', 'predictions', 'claims'])
@@ -113,10 +115,51 @@ function useAppData() {
 }
 
 async function fetchJson(path) {
-  const response = await fetch(`${API_BASE_URL}${path}`)
-  if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`)
+  const candidates = [...new Set([
+    CONFIGURED_API_BASE_URL,
+    import.meta.env.DEV ? LOCAL_API_BASE_URL : window.location.origin,
+    import.meta.env.DEV ? '' : RENDER_API_BASE_URL,
+  ].filter(Boolean))]
+  let lastError = new Error('Backend API is unavailable')
+
+  for (const baseUrl of candidates) {
+    try {
+      const response = await fetch(`${baseUrl}${path}`, {
+        headers: { Accept: 'application/json' },
+      })
+      if (!response.ok) {
+        lastError = new Error(`Request failed: ${response.status}`)
+        continue
+      }
+      return await response.json()
+    } catch (error) {
+      lastError = error
+    }
   }
+
+  throw lastError
+}
+
+function readClaimsCache() {
+  try {
+    const cached = JSON.parse(window.localStorage.getItem(CLAIMS_CACHE_KEY) || 'null')
+    return Array.isArray(cached?.items) ? cached.items : []
+  } catch {
+    return []
+  }
+}
+
+function writeClaimsCache(items) {
+  try {
+    window.localStorage.setItem(CLAIMS_CACHE_KEY, JSON.stringify({ items, savedAt: Date.now() }))
+  } catch {
+    // Browsers may disable storage; the bundled snapshot remains available.
+  }
+}
+
+async function loadBundledClaims() {
+  const response = await fetch('/data/claims-fallback.json', { headers: { Accept: 'application/json' } })
+  if (!response.ok) throw new Error(`Bundled data request failed: ${response.status}`)
   return response.json()
 }
 
@@ -356,11 +399,12 @@ function App() {
   const [selectedClaim, setSelectedClaim] = useState(null)
   const [selectedPredictionClaim, setSelectedPredictionClaim] = useState(null)
   const [searchQuery, setSearchQuery] = useState('')
-  const [claimsData, setClaimsData] = useState([])
+  const [claimsData, setClaimsData] = useState(() => readClaimsCache())
   const [dataLoading, setDataLoading] = useState(true)
   const [dataError, setDataError] = useState('')
   const dataModel = useMemo(() => buildDataModel(claimsData), [claimsData])
   const routeInitializedRef = useRef(false)
+  const initialClaimsRef = useRef(claimsData)
 
   const setRouteState = (route, historyMode = 'push') => {
     const nextRoute = {
@@ -392,15 +436,35 @@ function App() {
   useEffect(() => {
     let active = true
 
+    const bundledClaims = initialClaimsRef.current.length
+      ? Promise.resolve(initialClaimsRef.current)
+      : loadBundledClaims().then((items) => {
+          if (active) {
+            setClaimsData(items)
+            writeClaimsCache(items)
+            setDataError('')
+            setDataLoading(false)
+          }
+          return items
+        })
+
     fetchJson('/api/claims?limit=2000')
       .then((payload) => {
         if (!active) return
-        setClaimsData(payload.items || [])
+        const items = payload.items || []
+        setClaimsData(items)
+        writeClaimsCache(items)
         setDataError('')
       })
-      .catch((error) => {
+      .catch(async (apiError) => {
         if (!active) return
-        setDataError(error.message)
+        try {
+          const items = await bundledClaims
+          if (!active) return
+          if (items.length) setDataError('')
+        } catch {
+          if (active && !initialClaimsRef.current.length) setDataError(apiError.message)
+        }
       })
       .finally(() => {
         if (active) setDataLoading(false)
@@ -791,6 +855,12 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
       if (sortBy === 'Predicted Paid') {
         return b.prediction.money.predictedPaid - a.prediction.money.predictedPaid
       }
+      if (sortBy === 'Adjustment Risk') {
+        return b.prediction.risks.adjustment.score - a.prediction.risks.adjustment.score
+      }
+      if (sortBy === 'Patient Balance') {
+        return b.prediction.money.predictedPatientResp - a.prediction.money.predictedPatientResp
+      }
       if (sortBy === 'Newest DOS') {
         return b.claim.dos.localeCompare(a.claim.dos)
       }
@@ -800,6 +870,10 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
   const summary = useMemo(
     () => buildPredictionSummary(filteredRows.map(({ claim }) => claim), claimsData),
     [filteredRows, claimsData],
+  )
+  const predictionCatalog = useMemo(
+    () => buildPredictionCatalog(filteredRows),
+    [filteredRows],
   )
   const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize))
   const safePage = Math.min(currentPage, pageCount)
@@ -823,7 +897,7 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
             <div className="predictions-header">
               <div>
                 <h1>Predictions</h1>
-                <p>Payment forecasts and at-risk claim worklists generated from the current 837 claim data.</p>
+                <p>Ten claim predictions generated from the current 837 claim data across patient, provider, doctor, and insurance views.</p>
               </div>
               <div className="prediction-controls">
                 <label className="prediction-select">
@@ -851,6 +925,8 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
                   <select value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
                     <option>Highest Risk</option>
                     <option>Predicted Paid</option>
+                    <option>Adjustment Risk</option>
+                    <option>Patient Balance</option>
                     <option>Newest DOS</option>
                   </select>
                   <ChevronDown size={16} />
@@ -858,6 +934,7 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
               </div>
             </div>
 
+            <PredictionCatalog catalog={predictionCatalog} />
             <PredictionSummary summary={summary} />
             <AtRiskClaimsQueue
               title="Prediction Queue"
@@ -875,6 +952,7 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
                 />
               )}
             />
+            <PredictionMethodPanel totalCount={filteredRows.length} />
           </>
         )}
       </section>
@@ -886,6 +964,10 @@ function PredictionDetailPage({ claim, onBackToPredictions }) {
   const { claimsData } = useAppData()
   const prediction = predictClaim(claim, claimsData)
   const topDrivers = prediction.riskDrivers.slice(0, 6)
+  const detailCatalog = useMemo(
+    () => buildPredictionCatalog([{ claim, prediction }], { detailMode: true }),
+    [claim, prediction],
+  )
 
   return (
     <>
@@ -948,6 +1030,8 @@ function PredictionDetailPage({ claim, onBackToPredictions }) {
         </ol>
       </Card>
 
+      <PredictionCatalog catalog={detailCatalog} title="All 10 Claim Predictions" compact />
+
       <SelectedClaimDetail claim={claim} />
     </>
   )
@@ -957,6 +1041,205 @@ function riskLevelForScore(score) {
   if (score >= 50) return 'High'
   if (score >= 35) return 'Medium'
   return 'Low'
+}
+
+function getDriver(prediction, label) {
+  return prediction.riskDrivers.find((driver) => driver.label === label) || { label, score: 0, reason: '' }
+}
+
+function highestPredictionRow(rows, selector) {
+  return rows.reduce((best, row) => {
+    if (!best) return row
+    return selector(row) > selector(best) ? row : best
+  }, null)
+}
+
+function buildOutcomeSummary(rows) {
+  const outcomeCounts = rows.reduce((counts, { prediction }) => {
+    const outcome = prediction.outcome.likely
+    counts.set(outcome, (counts.get(outcome) || 0) + 1)
+    return counts
+  }, new Map())
+  return [...outcomeCounts.entries()].sort((a, b) => b[1] - a[1])[0] || ['No claims', 0]
+}
+
+function emptyPredictionCatalog() {
+  return [
+    'Money forecast',
+    'Denial risk + likely reason',
+    'Claim outcome',
+    'High adjustment / write-off risk',
+    'Patient responsibility + collection risk',
+    'Eligibility / auth / referral failure',
+    'Secondary / COB / forwarded payer risk',
+    'Repeat claim / avoidable cost risk',
+    'Provider performance risk',
+    'Resubmission success',
+  ].map((title, index) => ({
+    number: String(index + 1).padStart(2, '0'),
+    title,
+    view: index === 4 ? 'Patient view' : index === 7 ? 'Doctor view' : [1, 2, 5, 6].includes(index) ? 'Insurance view' : 'Provider view',
+    level: 'Low',
+    score: 0,
+    metric: 'No matching claims',
+    claimLine: 'Adjust filters to populate this prediction.',
+    providerThinking: 'Provider thinking: no current claim data is available for this prediction slice.',
+    action: 'Broaden filters or import more 837/835 history.',
+  }))
+}
+
+function buildPredictionCatalog(rows, options = {}) {
+  if (!rows.length) return emptyPredictionCatalog()
+
+  const detailMode = options.detailMode || rows.length === 1
+  const totalPredictedPaid = rows.reduce((total, { prediction }) => total + prediction.money.predictedPaid, 0)
+  const totalAdjustment = rows.reduce((total, { prediction }) => total + prediction.money.predictedAdjustment, 0)
+  const totalPatientBalance = rows.reduce((total, { prediction }) => total + prediction.money.predictedPatientResp, 0)
+  const [topOutcome, topOutcomeCount] = buildOutcomeSummary(rows)
+
+  const moneyRow = highestPredictionRow(rows, ({ prediction }) => prediction.money.predictedPaid)
+  const denialRow = highestPredictionRow(rows, ({ prediction }) => prediction.risks.denial.score)
+  const outcomeRow = highestPredictionRow(rows, ({ prediction }) => prediction.risks.overall.score)
+  const adjustmentRow = highestPredictionRow(rows, ({ prediction }) => prediction.risks.adjustment.score)
+  const collectionRow = highestPredictionRow(rows, ({ prediction }) => prediction.risks.collection.score)
+  const authRow = highestPredictionRow(rows, ({ prediction }) => Math.max(getDriver(prediction, 'Authorization').score, getDriver(prediction, 'Referral').score))
+  const cobRow = highestPredictionRow(rows, ({ prediction }) => prediction.risks.cob.score)
+  const repeatRow = highestPredictionRow(rows, ({ prediction }) => prediction.risks.repeat.score)
+  const providerRow = highestPredictionRow(rows, ({ prediction }) => prediction.risks.provider.score)
+  const resubmitRow = highestPredictionRow(
+    rows.filter(({ prediction }) => prediction.resubmissionSuccess),
+    ({ prediction }) => prediction.resubmissionSuccess?.score || 0,
+  ) || denialRow
+
+  const claimLine = (row) => `${row.claim.number} · ${row.claim.patient} · ${row.claim.payer}`
+  const scoreLine = (score) => `${Math.round(score)}%`
+  const topFix = (row) => row.prediction.fixes[0] || 'Submit with standard claim review.'
+
+  return [
+    {
+      number: '01',
+      title: 'Money forecast',
+      view: 'Provider view',
+      level: moneyRow.prediction.confidence,
+      score: moneyRow.prediction.risks.overall.score,
+      metric: detailMode ? formatCurrency(moneyRow.prediction.money.predictedPaid) : formatCurrency(totalPredictedPaid),
+      claimLine: claimLine(moneyRow),
+      providerThinking: `Provider thinking: expected payer cash is based on ${moneyRow.prediction.peerCount.toLocaleString()} peer claim(s) matched by ${moneyRow.prediction.basis}.`,
+      action: `Plan revenue follow-up around ${formatCurrency(moneyRow.prediction.money.predictedPaid)} expected paid and ${formatCurrency(moneyRow.prediction.money.predictedAdjustment)} expected adjustment.`,
+    },
+    {
+      number: '02',
+      title: 'Denial risk + likely reason',
+      view: 'Insurance view',
+      level: denialRow.prediction.risks.denial.level,
+      score: denialRow.prediction.risks.denial.score,
+      metric: `${scoreLine(denialRow.prediction.risks.denial.score)} denial risk`,
+      claimLine: claimLine(denialRow),
+      providerThinking: `Provider thinking: payer denial exposure is driven by ${denialRow.prediction.risks.denial.reason}`,
+      action: topFix(denialRow),
+    },
+    {
+      number: '03',
+      title: 'Claim outcome',
+      view: 'Insurance view',
+      level: outcomeRow.prediction.risks.overall.level,
+      score: outcomeRow.prediction.risks.overall.score,
+      metric: detailMode ? outcomeRow.prediction.outcome.likely : `${topOutcome} (${topOutcomeCount})`,
+      claimLine: claimLine(outcomeRow),
+      providerThinking: `Provider thinking: likely outcome is inferred from peer status mix, denial score, COB signal, and filing indicator.`,
+      action: outcomeRow.prediction.outcome.likely.includes('review') ? topFix(outcomeRow) : 'Release standard claims and monitor payer response.',
+    },
+    {
+      number: '04',
+      title: 'High adjustment / write-off risk',
+      view: 'Provider view',
+      level: adjustmentRow.prediction.risks.adjustment.level,
+      score: adjustmentRow.prediction.risks.adjustment.score,
+      metric: detailMode ? formatCurrency(adjustmentRow.prediction.money.predictedAdjustment) : formatCurrency(totalAdjustment),
+      claimLine: claimLine(adjustmentRow),
+      providerThinking: `Provider thinking: expected write-off is ${adjustmentRow.prediction.money.adjustmentRate}% of charge against this payer/service pattern.`,
+      action: `Compare ${adjustmentRow.claim.cptCode} charge to payer contract and allowed-rate history before final billing.`,
+    },
+    {
+      number: '05',
+      title: 'Patient responsibility + collection risk',
+      view: 'Patient view',
+      level: collectionRow.prediction.risks.collection.level,
+      score: collectionRow.prediction.risks.collection.score,
+      metric: detailMode ? formatCurrency(collectionRow.prediction.money.predictedPatientResp) : formatCurrency(totalPatientBalance),
+      claimLine: claimLine(collectionRow),
+      providerThinking: `Provider thinking: patient balance risk affects collections, estimates, and payment-plan timing for ${collectionRow.claim.memberId}.`,
+      action: `Prepare patient estimate for ${formatCurrency(collectionRow.prediction.money.predictedPatientResp)} and review payment outreach.`,
+    },
+    {
+      number: '06',
+      title: 'Eligibility / auth / referral failure',
+      view: 'Insurance view',
+      level: riskLevelForScore(Math.max(getDriver(authRow.prediction, 'Authorization').score, getDriver(authRow.prediction, 'Referral').score)),
+      score: Math.max(getDriver(authRow.prediction, 'Authorization').score, getDriver(authRow.prediction, 'Referral').score),
+      metric: `${authRow.claim.priorAuth ? 'Auth present' : 'Auth missing'} · ${authRow.claim.referral ? 'Referral present' : 'Referral missing'}`,
+      claimLine: claimLine(authRow),
+      providerThinking: `Provider thinking: payer rules should be cleared before submission because missing auth/referral can delay or deny revenue.`,
+      action: topFix(authRow),
+    },
+    {
+      number: '07',
+      title: 'Secondary / COB / forwarded payer risk',
+      view: 'Insurance view',
+      level: cobRow.prediction.risks.cob.level,
+      score: cobRow.prediction.risks.cob.score,
+      metric: `${scoreLine(cobRow.prediction.risks.cob.score)} COB risk`,
+      claimLine: claimLine(cobRow),
+      providerThinking: `Provider thinking: payer order and forwarded status affect cash timing and downstream rework.`,
+      action: `Verify payer sequence for ${cobRow.claim.memberId} before release to avoid avoidable forwarding delays.`,
+    },
+    {
+      number: '08',
+      title: 'Repeat claim / avoidable cost risk',
+      view: 'Doctor view',
+      level: repeatRow.prediction.risks.repeat.level,
+      score: repeatRow.prediction.risks.repeat.score,
+      metric: `${scoreLine(repeatRow.prediction.risks.repeat.score)} repeat risk`,
+      claimLine: claimLine(repeatRow),
+      providerThinking: `Provider thinking: repeat utilization creates avoidable cost exposure and care-management opportunity for ${repeatRow.claim.memberId}.`,
+      action: getDriver(repeatRow.prediction, 'Repeat').score ? repeatCareActionText(repeatRow.claim) : 'Monitor longitudinal utilization pattern.',
+    },
+    {
+      number: '09',
+      title: 'Provider performance risk',
+      view: 'Provider view',
+      level: providerRow.prediction.risks.provider.level,
+      score: providerRow.prediction.risks.provider.score,
+      metric: `${scoreLine(providerRow.prediction.risks.provider.score)} provider risk`,
+      claimLine: `${providerRow.claim.billingProvider} · ${providerRow.claim.payer}`,
+      providerThinking: `Provider thinking: denial and adjustment history should guide coding review, contract review, and provider education.`,
+      action: `Review ${providerRow.claim.billingProvider}'s coding pattern for ${providerRow.claim.payer} and ${providerRow.claim.cptCode}.`,
+    },
+    {
+      number: '10',
+      title: 'Resubmission success',
+      view: 'Provider view',
+      level: resubmitRow.prediction.resubmissionSuccess ? riskLevelForScore(100 - resubmitRow.prediction.resubmissionSuccess.score) : 'Low',
+      score: resubmitRow.prediction.resubmissionSuccess?.score || Math.max(0, 100 - resubmitRow.prediction.risks.denial.score),
+      metric: resubmitRow.prediction.resubmissionSuccess ? `${resubmitRow.prediction.resubmissionSuccess.score}% success` : 'No denied claim selected',
+      claimLine: claimLine(resubmitRow),
+      providerThinking: `Provider thinking: recovery depends on correcting the denial driver and attaching payer-ready support before resubmission.`,
+      action: resubmitRow.prediction.resubmissionSuccess?.action || topFix(resubmitRow),
+    },
+  ]
+}
+
+function repeatCareActionText(claim) {
+  if (claim.placeOfServiceCode === '23') {
+    return `Route ${claim.memberId} for ED revisit review tied to ${claim.diagnosisCode || 'the diagnosis'}.`
+  }
+  if (claim.placeOfServiceCode === '51') {
+    return `Review behavioral-health follow-up before another psychiatric facility claim is submitted.`
+  }
+  if (claim.placeOfServiceCode === '81') {
+    return `Check lab frequency and medical necessity before billing another related lab claim.`
+  }
+  return `Review care-management follow-up for ${claim.memberId}'s ${claim.diagnosisCode || 'related'} pattern.`
 }
 
 function filterClaimsByTime(claims, timeFilter, defaultDateRange) {
@@ -2039,10 +2322,10 @@ function DashboardMetric({ label, value, note, icon: Icon, tone }) {
 
 function PredictionSummary({ summary }) {
   const cards = [
-    { label: 'Predicted Paid', value: formatCurrency(summary.totalPredictedPaid), note: 'historical peer forecast', tone: 'green' },
-    { label: 'Predicted Adjustment', value: formatCurrency(summary.totalPredictedAdjustment), note: 'expected write-off', tone: 'orange' },
-    { label: 'At-Risk Claims', value: summary.atRiskCount.toLocaleString(), note: `${summary.highRiskCount} high, ${summary.denialQueueCount} denial queue`, tone: 'violet' },
-    { label: 'Average Risk', value: `${summary.averageOverallRisk}%`, note: 'overall claim risk score', tone: 'blue' },
+    { label: 'Predicted Paid', value: formatCurrency(summary.totalPredictedPaid), note: 'from matched payer/provider history', tone: 'green' },
+    { label: 'Predicted Adjustment', value: formatCurrency(summary.totalPredictedAdjustment), note: 'calculated write-off exposure', tone: 'orange' },
+    { label: 'At-Risk Claims', value: summary.atRiskCount.toLocaleString(), note: `${summary.highRiskCount} high, ${summary.denialQueueCount} denial review`, tone: 'violet' },
+    { label: 'Average Risk', value: `${summary.averageOverallRisk}%`, note: 'weighted claim risk model', tone: 'blue' },
   ]
 
   return (
@@ -2056,6 +2339,119 @@ function PredictionSummary({ summary }) {
       ))}
     </div>
   )
+}
+
+function PredictionMethodPanel({ totalCount }) {
+  const methods = [
+    ['Data source', `${totalCount.toLocaleString()} filtered 837 claim records from MongoDB`],
+    ['Money forecast', 'Allowed and paid amounts are estimated from historical peer rates by payer, provider, CPT, and place of service.'],
+    ['Risk model', 'Denial, adjustment, collection, COB, repeat-claim, and provider patterns are scored separately then blended.'],
+    ['Action logic', 'The next action comes from the highest scoring driver for that claim, not a static checklist.'],
+  ]
+
+  return (
+    <Card className="prediction-method-card">
+      {methods.map(([label, value]) => (
+        <div className="prediction-method-item" key={label}>
+          <span>{label}</span>
+          <strong>{value}</strong>
+        </div>
+      ))}
+    </Card>
+  )
+}
+
+function PredictionCatalog({ catalog, title = '10 Claim Predictions', compact = false }) {
+  const viewCounts = catalog.reduce((counts, item) => {
+    counts[item.view] = (counts[item.view] || 0) + 1
+    return counts
+  }, {})
+
+  return (
+    <Card className={`prediction-catalog-card ${compact ? 'compact' : ''}`}>
+      <div className="prediction-catalog-header">
+        <div>
+          <h2>{title}</h2>
+          <p>Each prediction is grouped by viewpoint, but the thinking and action are written only from the provider point of view.</p>
+        </div>
+        <div className="prediction-view-chips" aria-label="Prediction view counts">
+          {['Patient view', 'Provider view', 'Doctor view', 'Insurance view'].map((view) => (
+            <span key={view}>{view.replace(' view', '')}: {viewCounts[view] || 0}</span>
+          ))}
+        </div>
+      </div>
+
+      <div className="prediction-catalog-grid">
+        {catalog.map((item) => (
+          <article className={`prediction-output-card ${item.view.toLowerCase().replaceAll(' ', '-')}`} key={item.number}>
+            <div className="prediction-output-topline">
+              <span>{item.number}</span>
+              <b>{item.view}</b>
+            </div>
+            <small className="prediction-output-label">Predicted output</small>
+            <h3>{item.title}</h3>
+            <div className="prediction-output-metric">
+              <strong>{item.metric}</strong>
+              <RiskBadge level={item.level} score={item.score} />
+            </div>
+            <p className="prediction-output-claim">{item.claimLine}</p>
+            <div className="prediction-thinking-block">
+              <span>Provider thinking</span>
+              <p>{item.providerThinking.replace(/^Provider thinking:\\s*/i, '')}</p>
+            </div>
+            <div className="prediction-action-line">
+              <span>Provider action</span>
+              <p>{item.action}</p>
+            </div>
+          </article>
+        ))}
+      </div>
+    </Card>
+  )
+}
+
+function getTopPredictionDrivers(prediction, limit = 3) {
+  return prediction.riskDrivers
+    .filter((driver) => driver.score >= 18)
+    .slice(0, limit)
+}
+
+function getPredictionEvidence(claim, prediction) {
+  const topDriver = prediction.riskDrivers[0]
+  const evidence = [
+    ['Peer set', `${prediction.peerCount.toLocaleString()} claims by ${prediction.basis}`],
+    ['Allowed rate', `${prediction.money.allowedRate}%`],
+    ['Paid rate', `${prediction.money.paidToAllowedRate}% of allowed`],
+    ['Adjustment', `${prediction.money.adjustmentRate}% of charge`],
+  ]
+
+  if (!claim.priorAuth && prediction.risks.denial.score >= 35) {
+    evidence.push(['Auth', 'No prior auth on claim'])
+  }
+  if (!claim.referral && ['HM', 'MC', 'MB'].includes(claim.filingIndicator)) {
+    evidence.push(['Referral', 'Not provided'])
+  }
+  if (topDriver?.score >= 30) {
+    evidence.push([topDriver.label, `${topDriver.score}% driver`])
+  }
+
+  return evidence.slice(0, 6)
+}
+
+function getPredictionAction(claim, prediction) {
+  const topDriver = prediction.riskDrivers[0]
+  const fallback = prediction.fixes[0] || 'Submit with standard claim review.'
+  const secondary = [
+    claim.priorAuth ? 'Auth on file' : 'Auth missing',
+    claim.referral ? 'Referral on file' : 'Referral missing',
+    `${claim.cptCode || 'CPT'} at ${claim.placeOfServiceCode || 'POS'}`,
+  ].join(' · ')
+
+  return {
+    focus: topDriver?.label || 'Standard',
+    fix: fallback,
+    secondary,
+  }
 }
 
 function AtRiskClaimsQueue({
@@ -2082,43 +2478,67 @@ function AtRiskClaimsQueue({
               <th>Patient</th>
               <th>Overall Risk</th>
               <th>Forecast</th>
-              <th>Prediction Reasons</th>
-              <th>Recommended Fix</th>
+              <th>Data Drivers</th>
+              <th>Next Action</th>
             </tr>
           </thead>
           <tbody>
-            {items.length ? items.map(({ claim, prediction }) => (
-              <tr key={claim.number}>
-                <td>
-                  <button className="claim-link-button" type="button" onClick={() => onOpenClaim?.(claim)}>
-                    {claim.number}
-                  </button>
-                  <span>{claim.payer}</span>
-                </td>
-                <td>{claim.patient}</td>
-                <td>
-                  <RiskBadge level={prediction.risks.overall.level} score={prediction.risks.overall.score} />
-                </td>
-                <td className="risk-forecast-cell">
-                  <strong>{formatCurrency(prediction.money.predictedPaid)}</strong>
-                  <span>{prediction.outcome.likely} · {prediction.confidence}</span>
-                </td>
-                <td>
-                  <ul className="queue-reason-list">
-                    {prediction.reasons.slice(0, 2).map((reason) => (
-                      <li key={reason}>{reason}</li>
-                    ))}
-                  </ul>
-                </td>
-                <td>
-                  <ul className="queue-fix-list">
-                    {prediction.fixes.slice(0, 2).map((fix) => (
-                      <li key={fix}>{fix}</li>
-                    ))}
-                  </ul>
-                </td>
-              </tr>
-            )) : (
+            {items.length ? items.map(({ claim, prediction }) => {
+              const evidence = getPredictionEvidence(claim, prediction)
+              const drivers = getTopPredictionDrivers(prediction)
+              const action = getPredictionAction(claim, prediction)
+
+              return (
+                <tr key={claim.number}>
+                  <td>
+                    <button className="claim-link-button" type="button" onClick={() => onOpenClaim?.(claim)}>
+                      {claim.number}
+                    </button>
+                    <span>{claim.payer}</span>
+                    <small>{claim.cptCode} · {claim.placeOfServiceCode}</small>
+                  </td>
+                  <td>
+                    <strong className="queue-patient-name">{claim.patient}</strong>
+                    <span className="queue-muted">{claim.memberId}</span>
+                    <span className="queue-muted">{claim.billingProvider}</span>
+                  </td>
+                  <td>
+                    <RiskBadge level={prediction.risks.overall.level} score={prediction.risks.overall.score} />
+                    <div className="queue-driver-stack">
+                      {drivers.map((driver) => (
+                        <span key={driver.label}>{driver.label} {driver.score}%</span>
+                      ))}
+                    </div>
+                  </td>
+                  <td className="risk-forecast-cell">
+                    <div className="forecast-mini-grid">
+                      <span><b>{formatCurrency(prediction.money.predictedPaid)}</b> paid</span>
+                      <span>{formatCurrency(prediction.money.predictedAllowed)} allowed</span>
+                      <span>{formatCurrency(prediction.money.predictedPatientResp)} patient</span>
+                      <span>{formatCurrency(prediction.money.predictedAdjustment)} adj.</span>
+                    </div>
+                    <small>{prediction.outcome.likely} · {prediction.confidence}</small>
+                  </td>
+                  <td>
+                    <div className="queue-evidence-grid">
+                      {evidence.map(([label, value]) => (
+                        <span className="queue-evidence-chip" key={`${claim.number}-${label}`}>
+                          <b>{label}</b>
+                          {value}
+                        </span>
+                      ))}
+                    </div>
+                  </td>
+                  <td>
+                    <div className="queue-action-block">
+                      <span>{action.focus} review</span>
+                      <strong>{action.fix}</strong>
+                      <small>{action.secondary}</small>
+                    </div>
+                  </td>
+                </tr>
+              )
+            }) : (
               <tr>
                 <td className="empty-table-cell" colSpan={6}>{emptyMessage}</td>
               </tr>

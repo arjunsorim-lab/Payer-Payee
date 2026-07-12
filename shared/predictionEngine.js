@@ -183,6 +183,23 @@ function getPlaceOrFallback(claim) {
     : 'this service location'
 }
 
+function repeatCareAction(claim) {
+  const diagnosis = claim.diagnosisCode || 'related diagnosis'
+  if (claim.placeOfServiceCode === '23') {
+    return `Review recent emergency-room utilization for ${claim.memberId} tied to ${diagnosis} before another ED claim is released.`
+  }
+  if (claim.placeOfServiceCode === '51') {
+    return `Check behavioral-health or inpatient psychiatric follow-up for ${claim.memberId}'s ${diagnosis} pattern before another facility claim is filed.`
+  }
+  if (claim.placeOfServiceCode === '81') {
+    return `Check duplicate lab frequency and medical necessity for ${claim.memberId}'s ${diagnosis} history before billing another lab claim.`
+  }
+  if (['21', '22', '31', '32'].includes(claim.placeOfServiceCode)) {
+    return `Review facility-level care plan and discharge follow-up for ${claim.memberId}'s ${diagnosis} history before submission.`
+  }
+  return `Review ${claim.memberId}'s ${diagnosis} history and consider care-management outreach before another ${claim.placeOfService || 'related'} encounter.`
+}
+
 function authorizationScore(claim) {
   const authSensitive = isAuthSensitive(claim)
   if (!authSensitive) return 4
@@ -209,21 +226,21 @@ function referralScore(claim) {
 function fixForDriver(claim, driver, likelyDenialReason) {
   switch (driver.label) {
     case 'Authorization':
-      return `Confirm prior authorization for ${procedureLabel(claim)} with ${claim.payer} before submission.`
+      return `Confirm ${claim.payer} prior authorization for ${procedureLabel(claim)} at ${getPlaceOrFallback(claim)} before claim release.`
     case 'Referral':
-      return `Validate referral requirements for ${claim.filingIndicator || '837'} filing and ${claim.payer}.`
+      return `Validate referral rules for ${claim.filingIndicator || '837'} filing, ${claim.payer}, and ${getPlaceOrFallback(claim)}.`
     case 'Repeat':
-      return `Review ${claim.memberId}'s ${claim.diagnosisCode || 'related diagnosis'} history and consider care-management outreach before another ${claim.placeOfService} encounter.`
+      return repeatCareAction(claim)
     case 'Adjustment':
       return `Compare the ${claim.cptCode} charge against ${claim.payer} allowed-rate history and contract terms before final billing.`
     case 'Collection':
-      return `Prepare a patient estimate or payment-plan outreach for the expected member balance.`
+      return `Prepare a patient estimate for ${claim.memberId} and review payment-plan outreach for the expected balance.`
     case 'COB':
       return `Verify payer order and coordination-of-benefits details for this ${claim.filingIndicator || '837'} filing.`
     case 'Provider':
       return `Review ${claim.billingProvider}'s coding and contract performance pattern for this payer/service mix.`
     case 'Payment':
-      return `Review expected underpayment risk before submission; forecasted payer paid is materially below billed charges.`
+      return `Review expected underpayment for ${claim.payer}; forecasted paid is materially below the ${procedureLabel(claim)} charge.`
     case 'Denial':
       if (/eligibility|coverage/i.test(likelyDenialReason)) {
         return `Verify member eligibility and coverage for ${claim.memberId} before the claim is released.`

@@ -12,6 +12,10 @@ services:
       - key: MONGODB_DB
         value: PayerPayee
       - key: CORS_ORIGIN
-        value: https://payer-payee-1.onrender.com
+        value: https://payer-payee-1.onrender.com,https://payer-payee.onrender.com
+      - key: MONGODB_TIMEOUT_MS
+        value: 5000
+      - key: MONGODB_RETRY_SECONDS
+        value: 60
       - key: MONGODB_URI
         sync: false

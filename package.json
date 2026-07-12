@@ -10,6 +10,7 @@
     "backend:start": "gunicorn backend.app:app --bind 0.0.0.0:${PORT:-4000}",
     "dev:all": "concurrently -k -n backend,frontend -c blue,green \"npm:backend\" \"npm:frontend\"",
     "import:mongo": "python3 -m backend.import_claims",
+    "export:fallback": "python3 -m backend.export_fallback",
     "build": "vite build --config frontend/vite.config.js",
     "lint": "oxlint",
     "preview": "vite preview --config frontend/vite.config.js"

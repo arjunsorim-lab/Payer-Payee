@@ -83,6 +83,7 @@ const RUNTIME_API_BASE_URL = typeof window !== 'undefined' ? window.__PAYER_PAYE
 const CONFIGURED_API_BASE_URL = (
   RUNTIME_API_BASE_URL
   || import.meta.env.VITE_API_BASE_URL
+  || ''
 ).replace(/\/$/, '')
 const LOCAL_API_BASE_URL = 'http://127.0.0.1:4000'
 const RENDER_API_BASE_URL = 'https://payer-payee.onrender.com'

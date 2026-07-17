@@ -10,11 +10,13 @@ from werkzeug.exceptions import HTTPException
 
 try:
     from .db import connect_mongo, get_mongo_config
+    from .import_claims import read_claims
     from .llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
     from .prediction_service import build_prediction_scenarios, summarize_scenarios
     from .provider_prediction import build_provider_prediction_payload, find_case
 except ImportError:
     from db import connect_mongo, get_mongo_config
+    from import_claims import read_claims
     from llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
     from prediction_service import build_prediction_scenarios, summarize_scenarios
     from provider_prediction import build_provider_prediction_payload, find_case
@@ -319,11 +321,15 @@ def get_prediction_scenarios():
 
 def build_provider_case(db, claim_number):
     """Build one exact provider case from the current database records."""
-    selected_claim = db.claims.find_one({"$or": [{"number": claim_number}, {"claimId": claim_number}]})
+    csv_path = Path(os.getenv("CSV_PATH", "")).expanduser()
+    if csv_path.is_file():
+        all_claims = read_claims(csv_path)
+        selected_claim = next((claim for claim in all_claims if claim_number in {claim.get("number"), claim.get("claimId")}), None)
+    else:
+        selected_claim = db.claims.find_one({"$or": [{"number": claim_number}, {"claimId": claim_number}]})
+        all_claims = list(db.claims.find({}).sort([("dos", 1), ("claimId", 1)]))
     if not selected_claim:
         return None, "Claim not found"
-
-    all_claims = list(db.claims.find({}).sort([("dos", 1), ("claimId", 1)]))
     scenario, report = find_case(
         all_claims,
         claim_number,

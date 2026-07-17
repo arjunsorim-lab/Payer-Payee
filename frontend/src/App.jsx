@@ -2139,6 +2139,15 @@ function ProviderMoneyLlmResult({ result }) {
   const actions = Array.isArray(result.recommended_actions) ? result.recommended_actions : []
   const drivers = Array.isArray(result.risk_drivers) ? result.risk_drivers : []
   const evidence = Array.isArray(result.evidence_used) ? result.evidence_used : []
+  const savings = result.where_provider_money_can_be_saved || {}
+  const currentOpportunity = savings.current_claim_opportunity || {}
+  const futureExposure = savings.future_exposure || {}
+  const avoidableSpend = savings.avoidable_spend || {}
+  const bestAction = savings.best_action || {}
+  const savingsComparison = savings.historical_comparison || {}
+  const recurrenceEvidence = savings.recurrence_evidence || {}
+  const dataRequired = Array.isArray(savings.data_required_for_stronger_estimate) ? savings.data_required_for_stronger_estimate : []
+  const reconciliationDifference = savings.forecast_reconciliation_difference || {}
   const unavailable = 'Not enough evidence to estimate reliably.'
   const snapshotCards = [
     { label: 'Predicted claim outcome', value: forecast.predicted_claim_outcome?.display_value || 'Unavailable', note: `Probability ${formatProbability(forecast.predicted_claim_outcome?.probability)}` },
@@ -2151,7 +2160,8 @@ function ProviderMoneyLlmResult({ result }) {
     { label: 'Predicted patient responsibility', value: formatOptionalCurrency(forecast.predicted_patient_responsibility?.value), note: formatPredictionRange(forecast.predicted_patient_responsibility), basis: metricBasis.predicted_patient_responsibility },
     { label: 'Predicted adjustment', value: formatOptionalCurrency(forecast.predicted_adjustment?.value), note: formatPredictionRange(forecast.predicted_adjustment), basis: metricBasis.predicted_adjustment },
     { label: 'Provider expected net reimbursement', value: formatOptionalCurrency(money.provider_expected_net_reimbursement), note: 'Equals predicted provider payment' },
-    { label: 'Provider financial exposure', value: formatOptionalCurrency(money.potential_revenue_at_risk), note: 'Adjustment + expected denial exposure' },
+    { label: 'Provider denial revenue exposure', value: formatOptionalCurrency(futureExposure.expected_denial_revenue_exposure), note: futureExposure.label || 'Forecast exposure — not confirmed savings' },
+    { label: 'Estimated financial opportunity', value: currentOpportunity.status === 'validated' ? formatOptionalCurrency(currentOpportunity.amount) : 'No validated opportunity', note: bestAction.stage || 'No immediate validated savings action' },
     { label: 'Potentially avoidable repeat spend', value: Number.isFinite(money.potentially_avoidable_repeat_spend) ? formatOptionalCurrency(money.potentially_avoidable_repeat_spend) : unavailable, note: forecast.potentially_avoidable_spend?.reason || '' },
     { label: 'Model confidence', value: formatProbability(confidence.score), note: confidence.level || 'unknown' },
     { label: 'Prediction method', value: (confidence.prediction_method || 'Unavailable').replaceAll('_', ' '), note: confidence.model_version || '' },
@@ -2178,8 +2188,8 @@ function ProviderMoneyLlmResult({ result }) {
         <div className="llm-section-heading"><span>Provider Financial Opportunity Summary</span><small>{opportunity.best_savings_phase || 'insufficient evidence'}</small></div>
         <div className="financial-opportunity-grid">
           <article><span>Expected provider payment</span><strong>{formatOptionalCurrency(opportunity.expected_provider_payment)}</strong></article>
-          <article><span>Potential revenue at risk</span><strong>{formatOptionalCurrency(opportunity.potential_revenue_at_risk)}</strong></article>
-          <article><span>Estimated opportunity</span><strong>{opportunity.opportunity_available ? formatOptionalCurrency(opportunity.provider_opportunity_amount) : unavailable}</strong></article>
+          <article><span>Expected denial revenue exposure</span><strong>{formatOptionalCurrency(futureExposure.expected_denial_revenue_exposure)}</strong></article>
+          <article><span>Validated current-claim opportunity</span><strong>{opportunity.opportunity_available ? formatOptionalCurrency(opportunity.provider_opportunity_amount) : 'No validated opportunity'}</strong></article>
         </div>
         <p>{opportunity.supporting_reason}</p><small>Owner: {opportunity.responsible_operational_team} · Evidence: {(opportunity.affected_claim_ids || []).join(', ')}</small>
       </section>
@@ -2187,6 +2197,63 @@ function ProviderMoneyLlmResult({ result }) {
       <section className="llm-wide-section prediction-snapshot">
         <div className="llm-section-heading"><span>Prediction Snapshot</span><small>{forecast.forecast_label}</small></div>
         <div className="llm-snapshot-grid money-snapshot-grid">{snapshotCards.map((card) => <article className="llm-snapshot-card" key={card.label}><span>{card.label}</span><strong>{card.value}</strong>{card.note ? <small>{card.note}</small> : null}<MetricBasisDetails basis={card.basis} label={card.label} /></article>)}</div>
+      </section>
+
+      <section className="llm-wide-section provider-savings-section">
+        <div className="llm-section-heading"><span>Where Provider Money Can Be Saved</span><small>Validated recovery and forecast exposure kept separate</small></div>
+
+        <article className={`savings-status-banner ${currentOpportunity.status || 'insufficient'}`}>
+          <span>A. Validated current-claim opportunity</span>
+          <strong>{currentOpportunity.status === 'validated' ? `${currentOpportunity.type?.replaceAll('_', ' ')} · ${formatOptionalCurrency(currentOpportunity.amount)}` : 'No validated current-claim savings opportunity identified'}</strong>
+          <p>{currentOpportunity.status === 'validated' ? 'The amount is supported by the matched historical comparison.' : 'The claim can still have forecast financial exposure, but exposure is not confirmed savings.'}</p>
+        </article>
+
+        <div className="savings-opportunity-columns">
+          <article>
+            <header><strong>Current-claim evidence</strong><small>{currentOpportunity.sample_size || 0} matched claim(s)</small></header>
+            <dl>
+              {(currentOpportunity.calculation_basis || []).map((item) => <div key={item.metric}><dt>{item.metric.replaceAll('_', ' ')}</dt><dd>{Number.isFinite(item.value) ? formatOptionalCurrency(item.value) : 'Not calculated'}<small>{item.formula}</small></dd></div>)}
+              <div><dt>Matching level</dt><dd>{currentOpportunity.peer_match_level || 'Insufficient evidence'}<small>Minimum sample: {currentOpportunity.minimum_sample_size || 0}</small></dd></div>
+              <div><dt>Patient-balance opportunity</dt><dd>{currentOpportunity.patient_balance_opportunity_available ? 'Confirmed' : 'Unavailable'}<small>{currentOpportunity.patient_balance_reason}</small></dd></div>
+            </dl>
+          </article>
+          <article>
+            <header><strong>B. Future financial exposure</strong><small>{futureExposure.label}</small></header>
+            <dl>
+              <div><dt>Denial revenue exposure</dt><dd>{formatOptionalCurrency(futureExposure.expected_denial_revenue_exposure)}<small>{formatProbability(futureExposure.denial_probability)} × predicted paid</small></dd></div>
+              <div><dt>Repeat allowed exposure</dt><dd>{formatOptionalCurrency(futureExposure.expected_repeat_allowed_exposure)}<small>{formatProbability(futureExposure.repeat_probability_90d)} × predicted allowed</small></dd></div>
+              <div><dt>Repeat provider-payment exposure</dt><dd>{formatOptionalCurrency(futureExposure.expected_repeat_provider_payment_exposure)}<small>{formatProbability(futureExposure.repeat_probability_90d)} × predicted paid</small></dd></div>
+              <div><dt>Forecast reconciliation difference</dt><dd>{formatOptionalCurrency(reconciliationDifference.value)}<small>This is not savings or recoverable revenue.</small></dd></div>
+              <div><dt>Potentially avoidable spend</dt><dd>{avoidableSpend.available ? formatOptionalCurrency(avoidableSpend.amount) : 'Not validated'}<small>{avoidableSpend.reason}</small></dd></div>
+            </dl>
+          </article>
+        </div>
+
+        <div className="savings-action-callout">
+          <span>C. Best next provider action</span>
+          <strong>{bestAction.stage || 'No immediate validated savings action'}</strong>
+          <p>{bestAction.action} {bestAction.reason}</p>
+          <small>Amount addressed: {Number.isFinite(bestAction.amount_addressed) ? formatOptionalCurrency(bestAction.amount_addressed) : 'None'} ({bestAction.amount_type || 'none'}) · Owner: {bestAction.owner || 'Provider operations'} · Confidence: {formatProbability(bestAction.confidence)}</small>
+        </div>
+
+        <article className="savings-comparison-card">
+          <header><strong>D. Historical comparison</strong><small>{savingsComparison.peer_count || 0} matched claim(s) · {savingsComparison.match_level || 'Insufficient evidence'}</small></header>
+          <div className="savings-rate-grid">
+            {[
+              ['Allowed rate', savingsComparison.actual_allowed_rate, savingsComparison.peer_allowed_rate, savingsComparison.indicators?.allowed_rate],
+              ['Paid-to-allowed rate', savingsComparison.actual_paid_to_allowed_rate, savingsComparison.peer_paid_to_allowed_rate, savingsComparison.indicators?.paid_to_allowed_rate],
+              ['Adjustment rate', savingsComparison.actual_adjustment_rate, savingsComparison.peer_adjustment_rate, savingsComparison.indicators?.adjustment_rate],
+              ['Patient-share rate', savingsComparison.actual_patient_share_rate, savingsComparison.peer_patient_share_rate, savingsComparison.indicators?.patient_share_rate],
+            ].map(([label, actualRate, peerRate, indicator]) => <div key={label}><span>{label}</span><strong>{formatProbability(actualRate)} actual</strong><small>{formatProbability(peerRate)} historical median</small><b className={indicator}>{indicator || 'Unavailable'}</b></div>)}
+          </div>
+          <p>{savingsComparison.conclusion}</p>
+          <small>Matched claims: {(savingsComparison.affected_claim_ids || []).join(', ') || 'None'} · Cutoff: {savingsComparison.prediction_cutoff_date || basis.prediction_cutoff_date}</small>
+        </article>
+
+        <div className="savings-evidence-grid">
+          <article><span>Recurrence evidence</span>{['30', '60', '90'].map((horizon) => { const item = recurrenceEvidence[horizon] || {}; return <p key={horizon}><strong>{horizon} days:</strong> {item.local_numerator || 0}/{item.local_denominator || 0} local · {item.external_numerator || 0}/{item.external_denominator || 0} external · {formatProbability(item.final_blended_rate)} blended</p> })}<small>{(recurrenceEvidence['90']?.filters_used || []).join(' · ')}</small></article>
+          <article><span>E. Data required for stronger savings estimate</span><ul>{dataRequired.map((item) => <li key={item}>{item}</li>)}</ul></article>
+        </div>
       </section>
 
       <section className="llm-wide-section actual-facts-section">

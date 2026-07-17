@@ -65,7 +65,7 @@ test('prediction chat uses a floating prompt and inline result cards', () => {
   const result = source.slice(source.indexOf('function ProviderMoneyLlmResult'), source.indexOf('function ProviderPredictionChat'))
   const chat = source.slice(source.indexOf('function ProviderPredictionChat'), source.indexOf('export function ProviderLlmResult'))
   assert.match(result, /<ProviderPredictionChat result=\{result\}/)
-  assert.doesNotMatch(result, /Limitations|Exact model output/)
+  assert.doesNotMatch(result, /Exact model output/)
   assert.match(chat, /provider-chat-prompt/)
   assert.match(chat, /provider-chat-results/)
   assert.match(chat, /chatgpt-composer/)
@@ -78,6 +78,24 @@ test('prediction cards expose metric-specific calculation bases', () => {
   assert.match(source, /external_sample_size/)
   assert.match(source, /blend_weights/)
   assert.doesNotMatch(source, /Peer sample: 1417/)
+})
+
+test('provider savings section follows Prediction Snapshot and separates current from future opportunity', () => {
+  const source = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
+  const result = source.slice(source.indexOf('function ProviderMoneyLlmResult'), source.indexOf('function ProviderPredictionChat'))
+  assert.match(result, /Estimated financial opportunity/)
+  assert.match(result, /Where Provider Money Can Be Saved/)
+  assert.match(result, /Validated current-claim opportunity/)
+  assert.match(result, /Future financial exposure/)
+  assert.match(result, /Repeat allowed exposure/)
+  assert.match(result, /Repeat provider-payment exposure/)
+  assert.match(result, /futureExposure\.label/)
+  assert.match(result, /No validated current-claim savings opportunity identified/)
+  assert.match(result, /Forecast reconciliation difference/)
+  assert.match(result, /recurrenceEvidence\[horizon\]/)
+  assert.match(result, /futureExposure\.repeat_probability_90d/)
+  assert.ok(result.indexOf('Where Provider Money Can Be Saved') > result.indexOf('Prediction Snapshot'))
+  assert.ok(result.indexOf('Where Provider Money Can Be Saved') < result.indexOf('Actual Claim Facts'))
 })
 
 test('chat sends only claim and conversation scope identifiers plus the question', () => {

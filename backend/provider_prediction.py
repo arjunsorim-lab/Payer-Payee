@@ -8,12 +8,16 @@ uses only earlier adjudicated peer claims for financial and risk estimates.
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from hashlib import sha256
+import os
 from statistics import median
 
 
-MODEL_VERSION = "provider-money-forecast-v3.0"
+MODEL_VERSION = "provider-money-forecast-v3.2"
+CALCULATION_VERSION = "provider-savings-v2"
 DEFAULT_WINDOW_DAYS = 90
 DEFAULT_MIN_PEERS = 5
+REPEAT_MEDIUM_THRESHOLD = .34
+CURRENT_OPPORTUNITY_MINIMUM = 1.0
 _BATCH_CACHE = {}
 _PREPARED_CACHE = {}
 
@@ -380,6 +384,8 @@ def _recurrence_observations(claims, cutoff, horizon_days, anchor=None):
 
 def _repeat_forecast(anchor, historical_claims, member_history):
     cutoff = anchor["_serviceDate"]
+    member_eligible_claims = [claim for claim in member_history if _related_to_anchor(claim, anchor) and claim["_serviceDate"] < cutoff]
+    peer_eligible_claims = [claim for claim in historical_claims if _related_to_anchor(claim, anchor) and claim["_serviceDate"] < cutoff]
     probabilities = {}
     basis = {}
     previous = 0.0
@@ -401,6 +407,8 @@ def _repeat_forecast(anchor, historical_claims, member_history):
         previous = probability
         probabilities[str(horizon)] = round(probability, 3)
         basis[str(horizon)] = {
+            "eligible_historical_claims": len(member_eligible_claims),
+            "eligible_external_claims": len(peer_eligible_claims),
             "member_successes": member_successes,
             "member_trials": member_trials,
             "peer_successes": peer_successes,
@@ -409,7 +417,20 @@ def _repeat_forecast(anchor, historical_claims, member_history):
             "external_rate": round(peer_successes / peer_trials, 4) if peer_trials else None,
             "blend_weights": _blend_weights(member_trials, peer_trials, prior_strength),
             "recurrence_interval_count": member_trials + peer_trials,
+            "local_numerator": member_successes,
+            "local_denominator": member_trials,
+            "external_numerator": peer_successes,
+            "external_denominator": peer_trials,
+            "final_blended_rate": round(probability, 3),
             "peer_match_level": match_level,
+            "prediction_cutoff_date": cutoff.isoformat(),
+            "filters_used": [
+                "service date before prediction cutoff",
+                "same member for local history",
+                f"diagnosis family {_diagnosis_family(anchor.get('diagnosisCode'))}",
+                f"procedure family {_procedure_family(anchor.get('cptCode'))}",
+                f"mature consecutive interval for the {horizon}-day horizon",
+            ],
             "available": bool(member_trials or peer_trials),
             "reason": None if (member_trials or peer_trials) else "No mature related diagnosis-and-procedure recurrence intervals were available before the cutoff date.",
         }
@@ -609,6 +630,88 @@ def _conditional_actions(features, denial_probability, repeat, selected_claim, a
     return actions
 
 
+def _recovery_peer_basis(anchor, historical_claims, member_history, min_peers):
+    """Select close, earlier adjudicated rows for retrospective recovery checks."""
+    dimensions = (
+        ("payer + provider + CPT + diagnosis family + place of service + units", ("payer", "provider", "cpt", "diagnosis", "pos", "units"), historical_claims),
+        ("payer + CPT + diagnosis family + place of service", ("payer", "cpt", "diagnosis", "pos"), historical_claims),
+        ("payer + CPT + diagnosis family", ("payer", "cpt", "diagnosis"), historical_claims),
+        ("CPT + diagnosis family", ("cpt", "diagnosis"), historical_claims),
+        ("same member + same CPT", ("cpt",), member_history),
+    )
+    rows = []
+    label = "insufficient evidence"
+    level = 6
+    for index, (candidate_label, keys, candidates) in enumerate(dimensions, 1):
+        matched = [row for row in candidates if all(_match_value(row, key) == _match_value(anchor, key) for key in keys)]
+        if len(matched) >= min_peers:
+            rows, label, level = matched, candidate_label, index
+            break
+    allowed_rates = [row["allowed"] / row["totalCharge"] for row in rows if row.get("totalCharge", 0) > 0]
+    paid_rates = [row["paid"] / row["allowed"] for row in rows if row.get("allowed", 0) > 0]
+    adjustment_rates = [row["adjustment"] / row["totalCharge"] for row in rows if row.get("totalCharge", 0) > 0]
+    patient_rates = [row["patientResp"] / row["allowed"] for row in rows if row.get("allowed", 0) > 0]
+    return {
+        "available": bool(rows),
+        "match_level": label,
+        "match_level_number": level,
+        "sample_size": len(rows),
+        "minimum_sample_size": min_peers,
+        "claim_ids": [row["claimId"] for row in rows],
+        "prediction_cutoff_date": anchor["_serviceDate"].isoformat(),
+        "matching_dimensions": list(dimensions[level - 1][1]) if rows else [],
+        "median_allowed_rate": round(median(allowed_rates), 4) if allowed_rates else None,
+        "median_paid_to_allowed_rate": round(median(paid_rates), 4) if paid_rates else None,
+        "median_adjustment_rate": round(median(adjustment_rates), 4) if adjustment_rates else None,
+        "median_patient_share_rate": round(median(patient_rates), 4) if patient_rates else None,
+        "metric_sample_sizes": {
+            "allowed_rate": len(allowed_rates),
+            "paid_to_allowed_rate": len(paid_rates),
+            "adjustment_rate": len(adjustment_rates),
+            "patient_share_rate": len(patient_rates),
+        },
+    }
+
+
+def _avoidable_spend_assessment(episode, all_episodes, anchor, min_peers):
+    """Compare a repeated current episode only with earlier lower-repeat episodes."""
+    current_rows = [row for row in episode["claims"] if _related_to_anchor(row, anchor)]
+    current_repeats = max(len(current_rows) - len({row.get("cptCode") for row in current_rows}), 0)
+    comparable_costs = []
+    comparable_ids = []
+    for candidate in all_episodes:
+        if candidate.get("memberId") == episode.get("memberId") or candidate.get("diagnosisFamily") != episode.get("diagnosisFamily"):
+            continue
+        rows = [row for row in candidate["claims"] if _claim_order(row) < _claim_order(anchor) and _related_to_anchor(row, anchor)]
+        repeats = max(len(rows) - len({row.get("cptCode") for row in rows}), 0)
+        if rows and repeats < current_repeats:
+            comparable_costs.append(sum(row.get("allowed", 0) for row in rows))
+            comparable_ids.append(candidate["episodeId"])
+    supported = len(current_rows) >= 2 and current_repeats > 0 and len(comparable_costs) >= min_peers
+    observed_cost = round(sum(row.get("allowed", 0) for row in current_rows), 2)
+    comparison_cost = round(median(comparable_costs), 2) if supported else None
+    amount = round(max(observed_cost - comparison_cost, 0), 2) if supported else None
+    reasons = []
+    if len(current_rows) < 2:
+        reasons.append("The selected episode does not contain at least two related claims.")
+    if current_repeats == 0:
+        reasons.append("No repeated related CPT service is confirmed in the selected episode.")
+    if len(comparable_costs) < min_peers:
+        reasons.append(f"Only {len(comparable_costs)} comparable lower-repeat episode(s) were available; at least {min_peers} are required.")
+    return {
+        "available": supported,
+        "amount": amount,
+        "reason": None if supported else " ".join(reasons),
+        "observed_or_predicted_episode_cost": observed_cost,
+        "median_lower_repeat_episode_cost": comparison_cost,
+        "comparison_episode_count": len(comparable_costs),
+        "comparison_episode_ids": comparable_ids[:20],
+        "related_claim_count": len(current_rows),
+        "repeated_related_service_count": current_repeats,
+        "prediction_cutoff_date": anchor["_serviceDate"].isoformat(),
+    }
+
+
 def score_episode(episode, all_episodes, min_peers=DEFAULT_MIN_PEERS):
     features = _episode_features(episode)
     member_history = _prior_member_history(episode, all_episodes)
@@ -618,17 +721,13 @@ def score_episode(episode, all_episodes, min_peers=DEFAULT_MIN_PEERS):
     financial = _money_forecast(episode, peer_claims, hierarchy, member_history)
     anchor = episode["claims"][-1]
     historical_claims = _eligible_historical_claims(episode, all_episodes, exclude_member=True)
+    recovery_basis = _recovery_peer_basis(anchor, historical_claims, member_history, min_peers)
     denial_probability, denial_basis = _denial_forecast(peer_claims, historical_claims, member_history, anchor)
     repeat, repeat_basis = _repeat_forecast(anchor, historical_claims, member_history)
     repeat_90_basis = repeat_basis.get("90", {})
-    comparable_repeat_rate = repeat_90_basis.get("external_rate")
-    sufficient_avoidable_evidence = (
-        repeat_90_basis.get("member_trials", 0) >= 3
-        and repeat_90_basis.get("peer_trials", 0) >= min_peers
-        and comparable_repeat_rate is not None
-        and repeat_90_basis.get("peer_match_level") == "peer diagnosis + CPT family"
-    )
-    avoidable = round(financial["allowed"] * max(repeat["90"] - comparable_repeat_rate, 0), 2) if sufficient_avoidable_evidence else 0
+    avoidable_basis = _avoidable_spend_assessment(episode, all_episodes, anchor, min_peers)
+    sufficient_avoidable_evidence = avoidable_basis["available"]
+    avoidable = avoidable_basis["amount"] or 0
     historical_validation = _historical_validation(peer_claims, financial, denial_probability, repeat["90"], anchor, historical_claims)
     confidence_detail = _confidence_details(peer_claims, match_level, anchor, financial, longitudinal, historical_validation)
     confidence_score = confidence_detail["percentage"]
@@ -659,10 +758,9 @@ def score_episode(episode, all_episodes, min_peers=DEFAULT_MIN_PEERS):
         "avoidableSpendLabel": "Potentially avoidable repeat-service spend",
         "avoidableSpendSupported": sufficient_avoidable_evidence,
         "avoidableSpendBasis": {
+            **avoidable_basis,
             "predicted_repeat_rate": repeat["90"],
-            "comparable_peer_repeat_rate": comparable_repeat_rate,
             "predicted_repeat_expenditure": round(financial["allowed"] * repeat["90"], 2),
-            "comparable_peer_repeat_expenditure": round(financial["allowed"] * comparable_repeat_rate, 2) if comparable_repeat_rate is not None else None,
             "member_interval_count": repeat_90_basis.get("member_trials", 0),
             "external_interval_count": repeat_90_basis.get("peer_trials", 0),
         },
@@ -674,6 +772,7 @@ def score_episode(episode, all_episodes, min_peers=DEFAULT_MIN_PEERS):
         "peerCount": peer_episode_count,
         "peerClaimCount": len(peer_claims),
         "peerMatchLevel": match_level,
+        "recoveryBasis": recovery_basis,
         "longitudinalBasis": {
             **longitudinal,
             "financialHistoryClaimCount": financial.get("longitudinalClaimCount", 0),
@@ -735,7 +834,8 @@ def score_episode(episode, all_episodes, min_peers=DEFAULT_MIN_PEERS):
 
 
 def _dataset_fingerprint(claims, window_days, min_peers):
-    digest = sha256(f"{window_days}|{min_peers}|{len(claims)}".encode("utf-8"))
+    source_hashes = sorted({str(claim.get("sourceCsvHash")) for claim in claims if claim.get("sourceCsvHash")})
+    digest = sha256(f"{MODEL_VERSION}|{CALCULATION_VERSION}|{window_days}|{min_peers}|{len(claims)}|{'|'.join(source_hashes)}".encode("utf-8"))
     for claim in sorted(claims, key=lambda item: str(item.get("claimId") or item.get("number") or "")):
         digest.update("|".join(str(claim.get(field) or "") for field in (
             "claimId", "memberId", "dos", "diagnosisCode", "cptCode", "payerId",
@@ -748,11 +848,14 @@ def _dataset_fingerprint(claims, window_days, min_peers):
 
 def build_provider_batch(claims, window_days=DEFAULT_WINDOW_DAYS, min_peers=DEFAULT_MIN_PEERS, use_cache=True):
     fingerprint = _dataset_fingerprint(claims, window_days, min_peers)
+    source_csv_hashes = sorted({str(claim.get("sourceCsvHash")) for claim in claims if claim.get("sourceCsvHash")})
     if use_cache and fingerprint in _BATCH_CACHE:
         return _BATCH_CACHE[fingerprint]
     valid, validation = validate_claims(claims)
     episodes = build_episodes(valid, window_days)
     scored = [score_episode(episode, episodes, min_peers) for episode in episodes]
+    for item in scored:
+        item.update({"sourceDatasetHash": fingerprint, "sourceCsvHash": source_csv_hashes[0] if len(source_csv_hashes) == 1 else None, "calculationVersion": CALCULATION_VERSION})
     assigned = [claim_id for item in scored for claim_id in item["sourceClaimIds"]]
     quality = {
         "allValidClaimsAssignedOnce": len(assigned) == len(set(assigned)) == len(valid),
@@ -762,7 +865,7 @@ def build_provider_batch(claims, window_days=DEFAULT_WINDOW_DAYS, min_peers=DEFA
         "lowConfidenceCount": sum(item["confidence"] == "Low" for item in scored),
         "unsupportedAvoidableSpendCount": sum(not item["avoidableSpendSupported"] for item in scored),
     }
-    result = scored, {"validation": validation, "quality": quality, "modelVersion": MODEL_VERSION, "episodeWindowDays": window_days, "minimumPeerEpisodes": min_peers}
+    result = scored, {"validation": validation, "quality": quality, "modelVersion": MODEL_VERSION, "calculationVersion": CALCULATION_VERSION, "sourceDatasetHash": fingerprint, "sourceCsvHash": source_csv_hashes[0] if len(source_csv_hashes) == 1 else None, "episodeWindowDays": window_days, "minimumPeerEpisodes": min_peers}
     if use_cache:
         _BATCH_CACHE.clear()
         _BATCH_CACHE[fingerprint] = result
@@ -771,6 +874,7 @@ def build_provider_batch(claims, window_days=DEFAULT_WINDOW_DAYS, min_peers=DEFA
 
 def _prepare_dataset(claims, window_days, min_peers):
     fingerprint = _dataset_fingerprint(claims, window_days, min_peers)
+    source_csv_hashes = sorted({str(claim.get("sourceCsvHash")) for claim in claims if claim.get("sourceCsvHash")})
     cached = _PREPARED_CACHE.get(fingerprint)
     if cached:
         return cached
@@ -785,6 +889,9 @@ def _prepare_dataset(claims, window_days, min_peers):
             "episodeCount": len(raw_episodes),
         },
         "modelVersion": MODEL_VERSION,
+        "calculationVersion": CALCULATION_VERSION,
+        "sourceDatasetHash": fingerprint,
+        "sourceCsvHash": source_csv_hashes[0] if len(source_csv_hashes) == 1 else None,
         "episodeWindowDays": window_days,
         "minimumPeerClaims": min_peers,
     }
@@ -815,6 +922,9 @@ def find_case(claims, claim_number, window_days=DEFAULT_WINDOW_DAYS, min_peers=D
     }
     case = score_episode(target_episode, raw_episodes, min_peers)
     case["selectedClaim"] = selected
+    case["sourceDatasetHash"] = report["sourceDatasetHash"]
+    case["sourceCsvHash"] = report["sourceCsvHash"]
+    case["calculationVersion"] = report["calculationVersion"]
     return case, report
 
 
@@ -891,7 +1001,7 @@ def _provider_financial_metrics(scenario, forecast):
     adjustment = forecast["predicted_adjustment"].get("value") or 0
     patient = forecast["predicted_patient_responsibility"].get("value") or 0
     denial_probability = forecast["denial_risk"].get("probability") or 0
-    denial_exposure = round(denial_probability * allowed, 2)
+    denial_exposure = round(denial_probability * paid, 2)
     avoidable = forecast["potentially_avoidable_spend"]
     peer_stats = scenario.get("forecast", {}).get("peerStatistics", {})
     lower_adjustment_rate = peer_stats.get("lowerQuartileAdjustmentRate")
@@ -920,7 +1030,7 @@ def _provider_financial_metrics(scenario, forecast):
         "opportunity_components": opportunity_components,
         "opportunity_reason": None if supported_values else "Not enough evidence to estimate reliably.",
         "formulas": {
-            "expected_denial_exposure": "denial_probability × predicted_allowed",
+            "expected_denial_exposure": "denial_probability × predicted_paid",
             "potential_revenue_at_risk": "predicted_adjustment + expected_denial_exposure",
             "provider_opportunity_amount": "supported recoverable denial value + potentially avoidable repeat spend + preventable adjustment exposure",
         },
@@ -953,7 +1063,7 @@ def _rank_provider_actions(scenario, actual, forecast, financial_metrics, reconc
     preventable_adjustment = financial_metrics.get("opportunity_components", {}).get("preventable_adjustment_exposure")
     if preventable_adjustment is not None and preventable_adjustment > 0:
         add("coding_review", "Review adjustment-driving claim inputs", 82, preventable_adjustment, "Predicted adjustment exceeds the lower-quartile adjustment level in the matched external sample.", "Revenue integrity", "Before submission")
-    if forecast["repeat_service_risk"].get("probability_90d", 0) >= .34:
+    if forecast["repeat_service_risk"].get("probability_90d", 0) >= REPEAT_MEDIUM_THRESHOLD:
         add("monitor_follow_up", "Monitor provider-side follow-up", 70, financial_metrics.get("potentially_avoidable_repeat_spend"), "The deterministic 90-day related-service probability exceeds the configured medium-risk threshold.", "Provider operations", "Within 30 days")
     if reconciliation.get("warnings"):
         add("reconcile_components", "Review predicted payment-component reconciliation", 72, None, reconciliation["warnings"][0], "Patient financial services", "Before balance assignment")
@@ -1019,6 +1129,175 @@ def _provider_scenario_map(scenario, actual, forecast, financial_metrics, reconc
             } if comparison_supported else None,
             "estimated_provider_opportunity_amount": financial_metrics.get("provider_opportunity_amount"),
         },
+    }
+
+
+def _build_savings_opportunity(scenario, actual, forecast, financial_metrics, reconciliation, _scenario_map):
+    """Build one evidence-gated savings view from the exact shared forecast object."""
+    recovery = scenario.get("recoveryBasis", {})
+    repeat_basis = forecast.get("repeat_service_risk", {}).get("basis", {})
+    repeat_probability = forecast.get("repeat_service_risk", {}).get("probability_90d") or 0
+    predicted_allowed = forecast.get("predicted_allowed", {}).get("value") or 0
+    predicted_paid = forecast.get("predicted_paid", {}).get("value") or 0
+    denial_probability = forecast.get("denial_risk", {}).get("probability") or 0
+    forecast_label = "Forecast exposure — not confirmed savings"
+    minimum_amount = float(os.getenv("PROVIDER_CURRENT_OPPORTUNITY_MINIMUM", CURRENT_OPPORTUNITY_MINIMUM))
+
+    match_supported = bool(recovery.get("available") and recovery.get("sample_size", 0) >= recovery.get("minimum_sample_size", DEFAULT_MIN_PEERS))
+    actual_allowed = actual.get("allowed_amount") or 0
+    actual_charge = actual.get("charge_amount") or 0
+    actual_paid = actual.get("paid_amount") or 0
+    actual_adjustment = actual.get("adjustment_amount") or 0
+    expected_peer_paid = round(actual_allowed * recovery["median_paid_to_allowed_rate"], 2) if match_supported and recovery.get("median_paid_to_allowed_rate") is not None else None
+    potential_underpayment = round(max(expected_peer_paid - actual_paid, 0), 2) if expected_peer_paid is not None else None
+    expected_peer_adjustment = round(actual_charge * recovery["median_adjustment_rate"], 2) if match_supported and recovery.get("median_adjustment_rate") is not None else None
+    excessive_adjustment = round(max(actual_adjustment - expected_peer_adjustment, 0), 2) if expected_peer_adjustment is not None else None
+
+    status = str(actual.get("claim_status") or "").lower()
+    denied = status in {"denied", "rejected"}
+    correctable_denial_value = None
+    correctable_reason = (
+        "A denial is recorded, but the CSV has no correction outcome or supported recoverable amount."
+        if denied else "The selected claim is not denied or rejected."
+    )
+    patient_balance_available = False
+    patient_balance_reason = "The CSV contains patient responsibility but no unresolved, delinquent or collections status."
+
+    candidates = [
+        ("denial", correctable_denial_value),
+        ("underpayment", potential_underpayment if match_supported else None),
+        ("adjustment", excessive_adjustment if match_supported else None),
+    ]
+    validated = [(kind, amount) for kind, amount in candidates if amount is not None and amount > minimum_amount]
+    if validated:
+        opportunity_type, opportunity_amount = max(validated, key=lambda item: item[1])
+        opportunity_status = "validated"
+    else:
+        opportunity_type, opportunity_amount = "none", None
+        opportunity_status = "none_identified" if match_supported or denied else "insufficient"
+    current_limitations = []
+    if not match_supported:
+        current_limitations.append("No recovery peer group met the configured sample size and matching-level requirements.")
+    if not patient_balance_available:
+        current_limitations.append(patient_balance_reason)
+    if denied and correctable_denial_value is None:
+        current_limitations.append(correctable_reason)
+
+    actual_rates = {
+        "actual_allowed_rate": round(actual_allowed / actual_charge, 4) if actual_charge else None,
+        "actual_paid_to_allowed_rate": round(actual_paid / actual_allowed, 4) if actual_allowed else None,
+        "actual_adjustment_rate": round(actual_adjustment / actual_charge, 4) if actual_charge else None,
+        "actual_patient_share_rate": round((actual.get("patient_responsibility") or 0) / actual_allowed, 4) if actual_allowed else None,
+    }
+    historical_comparison = {
+        **actual_rates,
+        "peer_allowed_rate": recovery.get("median_allowed_rate"),
+        "peer_paid_to_allowed_rate": recovery.get("median_paid_to_allowed_rate"),
+        "peer_adjustment_rate": recovery.get("median_adjustment_rate"),
+        "peer_patient_share_rate": recovery.get("median_patient_share_rate"),
+        "peer_count": recovery.get("sample_size", 0),
+        "match_level": recovery.get("match_level", "insufficient evidence"),
+        "matching_dimensions": recovery.get("matching_dimensions", []),
+        "prediction_cutoff_date": recovery.get("prediction_cutoff_date"),
+        "affected_claim_ids": recovery.get("claim_ids", [])[:20],
+        "indicators": {
+            "allowed_rate": "favourable" if actual_rates["actual_allowed_rate"] is not None and recovery.get("median_allowed_rate") is not None and actual_rates["actual_allowed_rate"] >= recovery["median_allowed_rate"] else "unfavourable",
+            "paid_to_allowed_rate": "favourable" if actual_rates["actual_paid_to_allowed_rate"] is not None and recovery.get("median_paid_to_allowed_rate") is not None and actual_rates["actual_paid_to_allowed_rate"] >= recovery["median_paid_to_allowed_rate"] else "unfavourable",
+            "adjustment_rate": "favourable" if actual_rates["actual_adjustment_rate"] is not None and recovery.get("median_adjustment_rate") is not None and actual_rates["actual_adjustment_rate"] <= recovery["median_adjustment_rate"] else "unfavourable",
+            "patient_share_rate": "favourable" if actual_rates["actual_patient_share_rate"] is not None and recovery.get("median_patient_share_rate") is not None and actual_rates["actual_patient_share_rate"] <= recovery["median_patient_share_rate"] else "unfavourable",
+        } if match_supported else {},
+    }
+    favourable_count = sum(value == "favourable" for value in historical_comparison["indicators"].values())
+    historical_comparison["conclusion"] = (
+        "The selected claim performed favourably on all matched financial rates; no underpayment or excessive-adjustment recovery is supported."
+        if match_supported and favourable_count == 4 and not validated else
+        "One or more selected-claim rates are less favourable than the matched history; only the validated amount above should be treated as an opportunity."
+        if match_supported and favourable_count < 4 else
+        "A reliable current-claim historical comparison is unavailable."
+    )
+
+    future_exposure = {
+        "expected_denial_revenue_exposure": round(denial_probability * predicted_paid, 2),
+        "expected_repeat_allowed_exposure": round(repeat_probability * predicted_allowed, 2),
+        "expected_repeat_provider_payment_exposure": round(repeat_probability * predicted_paid, 2),
+        "denial_probability": denial_probability,
+        "repeat_probability_90d": repeat_probability,
+        "label": forecast_label,
+    }
+    avoidable_basis = scenario.get("avoidableSpendBasis", {})
+    avoidable_spend = {
+        "available": bool(avoidable_basis.get("available")),
+        "amount": avoidable_basis.get("amount") if avoidable_basis.get("available") else None,
+        "reason": avoidable_basis.get("reason") or "The repeated-related-claim and lower-repeat comparison requirements were not met.",
+        "comparison_episode_count": avoidable_basis.get("comparison_episode_count", 0),
+        "related_claim_count": avoidable_basis.get("related_claim_count", 0),
+        "repeated_related_service_count": avoidable_basis.get("repeated_related_service_count", 0),
+        "prediction_cutoff_date": avoidable_basis.get("prediction_cutoff_date"),
+    }
+
+    follow_up = repeat_probability >= REPEAT_MEDIUM_THRESHOLD
+    if correctable_denial_value is not None and correctable_denial_value > minimum_amount:
+        best_action = {"stage": "Denial correction", "action": "Review and correct the supported denial issue.", "owner": "Denials team", "amount_addressed": correctable_denial_value, "amount_type": "validated_opportunity", "reason": correctable_reason}
+    elif potential_underpayment is not None and potential_underpayment > minimum_amount:
+        best_action = {"stage": "Payment underpayment review", "action": "Review the adjudicated payment against the matched historical paid-to-allowed rate.", "owner": "Payment variance team", "amount_addressed": potential_underpayment, "amount_type": "validated_opportunity", "reason": "Actual paid is below the amount implied by the matched historical paid-to-allowed rate."}
+    elif excessive_adjustment is not None and excessive_adjustment > minimum_amount:
+        best_action = {"stage": "Excessive adjustment review", "action": "Review the adjudicated adjustment against the matched historical adjustment rate.", "owner": "Revenue integrity", "amount_addressed": excessive_adjustment, "amount_type": "validated_opportunity", "reason": "Actual adjustment exceeds the amount implied by the matched historical adjustment rate."}
+    elif patient_balance_available:
+        best_action = {"stage": "Patient-balance management", "action": "Review the confirmed unresolved patient balance.", "owner": "Patient financial services", "amount_addressed": actual.get("patient_responsibility"), "amount_type": "validated_opportunity", "reason": "The source data confirms an actionable unresolved patient balance."}
+    elif follow_up:
+        best_action = {"stage": "Provider follow-up monitoring", "action": "Monitor the next related-service window using the provider follow-up workflow.", "owner": "Provider operations", "amount_addressed": future_exposure["expected_repeat_provider_payment_exposure"], "amount_type": "forecast_exposure", "reason": "The shared 90-day repeat probability meets the configured follow-up threshold."}
+    else:
+        best_action = {"stage": "No immediate validated savings action", "action": "Continue routine provider monitoring; no recovery action is supported for this claim.", "owner": "Provider operations", "amount_addressed": None, "amount_type": "none", "reason": "No validated current-claim amount or elevated repeat threshold is supported."}
+    best_action["confidence"] = forecast.get("confidence", {}).get("score")
+    best_action["affected_claim_ids"] = [actual.get("claim_id")]
+
+    data_required = ["Payer contract or fee-schedule information", "Denial correction and recoverability status", "Unresolved or collections patient-balance status"]
+    if not match_supported:
+        data_required.append("More closely matched payer, provider, CPT, diagnosis, place-of-service and units peers")
+    if not avoidable_spend["available"]:
+        data_required.append("More repeated related episodes and comparable lower-repeat episode history")
+    return {
+        "forecast_reference": {
+            "denial_probability": forecast["denial_risk"].get("probability"),
+            "repeat_probability_90d": forecast["repeat_service_risk"].get("probability_90d"),
+            "predicted_allowed": forecast["predicted_allowed"].get("value"),
+            "predicted_paid": forecast["predicted_paid"].get("value"),
+            "confidence": forecast["confidence"].get("score"),
+            "model_version": forecast["confidence"].get("model_version"),
+            "calculation_version": scenario.get("calculationVersion", CALCULATION_VERSION),
+            "source_dataset_hash": scenario.get("sourceDatasetHash"),
+            "source_csv_hash": scenario.get("sourceCsvHash"),
+        },
+        "current_claim_opportunity": {
+            "status": opportunity_status,
+            "type": opportunity_type,
+            "amount": opportunity_amount,
+            "calculation_basis": [
+                {"metric": "expected_peer_paid", "value": expected_peer_paid, "formula": "actual allowed × matched-peer median paid-to-allowed rate"},
+                {"metric": "potential_underpayment", "value": potential_underpayment, "formula": "max(0, expected peer paid − actual paid)"},
+                {"metric": "expected_peer_adjustment", "value": expected_peer_adjustment, "formula": "actual charge × matched-peer median adjustment rate"},
+                {"metric": "excessive_adjustment", "value": excessive_adjustment, "formula": "max(0, actual adjustment − expected peer adjustment)"},
+            ],
+            "peer_match_level": recovery.get("match_level", "insufficient evidence"),
+            "sample_size": recovery.get("sample_size", 0),
+            "minimum_sample_size": recovery.get("minimum_sample_size", DEFAULT_MIN_PEERS),
+            "limitations": current_limitations,
+            "correctable_denial_value": correctable_denial_value,
+            "patient_balance_opportunity_available": patient_balance_available,
+            "patient_balance_reason": patient_balance_reason,
+        },
+        "future_exposure": future_exposure,
+        "avoidable_spend": avoidable_spend,
+        "best_action": best_action,
+        "historical_comparison": historical_comparison,
+        "recurrence_evidence": repeat_basis,
+        "forecast_reconciliation_difference": {
+            "value": reconciliation.get("reconciliation_difference"),
+            "label": "Forecast reconciliation difference",
+            "is_savings": False,
+        },
+        "data_required_for_stronger_estimate": data_required,
+        "confidence": forecast.get("confidence", {}),
     }
 
 
@@ -1141,6 +1420,9 @@ def build_provider_prediction_payload(scenario):
         "fallback_explanation": "Broader historical matching was required." if scenario.get("peerMatchLevel", 5) > 1 else "No broad fallback was required.",
         "prediction_cutoff_date": longitudinal.get("predictionCutoffDate"),
         "model_version": scenario.get("method", MODEL_VERSION),
+        "calculation_version": scenario.get("calculationVersion", CALCULATION_VERSION),
+        "source_dataset_hash": scenario.get("sourceDatasetHash"),
+        "source_csv_hash": scenario.get("sourceCsvHash"),
         "metric_basis": financial.get("metricBasis", {}),
         "historical_peer_denial_rate": denial_basis.get("peer_rate"),
         "member_prior_claims_used": longitudinal.get("priorClaimCount", 0),
@@ -1177,18 +1459,12 @@ def build_provider_prediction_payload(scenario):
     backtest = _build_backtest(actual_facts, forecast)
     actions = _rank_provider_actions(scenario, actual_facts, forecast, provider_financials, reconciliation)
     scenario_map = _provider_scenario_map(scenario, actual_facts, forecast, provider_financials, reconciliation, actions)
+    savings_opportunity = _build_savings_opportunity(scenario, actual_facts, forecast, provider_financials, reconciliation, scenario_map)
     supported_actions = actions or [{
         "rank": 1, "code": "insufficient_evidence", "title": "No supported financial intervention", "priority": 0,
         "expected_financial_impact": None, "reason": "Not enough evidence to estimate reliably.",
         "affected_claim_ids": [selected.get("claimId")], "operational_owner": "Provider operations", "urgency": "Routine", "supporting_evidence": [selected.get("claimId")],
     }]
-    best_action = supported_actions[0]
-    savings_phases = {
-        "review_denial": "denial correction", "validate_duplicate": "duplicate-service review", "review_repeat": "pre-submission validation",
-        "verify_authorization": "authorization verification", "verify_referral": "referral verification", "coding_review": "coding review",
-        "monitor_follow_up": "provider follow-up monitoring", "reconcile_components": "patient-balance management",
-        "insufficient_evidence": "insufficient evidence",
-    }
     exact_model_output = {
         "predicted_claim_outcome": forecast["predicted_claim_outcome"]["value"],
         "predicted_claim_outcome_probability": forecast["predicted_claim_outcome"]["probability"],
@@ -1219,6 +1495,7 @@ def build_provider_prediction_payload(scenario):
         "repeat_observations": prediction_basis["repeat_observations"],
         "provider_financial_metrics": provider_financials,
         "financial_reconciliation": reconciliation,
+        "where_provider_money_can_be_saved": savings_opportunity,
     }
     risk_drivers = [{
         "title": item.get("title"), "value": item.get("value"), "risk_direction": item.get("riskDirection"),
@@ -1248,16 +1525,17 @@ def build_provider_prediction_payload(scenario):
         "provider_financial_opportunity_summary": {
             "expected_provider_payment": provider_financials["provider_expected_reimbursement"],
             "potential_revenue_at_risk": provider_financials["potential_revenue_at_risk"],
-            "provider_opportunity_amount": provider_financials["provider_opportunity_amount"],
-            "opportunity_available": provider_financials["opportunity_available"],
-            "opportunity_reason": provider_financials["opportunity_reason"],
-            "best_savings_phase": savings_phases.get(best_action["code"], "pre-submission validation"),
-            "supporting_reason": best_action["reason"],
-            "affected_claim_ids": best_action["affected_claim_ids"],
+            "provider_opportunity_amount": savings_opportunity["current_claim_opportunity"]["amount"],
+            "opportunity_available": savings_opportunity["current_claim_opportunity"]["status"] == "validated",
+            "opportunity_reason": savings_opportunity["best_action"]["reason"],
+            "best_savings_phase": savings_opportunity["best_action"]["stage"],
+            "supporting_reason": savings_opportunity["best_action"]["reason"],
+            "affected_claim_ids": savings_opportunity["best_action"]["affected_claim_ids"],
             "confidence": forecast["confidence"],
-            "responsible_operational_team": best_action["operational_owner"],
+            "responsible_operational_team": savings_opportunity["best_action"]["owner"],
         },
         "provider_financial_metrics": provider_financials,
+        "where_provider_money_can_be_saved": savings_opportunity,
         "financial_reconciliation": reconciliation,
         "backtest_against_actual": backtest,
         "provider_money_scenario_map": scenario_map,

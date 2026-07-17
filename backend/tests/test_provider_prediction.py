@@ -4,8 +4,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from backend.import_claims import read_claims
 from backend.llm_service import _analysis_cache_key, _constrain_provider_summary, _remove_numeric_forecast_sentences, _validate_grounded_scope, _validate_numeric_grounding, build_llm_input, generate_provider_chat_answer, generate_provider_llm_analysis
-from backend.provider_prediction import build_provider_batch, build_provider_prediction_payload, find_case, validate_claims
+from backend.provider_prediction import _dataset_fingerprint, build_provider_batch, build_provider_prediction_payload, find_case, validate_claims
 
 
 def claim(claim_id, member, dos, **overrides):
@@ -113,11 +114,12 @@ class ProviderPredictionTests(unittest.TestCase):
         no_peers, _ = find_case(self.rows[-2:], "T2", min_peers=5)
         self.assertEqual(no_peers["avoidableSpend"], 0)
         self.assertFalse(no_peers["avoidableSpendSupported"])
-        rows = []
-        for member in ("P1", "P2"):
-            rows.extend([claim(f"{member}-{i}", member, date) for i, date in enumerate(("2025-01-01", "2025-02-01", "2025-03-01", "2025-04-01"), 1)])
-        rows.extend([claim(f"M-{i}", "M", date) for i, date in enumerate(("2025-01-05", "2025-02-05", "2025-03-05", "2025-04-05"), 1)])
-        rows.append(claim("TARGET", "M", "2025-08-01"))
+        rows = [
+            claim("P1", "P1", "2025-01-01", allowed=40),
+            claim("P2", "P2", "2025-01-05", allowed=45),
+            claim("M1", "M", "2025-03-01", allowed=70),
+            claim("TARGET", "M", "2025-03-20", allowed=70),
+        ]
         supported, _ = find_case(rows, "TARGET", min_peers=2)
         self.assertTrue(supported["avoidableSpendSupported"])
 
@@ -162,7 +164,7 @@ class ProviderPredictionTests(unittest.TestCase):
         money = payload["provider_financial_metrics"]
         forecast = payload["forecast"]
         self.assertEqual(money["provider_expected_reimbursement"], forecast["predicted_paid"]["value"])
-        expected_exposure = round(forecast["denial_risk"]["probability"] * forecast["predicted_allowed"]["value"], 2)
+        expected_exposure = round(forecast["denial_risk"]["probability"] * forecast["predicted_paid"]["value"], 2)
         self.assertEqual(money["expected_denial_exposure"], expected_exposure)
         self.assertEqual(money["potential_revenue_at_risk"], round(forecast["predicted_adjustment"]["value"] + expected_exposure, 2))
         allowed_backtest = payload["backtest_against_actual"]["allowed"]
@@ -170,6 +172,32 @@ class ProviderPredictionTests(unittest.TestCase):
         self.assertIn("reconciliation_difference", payload["financial_reconciliation"])
         self.assertEqual(payload["provider_money_scenario_map"]["provider_claim_payment_prediction"]["predicted_paid"], forecast["predicted_paid"]["value"])
         self.assertNotIn("cavity", json.dumps(payload["provider_money_scenario_map"]).lower())
+
+    def test_savings_opportunity_separates_supported_savings_from_forecast_exposure(self):
+        case_result, _ = find_case(self.rows, "T2", min_peers=2)
+        payload = build_provider_prediction_payload(case_result)
+        savings = payload["where_provider_money_can_be_saved"]
+        future = savings["future_exposure"]
+        forecast = payload["forecast"]
+        self.assertEqual(
+            future["expected_repeat_allowed_exposure"],
+            round(forecast["repeat_service_risk"]["probability_90d"] * forecast["predicted_allowed"]["value"], 2),
+        )
+        self.assertEqual(
+            future["expected_repeat_provider_payment_exposure"],
+            round(forecast["repeat_service_risk"]["probability_90d"] * forecast["predicted_paid"]["value"], 2),
+        )
+        self.assertIn("not confirmed savings", future["label"].lower())
+        self.assertEqual(savings["forecast_reference"]["repeat_probability_90d"], forecast["repeat_service_risk"]["probability_90d"])
+        self.assertEqual(savings["forecast_reference"]["predicted_paid"], forecast["predicted_paid"]["value"])
+        self.assertEqual(savings["forecast_reference"]["confidence"], forecast["confidence"]["score"])
+
+    def test_processed_single_claim_savings_stages_exclude_denial_resubmission_and_duplicate_review(self):
+        rows = self.rows[:3] + [claim("S1", "S", "2026-01-01")]
+        case_result, _ = find_case(rows, "S1", min_peers=2)
+        savings = build_provider_prediction_payload(case_result)["where_provider_money_can_be_saved"]
+        self.assertFalse(savings["current_claim_opportunity"]["patient_balance_opportunity_available"])
+        self.assertNotIn(savings["best_action"]["stage"].lower(), {"denial correction", "resubmission", "duplicate-service review", "patient-balance management"})
 
     def test_metric_specific_samples_and_blends_are_exposed(self):
         case_result, _ = find_case(self.rows, "T2", min_peers=2)
@@ -183,7 +211,8 @@ class ProviderPredictionTests(unittest.TestCase):
         self.assertIn("blend_weights", payload["forecast"]["repeat_service_risk"]["basis"]["90"])
 
     def test_csv_snapshot_integration_values_are_loaded_dynamically(self):
-        rows = json.loads((Path(__file__).parents[2] / "frontend/public/data/claims-fallback.json").read_text())
+        csv_path = Path(os.getenv("CSV_PATH", Path.home() / "Downloads" / "EDI_834_837_20 members(837_Claims).csv"))
+        rows = read_claims(csv_path) if csv_path.is_file() else json.loads((Path(__file__).parents[2] / "frontend/public/data/claims-fallback.json").read_text())
         source = next(row for row in rows if row.get("claimId") == "CLM00000143")
         case_result, report = find_case(rows, source["claimId"])
         payload = build_provider_prediction_payload(case_result)
@@ -196,6 +225,15 @@ class ProviderPredictionTests(unittest.TestCase):
         self.assertEqual(facts["adjustment_amount"], source["adjustment"])
         self.assertEqual(facts["claim_status"], source["status"])
         self.assertEqual(source["allowed"], 668.38)
+        savings = payload["where_provider_money_can_be_saved"]
+        future = savings["future_exposure"]
+        self.assertEqual(future["expected_repeat_allowed_exposure"], round(future["repeat_probability_90d"] * payload["forecast"]["predicted_allowed"]["value"], 2))
+        self.assertNotEqual(savings["best_action"]["stage"], "Denial correction")
+        self.assertFalse(savings["current_claim_opportunity"]["patient_balance_opportunity_available"])
+        self.assertEqual(savings["historical_comparison"]["peer_count"], payload["prediction_basis"]["member_prior_same_cpt_claims"])
+        self.assertEqual(savings["historical_comparison"]["indicators"]["allowed_rate"], "favourable")
+        self.assertEqual(savings["historical_comparison"]["indicators"]["paid_to_allowed_rate"], "favourable")
+        self.assertEqual(savings["historical_comparison"]["indicators"]["adjustment_rate"], "favourable")
 
     @patch.dict(os.environ, {"GROQ_API_KEY": ""}, clear=False)
     def test_chat_is_claim_scoped_and_uses_structured_backend_values(self):
@@ -216,6 +254,66 @@ class ProviderPredictionTests(unittest.TestCase):
             _analysis_cache_key("model", build_llm_input(first)),
             _analysis_cache_key("model", build_llm_input(second)),
         )
+
+    def test_dataset_cache_identity_includes_source_hash_and_versions(self):
+        first = [dict(row, sourceCsvHash="source-a") for row in self.rows]
+        second = [dict(row, sourceCsvHash="source-b") for row in self.rows]
+        self.assertNotEqual(_dataset_fingerprint(first, 90, 2), _dataset_fingerprint(second, 90, 2))
+        original = _dataset_fingerprint(first, 90, 2)
+        with patch("backend.provider_prediction.MODEL_VERSION", "changed-model"):
+            self.assertNotEqual(original, _dataset_fingerprint(first, 90, 2))
+
+    def test_reconciliation_difference_is_not_savings_or_patient_balance(self):
+        case_result, _ = find_case(self.rows, "T2", min_peers=2)
+        savings = build_provider_prediction_payload(case_result)["where_provider_money_can_be_saved"]
+        reconciliation = savings["forecast_reconciliation_difference"]
+        self.assertEqual(reconciliation["label"], "Forecast reconciliation difference")
+        self.assertFalse(reconciliation["is_savings"])
+        self.assertFalse(savings["current_claim_opportunity"]["patient_balance_opportunity_available"])
+        self.assertNotEqual(savings["best_action"]["stage"], "Patient-balance management")
+
+    def test_denial_revenue_exposure_uses_shared_predicted_paid(self):
+        case_result, _ = find_case(self.rows, "T2", min_peers=2)
+        payload = build_provider_prediction_payload(case_result)
+        forecast = payload["forecast"]
+        exposure = payload["where_provider_money_can_be_saved"]["future_exposure"]
+        self.assertEqual(exposure["expected_denial_revenue_exposure"], round(forecast["denial_risk"]["probability"] * forecast["predicted_paid"]["value"], 2))
+
+    def test_current_recovery_uses_close_match_not_global_forecast_peers(self):
+        rows = [
+            claim("L1", "M", "2025-01-01", paid=35),
+            claim("L2", "M", "2025-02-01", paid=42),
+            claim("G1", "G1", "2025-01-01", payerId="OTHER", cptCode="93000", paid=69),
+            claim("G2", "G2", "2025-01-01", payerId="OTHER", cptCode="93000", paid=69),
+            claim("TARGET", "M", "2025-03-01", paid=30),
+        ]
+        case_result, _ = find_case(rows, "TARGET", min_peers=2)
+        savings = build_provider_prediction_payload(case_result)["where_provider_money_can_be_saved"]
+        self.assertEqual(savings["historical_comparison"]["match_level"], "same member + same CPT")
+        self.assertEqual(savings["current_claim_opportunity"]["sample_size"], 2)
+        self.assertEqual(set(savings["historical_comparison"]["affected_claim_ids"]), {"L1", "L2"})
+
+    def test_recurrence_evidence_has_numerators_denominators_and_filters(self):
+        case_result, _ = find_case(self.rows, "T2", min_peers=2)
+        payload = build_provider_prediction_payload(case_result)
+        recurrence = payload["where_provider_money_can_be_saved"]["recurrence_evidence"]
+        for horizon in ("30", "60", "90"):
+            self.assertIn("local_numerator", recurrence[horizon])
+            self.assertIn("local_denominator", recurrence[horizon])
+            self.assertIn("external_numerator", recurrence[horizon])
+            self.assertIn("external_denominator", recurrence[horizon])
+            self.assertTrue(recurrence[horizon]["filters_used"])
+            self.assertEqual(recurrence[horizon]["final_blended_rate"], payload["forecast"]["repeat_service_risk"][f"probability_{horizon}d"])
+
+    def test_shared_forecast_reference_has_no_duplicate_prediction_values(self):
+        case_result, _ = find_case(self.rows, "T2", min_peers=2)
+        payload = build_provider_prediction_payload(case_result)
+        reference = payload["where_provider_money_can_be_saved"]["forecast_reference"]
+        forecast = payload["forecast"]
+        self.assertEqual(reference["repeat_probability_90d"], forecast["repeat_service_risk"]["probability_90d"])
+        self.assertEqual(reference["predicted_allowed"], forecast["predicted_allowed"]["value"])
+        self.assertEqual(reference["predicted_paid"], forecast["predicted_paid"]["value"])
+        self.assertEqual(reference["confidence"], forecast["confidence"]["score"])
 
     def test_llm_scope_guard_rejects_clinical_or_unsupported_setting_advice(self):
         analysis = {

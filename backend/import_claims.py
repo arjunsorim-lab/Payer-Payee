@@ -4,6 +4,7 @@ Usage: python3 -m backend.import_claims /path/to/claims.csv
 """
 
 import csv
+from hashlib import sha256
 import json
 import os
 import sys
@@ -17,9 +18,13 @@ from .fallback_db import FallbackDatabase
 
 
 def read_claims(path):
+    source_hash = sha256(path.read_bytes()).hexdigest()
     with path.open(newline="", encoding="utf-8-sig") as csv_file:
         rows = csv.DictReader(csv_file)
-        return [claim for claim in (normalize_claim(row) for row in rows) if claim.get("claimId") and claim.get("memberId")]
+        claims = [claim for claim in (normalize_claim(row) for row in rows) if claim.get("claimId") and claim.get("memberId")]
+    for claim in claims:
+        claim["sourceCsvHash"] = source_hash
+    return claims
 
 
 def upsert(collection, documents, key):

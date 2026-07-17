@@ -1,8 +1,10 @@
 import os
+import json
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from backend.llm_service import _analysis_cache_key, _constrain_provider_summary, _remove_numeric_forecast_sentences, _validate_grounded_scope, _validate_numeric_grounding, build_llm_input, generate_provider_llm_analysis
+from backend.llm_service import _analysis_cache_key, _constrain_provider_summary, _remove_numeric_forecast_sentences, _validate_grounded_scope, _validate_numeric_grounding, build_llm_input, generate_provider_chat_answer, generate_provider_llm_analysis
 from backend.provider_prediction import build_provider_batch, build_provider_prediction_payload, find_case, validate_claims
 
 
@@ -66,6 +68,31 @@ class ProviderPredictionTests(unittest.TestCase):
         second, _ = find_case(changed, "T2", min_peers=2)
         self.assertEqual(first["forecast"], second["forecast"])
 
+    def test_financial_forecast_is_for_selected_claim_not_episode_total(self):
+        case_result, _ = find_case(self.rows, "T2", min_peers=2)
+        self.assertEqual(case_result["forecast"]["charge"], 120)
+
+    def test_member_history_uses_only_claims_before_selected_claim(self):
+        earlier, _ = find_case(self.rows, "T1", min_peers=2)
+        later, _ = find_case(self.rows, "T2", min_peers=2)
+        self.assertEqual(earlier["features"]["priorClaimCount"], 0)
+        self.assertEqual(later["features"]["priorClaimCount"], 1)
+        self.assertEqual(later["features"]["priorSameCptCount"], 1)
+        changed = [dict(row) for row in self.rows]
+        changed[-1].update({"allowed": 1, "paid": 0, "adjustment": 119, "status": "Denied"})
+        earlier_after_future_change, _ = find_case(changed, "T1", min_peers=2)
+        self.assertEqual(earlier["forecast"], earlier_after_future_change["forecast"])
+        self.assertEqual(earlier["denialRisk"], earlier_after_future_change["denialRisk"])
+
+    def test_longitudinal_inputs_are_exposed_as_aggregate_prediction_basis(self):
+        case_result, _ = find_case(self.rows, "T2", min_peers=2)
+        payload = build_provider_prediction_payload(case_result)
+        basis = payload["prediction_basis"]
+        self.assertEqual(basis["member_prior_claims_used"], 1)
+        self.assertEqual(basis["member_prior_same_cpt_claims"], 1)
+        self.assertIn("repeat_observations", basis)
+        self.assertEqual(payload["exact_model_output"]["member_prior_claim_count"], 1)
+
     def test_peer_hierarchy_and_ranges_are_reported(self):
         case_result, _ = find_case(self.rows, "T1", min_peers=2)
         self.assertGreaterEqual(case_result["peerCount"], 2)
@@ -86,7 +113,12 @@ class ProviderPredictionTests(unittest.TestCase):
         no_peers, _ = find_case(self.rows[-2:], "T2", min_peers=5)
         self.assertEqual(no_peers["avoidableSpend"], 0)
         self.assertFalse(no_peers["avoidableSpendSupported"])
-        supported, _ = find_case(self.rows, "T2", min_peers=2)
+        rows = []
+        for member in ("P1", "P2"):
+            rows.extend([claim(f"{member}-{i}", member, date) for i, date in enumerate(("2025-01-01", "2025-02-01", "2025-03-01", "2025-04-01"), 1)])
+        rows.extend([claim(f"M-{i}", "M", date) for i, date in enumerate(("2025-01-05", "2025-02-05", "2025-03-05", "2025-04-05"), 1)])
+        rows.append(claim("TARGET", "M", "2025-08-01"))
+        supported, _ = find_case(rows, "TARGET", min_peers=2)
         self.assertTrue(supported["avoidableSpendSupported"])
 
     def test_structured_payload_separates_actual_and_predicted_allowed(self):
@@ -123,6 +155,57 @@ class ProviderPredictionTests(unittest.TestCase):
         self.assertEqual(exact["repeat_probability_90d"], payload["forecast"]["repeat_service_risk"]["probability_90d"])
         self.assertEqual(exact["predicted_paid"], payload["forecast"]["predicted_paid"]["value"])
         self.assertEqual(exact["peer_sample_size"], payload["prediction_basis"]["peer_claims_used"])
+
+    def test_money_metrics_reconciliation_backtest_and_scenario_map(self):
+        case_result, _ = find_case(self.rows, "T2", min_peers=2)
+        payload = build_provider_prediction_payload(case_result)
+        money = payload["provider_financial_metrics"]
+        forecast = payload["forecast"]
+        self.assertEqual(money["provider_expected_reimbursement"], forecast["predicted_paid"]["value"])
+        expected_exposure = round(forecast["denial_risk"]["probability"] * forecast["predicted_allowed"]["value"], 2)
+        self.assertEqual(money["expected_denial_exposure"], expected_exposure)
+        self.assertEqual(money["potential_revenue_at_risk"], round(forecast["predicted_adjustment"]["value"] + expected_exposure, 2))
+        allowed_backtest = payload["backtest_against_actual"]["allowed"]
+        self.assertEqual(allowed_backtest["absolute_error"], round(abs(allowed_backtest["predicted"] - allowed_backtest["actual"]), 2))
+        self.assertIn("reconciliation_difference", payload["financial_reconciliation"])
+        self.assertEqual(payload["provider_money_scenario_map"]["provider_claim_payment_prediction"]["predicted_paid"], forecast["predicted_paid"]["value"])
+        self.assertNotIn("cavity", json.dumps(payload["provider_money_scenario_map"]).lower())
+
+    def test_metric_specific_samples_and_blends_are_exposed(self):
+        case_result, _ = find_case(self.rows, "T2", min_peers=2)
+        payload = build_provider_prediction_payload(case_result)
+        for metric in ("predicted_allowed", "predicted_paid", "predicted_patient_responsibility", "predicted_adjustment"):
+            metric_basis = payload["prediction_basis"]["metric_basis"][metric]
+            self.assertIn("local_sample_size", metric_basis)
+            self.assertIn("external_sample_size", metric_basis)
+            self.assertAlmostEqual(sum(metric_basis["blend_weights"].values()), 1.0)
+        self.assertIn("blend_weights", payload["forecast"]["denial_risk"]["basis"])
+        self.assertIn("blend_weights", payload["forecast"]["repeat_service_risk"]["basis"]["90"])
+
+    def test_csv_snapshot_integration_values_are_loaded_dynamically(self):
+        rows = json.loads((Path(__file__).parents[2] / "frontend/public/data/claims-fallback.json").read_text())
+        source = next(row for row in rows if row.get("claimId") == "CLM00000143")
+        case_result, report = find_case(rows, source["claimId"])
+        payload = build_provider_prediction_payload(case_result)
+        facts = payload["actual_claim_facts"]
+        self.assertEqual(report["validation"]["inputClaims"], len(rows))
+        self.assertEqual(facts["charge_amount"], source["totalCharge"])
+        self.assertEqual(facts["allowed_amount"], source["allowed"])
+        self.assertEqual(facts["paid_amount"], source["paid"])
+        self.assertEqual(facts["patient_responsibility"], source["patientResp"])
+        self.assertEqual(facts["adjustment_amount"], source["adjustment"])
+        self.assertEqual(facts["claim_status"], source["status"])
+        self.assertEqual(source["allowed"], 668.38)
+
+    @patch.dict(os.environ, {"GROQ_API_KEY": ""}, clear=False)
+    def test_chat_is_claim_scoped_and_uses_structured_backend_values(self):
+        case_result, _ = find_case(self.rows, "T2", min_peers=2)
+        response = generate_provider_chat_answer(case_result, "How was the predicted allowed amount calculated?", "conversation-test")
+        payload = build_provider_prediction_payload(case_result)
+        self.assertEqual(response["claim_id"], "T2")
+        self.assertEqual(response["episode_id"], payload["episode_id"])
+        self.assertIn(f"${payload['forecast']['predicted_allowed']['value']:,.2f}", response["answer"])
+        self.assertNotIn("memberId", json.dumps(build_llm_input(case_result)))
 
     def test_cache_key_changes_when_prediction_input_changes(self):
         first, _ = find_case(self.rows, "T2", min_peers=2)

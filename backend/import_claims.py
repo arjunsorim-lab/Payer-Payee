@@ -13,6 +13,7 @@ from pymongo import ReplaceOne
 
 from .claim_mapper import build_member_documents, normalize_claim
 from .db import close_mongo, connect_mongo, get_mongo_config
+from .fallback_db import FallbackDatabase
 
 
 def read_claims(path):
@@ -39,7 +40,7 @@ def main():
     claims = read_claims(csv_path)
     members = build_member_documents(claims)
     db = connect_mongo()
-    if getattr(db, "is_fallback", False):
+    if isinstance(db, FallbackDatabase):
         raise SystemExit("MongoDB is unavailable. Set MONGODB_URI before importing the CSV.")
 
     db.claims.create_index("claimId", unique=True)

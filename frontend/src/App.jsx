@@ -38,6 +38,7 @@ import {
   TrendingUp,
   UserRound,
   Users,
+  X,
 } from 'lucide-react'
 import './App.css'
 import { predictClaim } from '../../shared/predictionEngine'
@@ -343,7 +344,7 @@ function buildMemberStats(member) {
   return [
     { label: 'Total Allowed', value: formatCurrency(member.totalAllowed), note: `Across ${claimCount.toLocaleString()} claims` },
     { label: 'Total Paid', value: formatCurrency(member.totalPaid), note: 'Payer payments in the database' },
-    { label: 'Active Claims', value: claimCount.toLocaleString(), note: `${claimCount - member.deniedCount} active, ${member.deniedCount} denied` },
+    { label: 'Total Claims', value: claimCount.toLocaleString(), note: `${claimCount - member.deniedCount} non-denied, ${member.deniedCount} denied` },
     { label: 'Last Encounter', value: formatDate(member.latestClaim.dos), note: member.latestClaim.placeOfService },
   ]
 }
@@ -2005,15 +2006,18 @@ function ProviderLlmPanel({ claim, onCasePrediction }) {
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [modalOpen, setModalOpen] = useState(false)
 
   useEffect(() => {
     setResult(null)
     setError('')
+    setModalOpen(false)
   }, [claim.number, claim.claimId])
 
   const runAnalysis = async () => {
     setLoading(true)
     setError('')
+    setModalOpen(true)
     try {
       const payload = await fetchJson(
         `/api/predictions/provider-case/${encodeURIComponent(claim.number || claim.claimId)}/llm`,
@@ -2054,12 +2058,231 @@ function ProviderLlmPanel({ claim, onCasePrediction }) {
           <span>{result.message}</span>
         </div>
       ) : null}
-      {result?.forecast ? <ProviderLlmResult result={result} /> : null}
+      {result?.forecast ? <div className="llm-intro">Analysis ready for {result.claim_id}. Open the financial decision-support view to review predictions, backtest and evidence.</div> : null}
+      {result?.forecast ? <button className="llm-secondary-button" type="button" onClick={() => setModalOpen(true)}>Open Provider LLM Analysis</button> : null}
+      {modalOpen ? <ProviderLlmModal claim={claim} result={result} loading={loading} error={error} onClose={() => setModalOpen(false)} onRetry={runAnalysis} /> : null}
     </Card>
   )
 }
 
-function ProviderLlmResult({ result }) {
+function ProviderLlmModal({ claim, result, loading, error, onClose, onRetry }) {
+  useEffect(() => {
+    const onKeyDown = (event) => { if (event.key === 'Escape') onClose() }
+    document.addEventListener('keydown', onKeyDown)
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = previousOverflow
+    }
+  }, [onClose])
+
+  return (
+    <div className="provider-llm-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+      <div className="provider-llm-modal" role="dialog" aria-modal="true" aria-labelledby="provider-llm-modal-title">
+        <header className="provider-llm-modal-header">
+          <div>
+            <span className="provider-llm-kicker"><Sparkles size={14} /> Groq provider assistant</span>
+            <h2 id="provider-llm-modal-title">Provider LLM Analysis</h2>
+            <p>{claim.number || claim.claimId} · Provider financial decision support</p>
+          </div>
+          <button className="provider-llm-close" type="button" aria-label="Close Provider LLM Analysis" onClick={onClose}><X size={20} /></button>
+        </header>
+        <div className="provider-llm-modal-body">
+          {loading ? <div className="llm-modal-state"><RefreshCw className="spin" size={22} /> Calculating provider forecast and grounded explanation…</div> : null}
+          {!loading && error ? <div className="llm-config-note error"><span>{error}</span><button className="llm-primary-button" type="button" onClick={onRetry}>Retry analysis</button></div> : null}
+          {!loading && result?.forecast ? <ProviderMoneyLlmResult result={result} /> : null}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function MetricBasisDetails({ basis, label }) {
+  if (!basis) return null
+  return (
+    <details className="llm-how-calculated">
+      <summary>How calculated</summary>
+      <span>{label || 'Metric'} basis</span>
+      <small>{basis.local_sample_size || 0} earlier member claim(s)</small>
+      <small>{basis.external_sample_size || 0} external peer claim(s)</small>
+      <small>Blend: {formatProbability(basis.blend_weights?.local)} local / {formatProbability(basis.blend_weights?.external)} external</small>
+    </details>
+  )
+}
+
+function ScenarioMapData({ content }) {
+  if (Array.isArray(content)) return <ul>{content.map((item) => <li key={String(item)}>{String(item)}</li>)}</ul>
+  return <dl>{Object.entries(content || {}).map(([key, value]) => {
+    const label = key.replaceAll('_', ' ')
+    if (value && typeof value === 'object' && !Array.isArray(value)) return <div className="scenario-map-nested" key={key}><dt>{label}</dt><dd><ScenarioMapData content={value} /></dd></div>
+    const currency = typeof value === 'number' && /payment|paid|allowed|responsibility|adjustment|exposure|risk|spend|amount|charge|opportunity/.test(key) && !/rate|probability/.test(key)
+    return <div key={key}><dt>{label}</dt><dd>{currency ? formatOptionalCurrency(value) : Array.isArray(value) ? value.join(', ') || 'None' : value === null ? 'Not enough evidence to estimate reliably.' : String(value)}</dd></div>
+  })}</dl>
+}
+
+function ProviderMoneyLlmResult({ result }) {
+  const forecast = result.forecast || {}
+  const facts = result.actual_claim_facts || {}
+  const opportunity = result.provider_financial_opportunity_summary || {}
+  const money = result.provider_financial_metrics || {}
+  const reconciliation = result.financial_reconciliation || {}
+  const backtest = result.backtest_against_actual || {}
+  const scenario = result.provider_money_scenario_map || {}
+  const basis = result.prediction_basis || {}
+  const denial = forecast.denial_risk || {}
+  const repeat = forecast.repeat_service_risk || {}
+  const confidence = forecast.confidence || {}
+  const metricBasis = basis.metric_basis || {}
+  const actions = Array.isArray(result.recommended_actions) ? result.recommended_actions : []
+  const drivers = Array.isArray(result.risk_drivers) ? result.risk_drivers : []
+  const evidence = Array.isArray(result.evidence_used) ? result.evidence_used : []
+  const limitations = Array.isArray(result.limitations) ? result.limitations : []
+  const unavailable = 'Not enough evidence to estimate reliably.'
+  const snapshotCards = [
+    { label: 'Predicted claim outcome', value: forecast.predicted_claim_outcome?.display_value || 'Unavailable', note: `Probability ${formatProbability(forecast.predicted_claim_outcome?.probability)}` },
+    { label: 'Denial probability', value: formatProbability(denial.probability), note: `${denial.level || 'unknown'} risk`, basis: { local_sample_size: denial.basis?.member_sample_size, external_sample_size: denial.basis?.external_sample_size, blend_weights: denial.basis?.blend_weights } },
+    { label: '30-day repeat probability', value: formatProbability(repeat.probability_30d), basis: { local_sample_size: repeat.basis?.['30']?.member_trials, external_sample_size: repeat.basis?.['30']?.peer_trials, blend_weights: repeat.basis?.['30']?.blend_weights } },
+    { label: '60-day repeat probability', value: formatProbability(repeat.probability_60d), basis: { local_sample_size: repeat.basis?.['60']?.member_trials, external_sample_size: repeat.basis?.['60']?.peer_trials, blend_weights: repeat.basis?.['60']?.blend_weights } },
+    { label: '90-day repeat probability', value: formatProbability(repeat.probability_90d), note: `${repeat.level || 'unknown'} risk`, basis: { local_sample_size: repeat.basis?.['90']?.member_trials, external_sample_size: repeat.basis?.['90']?.peer_trials, blend_weights: repeat.basis?.['90']?.blend_weights } },
+    { label: 'Predicted allowed', value: formatOptionalCurrency(forecast.predicted_allowed?.value), note: formatPredictionRange(forecast.predicted_allowed), basis: metricBasis.predicted_allowed },
+    { label: 'Predicted paid', value: formatOptionalCurrency(forecast.predicted_paid?.value), note: formatPredictionRange(forecast.predicted_paid), basis: metricBasis.predicted_paid },
+    { label: 'Predicted patient responsibility', value: formatOptionalCurrency(forecast.predicted_patient_responsibility?.value), note: formatPredictionRange(forecast.predicted_patient_responsibility), basis: metricBasis.predicted_patient_responsibility },
+    { label: 'Predicted adjustment', value: formatOptionalCurrency(forecast.predicted_adjustment?.value), note: formatPredictionRange(forecast.predicted_adjustment), basis: metricBasis.predicted_adjustment },
+    { label: 'Provider expected net reimbursement', value: formatOptionalCurrency(money.provider_expected_net_reimbursement), note: 'Equals predicted provider payment' },
+    { label: 'Provider financial exposure', value: formatOptionalCurrency(money.potential_revenue_at_risk), note: 'Adjustment + expected denial exposure' },
+    { label: 'Potentially avoidable repeat spend', value: Number.isFinite(money.potentially_avoidable_repeat_spend) ? formatOptionalCurrency(money.potentially_avoidable_repeat_spend) : unavailable, note: forecast.potentially_avoidable_spend?.reason || '' },
+    { label: 'Model confidence', value: formatProbability(confidence.score), note: confidence.level || 'unknown' },
+    { label: 'Prediction method', value: (confidence.prediction_method || 'Unavailable').replaceAll('_', ' '), note: confidence.model_version || '' },
+  ]
+  const factRows = [
+    ['Claim ID', facts.claim_id], ['Service date', formatDate(facts.service_date)], ['Member-safe reference', facts.member_safe_reference], ['Payer', facts.payer],
+    ['Billing provider', facts.billing_provider], ['Rendering provider', facts.rendering_provider], ['CPT', [facts.cpt_code, facts.cpt_description].filter(Boolean).join(' — ')],
+    ['ICD-10 / diagnosis family', [facts.diagnosis_code, facts.diagnosis_family, facts.diagnosis_description].filter(Boolean).join(' — ')], ['Units', facts.units],
+    ['Place of service', [facts.place_of_service_code, facts.place_of_service_description].filter(Boolean).join(' — ')], ['Actual charge', formatOptionalCurrency(facts.charge_amount)],
+    ['Actual allowed', formatOptionalCurrency(facts.allowed_amount)], ['Actual paid', formatOptionalCurrency(facts.paid_amount)], ['Actual patient responsibility', formatOptionalCurrency(facts.patient_responsibility)],
+    ['Actual adjustment', formatOptionalCurrency(facts.adjustment_amount)], ['Actual status', facts.claim_status], ['Actual denial reason', facts.denial_reason || 'None recorded'],
+    ['Prior authorization status', facts.has_prior_auth ? 'Present' : 'Missing — requirement unknown'], ['Referral status', facts.has_referral ? 'Present' : 'Missing — requirement unknown'],
+  ]
+  const backtestRows = ['allowed', 'paid', 'patient_responsibility', 'adjustment'].map((key) => [key.replaceAll('_', ' '), backtest[key] || {}])
+  const mapSections = [
+    ['Member claim-history view', scenario.member_claim_history], ['Encounter and coding view', scenario.encounter_and_coding],
+    ['Provider claim/payment prediction', scenario.provider_claim_payment_prediction, 'provider-focus'], ['Where provider money may be saved', scenario.where_provider_money_may_be_saved],
+    ['Cost-leakage risks', scenario.cost_leakage_risks], ['Provider money comparison', scenario.provider_money_comparison],
+  ]
+
+  return (
+    <div className="provider-llm-result provider-money-result">
+      <section className="llm-wide-section financial-opportunity-summary">
+        <div className="llm-section-heading"><span>Provider Financial Opportunity Summary</span><small>{opportunity.best_savings_phase || 'insufficient evidence'}</small></div>
+        <div className="financial-opportunity-grid">
+          <article><span>Expected provider payment</span><strong>{formatOptionalCurrency(opportunity.expected_provider_payment)}</strong></article>
+          <article><span>Potential revenue at risk</span><strong>{formatOptionalCurrency(opportunity.potential_revenue_at_risk)}</strong></article>
+          <article><span>Estimated opportunity</span><strong>{opportunity.opportunity_available ? formatOptionalCurrency(opportunity.provider_opportunity_amount) : unavailable}</strong></article>
+        </div>
+        <p>{opportunity.supporting_reason}</p><small>Owner: {opportunity.responsible_operational_team} · Evidence: {(opportunity.affected_claim_ids || []).join(', ')}</small>
+      </section>
+
+      <section className="llm-wide-section prediction-snapshot">
+        <div className="llm-section-heading"><span>Prediction Snapshot</span><small>{forecast.forecast_label}</small></div>
+        <div className="llm-snapshot-grid money-snapshot-grid">{snapshotCards.map((card) => <article className="llm-snapshot-card" key={card.label}><span>{card.label}</span><strong>{card.value}</strong>{card.note ? <small>{card.note}</small> : null}<MetricBasisDetails basis={card.basis} label={card.label} /></article>)}</div>
+      </section>
+
+      <section className="llm-wide-section actual-facts-section">
+        <div className="llm-section-heading"><span>Actual Claim Facts</span><small>Actual adjudicated result — separate from predictions</small></div>
+        <dl className="llm-facts-grid money-facts-grid">{factRows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value ?? 'Unavailable'}</dd></div>)}</dl>
+      </section>
+
+      <section className="llm-wide-section backtest-section">
+        <div className="llm-section-heading"><span>Backtest Against Actual Result</span><small>Temporal holdout at {backtest.prediction_cutoff_date}</small></div>
+        <div className="backtest-outcome"><strong>Claim outcome</strong><span>Predicted: {backtest.claim_outcome?.predicted || 'Unavailable'} ({formatProbability(backtest.claim_outcome?.probability)})</span><span>Actual: {backtest.claim_outcome?.actual || 'Unavailable'}</span><b>{backtest.claim_outcome?.correct ? 'Matched' : 'Did not match'}</b></div>
+        <div className="backtest-grid">{backtestRows.map(([label, item]) => <article key={label}><span>{label}</span><strong>{formatOptionalCurrency(item.predicted)} predicted</strong><small>{formatOptionalCurrency(item.actual)} actual</small><small>Error {formatOptionalCurrency(item.absolute_error)} · {Number.isFinite(item.percentage_error) ? `${item.percentage_error.toFixed(1)}%` : 'N/A'}</small><small>{formatPredictionRange(item.range)} · {item.actual_in_range === null ? 'Range unavailable' : item.actual_in_range ? 'Actual inside range' : 'Actual outside range'}</small></article>)}</div>
+      </section>
+
+      <section className="llm-wide-section scenario-map-section">
+        <div className="llm-section-heading"><span>Provider Money Scenario Map</span><small>Generated from this claim and earlier history</small></div>
+        <div className="provider-money-map">{mapSections.map(([title, content, className]) => <article className={className || ''} key={title}><strong>{title}</strong><ScenarioMapData content={content} /></article>)}</div>
+      </section>
+
+      <section className="llm-wide-section">
+        <div className="llm-section-heading"><span>Financial Risk Drivers</span></div>
+        <div className="llm-driver-list">{drivers.map((driver) => <article key={driver.title}><header><strong>{driver.title}</strong><b>{driver.value}</b></header><p>{driver.reason}</p><small>{driver.source_type?.replaceAll('_', ' ')} · {driver.risk_direction}</small></article>)}</div>
+        {reconciliation.warnings?.map((warning) => <p className="financial-warning" key={warning}>{warning}</p>)}
+      </section>
+
+      <section className="llm-wide-section">
+        <div className="llm-section-heading"><span>Ranked Provider Actions</span><small>Evidence-driven administrative actions</small></div>
+        <div className="llm-action-list ranked-action-list">{actions.map((action) => <article key={action.code}><header><b>#{action.rank}</b><strong>{action.title}</strong><span>{action.urgency}</span></header><p>{action.reason}</p><small>Impact: {Number.isFinite(action.expected_financial_impact) ? formatOptionalCurrency(action.expected_financial_impact) : 'Not estimated'} · Owner: {action.operational_owner} · Claims: {(action.affected_claim_ids || []).join(', ')}</small></article>)}</div>
+      </section>
+
+      <section className="llm-wide-section prediction-basis-section">
+        <div className="llm-section-heading"><span>Prediction Basis and Peer Evidence</span><small>Cutoff {basis.prediction_cutoff_date}</small></div>
+        <dl className="llm-facts-grid"><div><dt>Earlier member claims</dt><dd>{basis.member_prior_claims_used || 0}</dd></div><div><dt>Earlier same-CPT claims</dt><dd>{basis.member_prior_same_cpt_claims || 0}</dd></div><div><dt>External financial peers</dt><dd>{basis.peer_claims_used || 0}</dd></div><div><dt>Peer episodes</dt><dd>{basis.peer_episodes_used || 0}</dd></div><div><dt>Matching level</dt><dd>{basis.matching_level}</dd></div><div><dt>Fallback level</dt><dd>{basis.fallback_level}</dd></div><div><dt>Model version</dt><dd>{basis.model_version}</dd></div><div><dt>Confidence</dt><dd>{formatProbability(confidence.score)} · {confidence.level}</dd></div></dl>
+        <p className="confidence-explanation"><strong>Confidence drivers:</strong> {(confidence.drivers || []).join(', ') || 'None recorded'}. <strong>Penalties:</strong> {(confidence.penalties || []).join(', ') || 'None recorded'}.</p>
+        <div className="llm-evidence-list">{evidence.map((item) => <article key={item.claim_id}><strong>Claim {item.claim_id}</strong><small>{formatDate(item.service_date)} · CPT {item.cpt_code} · {item.claim_status}</small><small>Actual allowed {formatOptionalCurrency(item.actual_allowed)} · Actual paid {formatOptionalCurrency(item.actual_paid)}</small></article>)}</div>
+      </section>
+
+      <section className="llm-wide-section"><div className="llm-section-heading"><span>Limitations</span></div><ul>{limitations.map((item) => <li key={item}>{item}</li>)}</ul></section>
+      <details className="llm-exact-output"><summary>Exact model output</summary><pre>{JSON.stringify(result.exact_model_output || {}, null, 2)}</pre></details>
+      <ProviderPredictionChat result={result} />
+    </div>
+  )
+}
+
+function ProviderPredictionChat({ result }) {
+  const claimId = result.claim_id
+  const episodeId = result.episode_id
+  const storageKey = `payerpayee.provider-chat.${claimId}.${episodeId}`
+  const conversationId = useMemo(() => `${claimId}-${episodeId}-${Date.now().toString(36)}`, [claimId, episodeId])
+  const [messages, setMessages] = useState(() => {
+    try {
+      const cached = JSON.parse(window.localStorage.getItem(storageKey) || 'null')
+      if (Array.isArray(cached)) return cached
+    } catch { /* use welcome message */ }
+    return [{ role: 'assistant', text: 'Ask me to explain any backend-calculated prediction, financial exposure, sample basis, backtest result or provider action. I cannot change the calculated values.' }]
+  })
+  const [draft, setDraft] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [lastQuestion, setLastQuestion] = useState('')
+  const scrollRef = useRef(null)
+  const suggested = result.suggested_questions || ['How was the predicted allowed amount calculated?', 'How much provider revenue is at risk?', 'Which historical claims were used?', 'How confident is the model and why?']
+
+  useEffect(() => {
+    try { window.localStorage.setItem(storageKey, JSON.stringify(messages)) } catch { /* storage optional */ }
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
+  }, [messages, storageKey])
+
+  const submit = async (question = draft) => {
+    const text = question.trim()
+    if (!text || loading) return
+    setLoading(true); setError(''); setLastQuestion(text); setDraft('')
+    setMessages((current) => [...current, { role: 'user', text }])
+    try {
+      const response = await fetchJson('/api/provider-llm/chat', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ claim_id: claimId, episode_id: episodeId, message: text, conversation_id: conversationId }),
+      })
+      setMessages((current) => [...current, { role: 'assistant', text: response.answer, meta: response }])
+    } catch (requestError) {
+      setError(requestError.message || 'Chat response is unavailable.')
+    } finally { setLoading(false) }
+  }
+  const clear = () => { setMessages([{ role: 'assistant', text: 'Chat cleared. Ask a question about this prediction.' }]); setError('') }
+
+  return (
+    <section className="llm-wide-section provider-prediction-chat">
+      <div className="llm-section-heading"><span>Ask About This Prediction</span><button type="button" onClick={clear}>Clear chat</button></div>
+      <div className="chat-suggestions">{suggested.slice(0, 6).map((question) => <button type="button" key={question} onClick={() => submit(question)}>{question}</button>)}</div>
+      <div className="chat-messages" ref={scrollRef}>{messages.map((message, index) => <div className={`chat-bubble ${message.role}`} key={`${message.role}-${index}`}><strong>{message.role === 'user' ? 'You' : 'Grok provider assistant'}</strong><p>{message.text}</p>{message.meta?.evidence_claim_ids?.length ? <small>Evidence: {message.meta.evidence_claim_ids.join(', ')}</small> : null}</div>)}{loading ? <div className="chat-bubble assistant"><RefreshCw className="spin" size={15} /> Reviewing the structured prediction…</div> : null}</div>
+      {error ? <div className="chat-error">{error}<button type="button" onClick={() => submit(lastQuestion)}>Retry</button></div> : null}
+      <div className="chat-composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit() } }} placeholder="Ask about this claim prediction…" rows="2" /><button className="llm-primary-button" type="button" onClick={() => submit()} disabled={loading || !draft.trim()}><Send size={16} /> Send</button></div>
+      <small>Enter to send · Shift+Enter for a new line. The browser sends only claim ID, episode ID, question and conversation ID.</small>
+    </section>
+  )
+}
+
+export function ProviderLlmResult({ result }) {
   const forecast = result.forecast || {}
   const facts = result.actual_claim_facts || {}
   const analysis = result.llm_analysis || result.analysis || {}
@@ -2140,7 +2363,11 @@ function ProviderLlmResult({ result }) {
         <div className="llm-section-heading"><span>Prediction basis</span></div>
         <dl className="llm-facts-grid">
           <div><dt>Peer claims used</dt><dd>{basis.peer_claims_used?.toLocaleString?.() || 0}</dd></div>
+          <div><dt>Earlier member claims used</dt><dd>{basis.member_prior_claims_used?.toLocaleString?.() || 0}</dd></div>
+          <div><dt>Earlier same-CPT claims</dt><dd>{basis.member_prior_same_cpt_claims?.toLocaleString?.() || 0}</dd></div>
+          <div><dt>Member financial claims used</dt><dd>{basis.member_financial_claims_used?.toLocaleString?.() || 0}</dd></div>
           <div><dt>Matching level</dt><dd>{basis.matching_level || 'Unavailable'}</dd></div>
+          <div><dt>Member financial match</dt><dd>{basis.member_financial_match_level || 'No matching history'}</dd></div>
           <div><dt>Fallback</dt><dd>{basis.fallback_explanation || 'Unavailable'}</dd></div>
           <div><dt>Historical peer denial rate</dt><dd>{formatProbability(basis.historical_peer_denial_rate)}</dd></div>
           <div><dt>Median allowed rate</dt><dd>{formatProbability(basis.median_allowed_rate)}</dd></div>

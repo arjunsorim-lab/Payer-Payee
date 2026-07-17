@@ -10,12 +10,12 @@ from werkzeug.exceptions import HTTPException
 
 try:
     from .db import connect_mongo, get_mongo_config
-    from .llm_service import generate_provider_llm_analysis
+    from .llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
     from .prediction_service import build_prediction_scenarios, summarize_scenarios
     from .provider_prediction import build_provider_prediction_payload, find_case
 except ImportError:
     from db import connect_mongo, get_mongo_config
-    from llm_service import generate_provider_llm_analysis
+    from llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
     from prediction_service import build_prediction_scenarios, summarize_scenarios
     from provider_prediction import build_provider_prediction_payload, find_case
 
@@ -413,6 +413,27 @@ def get_provider_case_llm_analysis(claim_number):
         })
     except RuntimeError as exc:
         return json_response({"configured": True, "message": str(exc)}, 502)
+
+
+@app.post("/api/provider-llm/chat")
+def provider_llm_chat():
+    """Answer a claim-scoped follow-up without accepting raw claim data from the browser."""
+    body = request.get_json(silent=True) or {}
+    claim_id = str(body.get("claim_id") or "").strip()
+    episode_id = str(body.get("episode_id") or "").strip()
+    message = str(body.get("message") or "").strip()
+    conversation_id = str(body.get("conversation_id") or "").strip()
+    if not claim_id or not episode_id or not message or not conversation_id:
+        return json_response({"message": "claim_id, episode_id, message and conversation_id are required"}, 400)
+    if len(message) > 1000 or len(conversation_id) > 120:
+        return json_response({"message": "Chat input exceeds the allowed length"}, 400)
+    db = connect_mongo()
+    scenario, error = build_provider_case(db, claim_id)
+    if error:
+        return json_response({"message": error}, 404 if error == "Claim not found" else 422)
+    if scenario.get("episodeId") != episode_id:
+        return json_response({"message": "The episode does not match the selected claim"}, 409)
+    return json_response(generate_provider_chat_answer(scenario, message, conversation_id))
 
 
 @app.get("/api/predictions/risk-queue")

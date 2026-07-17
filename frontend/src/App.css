@@ -1111,6 +1111,362 @@ dd {
   font-size: 9px;
 }
 
+.provider-llm-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(10, 24, 48, .64);
+  backdrop-filter: blur(3px);
+}
+
+.provider-llm-modal {
+  width: min(1240px, 96vw);
+  max-height: 94vh;
+  border: 1px solid #bed0e6;
+  border-radius: 14px;
+  background: #f4f7fb;
+  box-shadow: 0 26px 70px rgba(7, 24, 50, .34);
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.provider-llm-modal-header {
+  padding: 17px 20px;
+  border-bottom: 1px solid #d7e2ee;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: #fff;
+}
+
+.provider-llm-modal-header h2 {
+  margin: 3px 0;
+  color: #10182f;
+  font-size: 20px;
+}
+
+.provider-llm-modal-header p {
+  margin: 0;
+  color: #68758a;
+  font-size: 11px;
+}
+
+.provider-llm-close {
+  width: 38px;
+  height: 38px;
+  border: 1px solid #d2deeb;
+  border-radius: 8px;
+  color: #274263;
+  background: #fff;
+  display: grid;
+  place-items: center;
+}
+
+.provider-llm-modal-body {
+  min-height: 280px;
+  padding: 16px;
+  overflow: auto;
+}
+
+.llm-modal-state {
+  min-height: 260px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #175abd;
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.provider-money-result {
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.financial-opportunity-summary {
+  border: 1px solid #8db7e8;
+  border-left: 5px solid #1760bd;
+  background: linear-gradient(135deg, #f5f9ff 0%, #eef7f0 100%);
+}
+
+.financial-opportunity-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.financial-opportunity-grid article {
+  border: 1px solid #d3e1ef;
+  border-radius: 8px;
+  padding: 13px;
+  background: rgba(255,255,255,.88);
+  display: grid;
+  gap: 5px;
+}
+
+.financial-opportunity-grid span {
+  color: #617088;
+  font-size: 9px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.financial-opportunity-grid strong {
+  color: #114b2b;
+  font-size: 21px;
+}
+
+.money-snapshot-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.llm-how-calculated {
+  margin-top: 4px;
+  padding-top: 5px;
+  border-top: 1px solid #edf1f6;
+}
+
+.llm-how-calculated summary {
+  cursor: pointer;
+  color: #1760bd;
+  font-size: 9px;
+  font-weight: 850;
+}
+
+.llm-how-calculated > span,
+.llm-how-calculated > small {
+  display: block;
+  margin-top: 3px;
+}
+
+.money-facts-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.backtest-outcome {
+  border: 1px solid #dbe5f0;
+  border-radius: 7px;
+  padding: 10px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: #40516b;
+  font-size: 10px;
+  background: #f8fbff;
+}
+
+.backtest-outcome b {
+  margin-left: auto;
+  color: #1760bd;
+}
+
+.backtest-grid {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.backtest-grid article {
+  border: 1px solid #e0e7f0;
+  border-radius: 7px;
+  padding: 10px;
+  display: grid;
+  gap: 4px;
+}
+
+.backtest-grid span,
+.backtest-grid small {
+  color: #6b788d;
+  font-size: 9px;
+}
+
+.backtest-grid span {
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.provider-money-map {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.provider-money-map > article {
+  min-width: 0;
+  border: 1px solid #dce5ef;
+  border-radius: 8px;
+  padding: 11px;
+  background: #f9fbfe;
+}
+
+.provider-money-map > article.provider-focus {
+  grid-column: span 2;
+  border-color: #8cb5e5;
+  background: #edf5ff;
+}
+
+.provider-money-map article > strong {
+  color: #173e79;
+  font-size: 11px;
+}
+
+.provider-money-map dl,
+.provider-money-map ul {
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.provider-money-map ul {
+  padding-left: 17px;
+  color: #45546b;
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.provider-money-map dl > div {
+  border-top: 1px solid #e7edf4;
+  padding: 5px 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.provider-money-map dt,
+.provider-money-map dd {
+  margin: 0;
+  color: #647188;
+  font-size: 8px;
+  text-transform: capitalize;
+}
+
+.provider-money-map dd {
+  color: #263750;
+  font-weight: 800;
+  text-align: right;
+}
+
+.provider-money-map .scenario-map-nested {
+  display: block;
+}
+
+.provider-money-map .scenario-map-nested > dd {
+  text-align: left;
+}
+
+.financial-warning,
+.chat-error {
+  border: 1px solid #efcaca;
+  border-radius: 7px;
+  padding: 9px;
+  color: #982936 !important;
+  background: #fff7f7;
+}
+
+.ranked-action-list article header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ranked-action-list article header span {
+  margin-left: auto;
+  color: #8a5b13;
+  font-size: 9px;
+}
+
+.provider-prediction-chat {
+  border-color: #9abde7;
+  background: #f7faff;
+}
+
+.provider-prediction-chat .llm-section-heading button,
+.chat-error button {
+  border: 0;
+  color: #1760bd;
+  background: transparent;
+  font-size: 9px;
+  font-weight: 900;
+}
+
+.chat-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 9px;
+}
+
+.chat-suggestions button {
+  border: 1px solid #c8d9ec;
+  border-radius: 999px;
+  padding: 6px 9px;
+  color: #17549f;
+  background: #fff;
+  font-size: 9px;
+}
+
+.chat-messages {
+  max-height: 300px;
+  overflow: auto;
+  display: grid;
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid #d8e4f0;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.chat-bubble {
+  max-width: 82%;
+  border-radius: 9px;
+  padding: 9px 11px;
+  color: #2b3b54;
+  background: #eef4fb;
+  font-size: 10px;
+}
+
+.chat-bubble.user {
+  justify-self: end;
+  color: #fff;
+  background: #1760bd;
+}
+
+.chat-bubble strong,
+.chat-bubble small {
+  display: block;
+  font-size: 8px;
+}
+
+.chat-bubble p {
+  margin: 4px 0;
+  line-height: 1.45;
+}
+
+.chat-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.chat-composer textarea {
+  resize: vertical;
+  min-height: 44px;
+  border: 1px solid #cbd9e8;
+  border-radius: 7px;
+  padding: 9px;
+  color: #263750;
+  background: #fff;
+  font: inherit;
+  font-size: 10px;
+}
+
 .provider-case-anchor {
   grid-column: 1 / -1;
   display: grid;
@@ -5208,4 +5564,27 @@ dd {
   .dashboard-footer span:nth-of-type(2) {
     margin-left: 0;
   }
+}
+
+@media (max-width: 900px) {
+  .provider-llm-modal-backdrop { padding: 0; }
+  .provider-llm-modal { width: 100vw; max-height: 100vh; height: 100vh; border-radius: 0; }
+  .money-snapshot-grid,
+  .money-facts-grid,
+  .backtest-grid,
+  .provider-money-map { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .provider-money-map > article.provider-focus { grid-column: span 2; }
+}
+
+@media (max-width: 560px) {
+  .financial-opportunity-grid,
+  .money-snapshot-grid,
+  .money-facts-grid,
+  .backtest-grid,
+  .provider-money-map { grid-template-columns: 1fr; }
+  .provider-money-map > article.provider-focus { grid-column: auto; }
+  .backtest-outcome { align-items: flex-start; flex-direction: column; }
+  .backtest-outcome b { margin-left: 0; }
+  .chat-composer { grid-template-columns: 1fr; }
+  .chat-bubble { max-width: 94%; }
 }

@@ -2,7 +2,7 @@
 
 The Provider LLM card combines a deterministic Python episode forecast with a concise Groq explanation. Groq never calculates the forecast: it explains the already-scored provider, payer, procedure, utilization, payment, and evidence facts.
 
-The result UI separates `ACTUAL CLAIM FACTS` from the retrospective deterministic estimate. `PREDICTION SNAPSHOT` exposes outcome, denial and 30/60/90-day repeat probabilities, financial ranges, potentially avoidable spend availability, confidence, peer sample and method without requiring the user to interpret prose. `EXACT MODEL OUTPUT` is a PHI-free audit view of the numeric backend output.
+The result opens in a claim-scoped modal. It separates `ACTUAL CLAIM FACTS` from `FORECAST FOR NEXT RELATED CLAIM`, shows a holdout backtest for adjudicated claims, and exposes outcome, denial and 30/60/90-day repeat probabilities, financial ranges, provider exposure, reconciliation, confidence, metric-specific sample details and prediction method. A dynamic provider money scenario map and ranked administrative actions use the same backend values. `EXACT MODEL OUTPUT` remains a PHI-free audit view.
 
 ## Configuration
 
@@ -24,12 +24,13 @@ Do not add the Groq key to frontend environment variables. Do not commit `.env`.
 - Canonical claim records are validated before scoring.
 - Valid claims are grouped into stable, non-PHI 90-day member and diagnosis-family episodes.
 - Every valid claim is assigned to exactly one episode.
-- Financial ranges use hierarchical matching and medians/interquartile ranges from earlier adjudicated peer episodes only.
-- Denial probability uses a smoothed historical peer rate.
-- Repeat utilization is reported at 30, 60, and 90 days.
+- Financial ranges blend hierarchical peer rates with the member's earlier payer/CPT adjudication history. The submitted charge for the selected claim—not the total episode charge—is the amount basis. Matching starts at payer + billing provider + CPT + diagnosis family + place of service + units and falls back through seven documented levels only when the minimum sample is not met.
+- Denial probability uses an empirical-Bayes blend of the peer denial rate and relevant earlier member adjudications.
+- Repeat utilization at 30, 60, and 90 days uses mature historical recurrence observations for related diagnosis and procedure families, with peer evidence as the prior.
+- Only claims earlier than the selected claim can become longitudinal inputs; later claims are excluded to prevent temporal leakage.
 - Avoidable spend is shown only when repeated-service evidence and the configured minimum peer count are both present. It is always labelled “Potentially avoidable repeat-service spend.”
 - Priority is an administrative review order from 0–100, not clinical acuity.
-- Confidence combines peer-claim sample size, hierarchy match specificity, required-field completeness and peer allowed-rate stability. It is calculated in Python and cannot be changed by Groq.
+- Confidence combines local and external sample sizes, hierarchy specificity, fallback depth, required-field completeness, peer financial variance, historical MAE, interval coverage and outcome/recurrence calibration. It is calculated in Python and cannot be changed by Groq.
 - Recommendations are deterministic and conditional: denial review requires a denial, repeat review requires repeated CPT evidence, and missing authorization/referral identifiers produce a verification instruction rather than an unsupported requirement claim.
 - The LLM receives coded, de-identified facts and exact claim-evidence references. It cannot determine medical necessity.
 
@@ -48,7 +49,8 @@ The batch command writes `output/provider_llm_batch_report.json`, including vali
 
 - `GET /api/predictions/provider-case/<claim number>` returns the deterministic episode forecast and metadata.
 - `POST /api/predictions/provider-case/<claim number>/llm` returns the strict Groq analysis. A successful response is cached by model, prompt version, and de-identified case content.
+- `POST /api/provider-llm/chat` accepts only claim ID, episode ID, question and conversation ID. The backend rebuilds the structured case context and returns a grounded, claim-scoped answer without receiving raw CSV rows from the browser.
 
-Both endpoints return `actual_claim_facts`, `forecast`, `prediction_basis`, `risk_drivers`, `recommended_actions`, `evidence_used`, `limitations`, and `exact_model_output`. The financial forecast is explicitly labelled `retrospective_current_claim` because the current submitted charge is its basis; actual adjudication remains separate.
+The prediction payload returns `actual_claim_facts`, `forecast`, `provider_financial_metrics`, `financial_reconciliation`, `backtest_against_actual`, `provider_money_scenario_map`, `prediction_basis`, `risk_drivers`, `recommended_actions`, `evidence_used`, `limitations`, and `exact_model_output`. Actual adjudication is never used as a prediction input; it is attached only after scoring for the backtest.
 
 If Groq times out or returns invalid structured output after one repair attempt, the endpoint returns a labelled deterministic fallback instead of failing the page.

@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { formatOptionalCurrency, formatPredictionRange, formatProbability } from './providerLlmFormat.js'
 import {
   ArrowLeft,
   ArrowRight,
@@ -30,14 +31,16 @@ import {
   Send,
   Settings,
   ShieldCheck,
+  Sparkles,
   Stethoscope,
+  Target,
   TrendingDown,
   TrendingUp,
   UserRound,
   Users,
 } from 'lucide-react'
 import './App.css'
-import { buildPredictionSummary, predictClaim } from '../../shared/predictionEngine'
+import { predictClaim } from '../../shared/predictionEngine'
 
 const navSections = [
   {
@@ -115,10 +118,11 @@ function useAppData() {
   return useContext(DataContext)
 }
 
-async function fetchJson(path) {
+async function fetchJson(path, options = {}) {
   const candidates = [...new Set([
     CONFIGURED_API_BASE_URL,
-    import.meta.env.DEV ? LOCAL_API_BASE_URL : window.location.origin,
+    window.location.origin,
+    import.meta.env.DEV ? LOCAL_API_BASE_URL : '',
     import.meta.env.DEV ? '' : RENDER_API_BASE_URL,
   ].filter(Boolean))]
   let lastError = new Error('Backend API is unavailable')
@@ -126,14 +130,21 @@ async function fetchJson(path) {
   for (const baseUrl of candidates) {
     try {
       const response = await fetch(`${baseUrl}${path}`, {
-        headers: { Accept: 'application/json' },
+        ...options,
+        headers: { Accept: 'application/json', ...(options.headers || {}) },
       })
       if (!response.ok) {
-        lastError = new Error(`Request failed: ${response.status}`)
+        const errorPayload = await response.json().catch(() => null)
+        const requestError = new Error(errorPayload?.message || `Request failed: ${response.status}`)
+        if (![404, 405].includes(response.status)) throw requestError
+        lastError = requestError
         continue
       }
       return await response.json()
     } catch (error) {
+      if (!['Failed to fetch', 'Load failed', 'NetworkError when attempting to fetch resource.'].includes(error.message)) {
+        throw error
+      }
       lastError = error
     }
   }
@@ -330,10 +341,8 @@ function buildMembers(rows) {
 function buildMemberStats(member) {
   const claimCount = member.claims.length
   return [
-    { label: 'Total Allowed', value: formatCurrency(member.totalAllowed), delta: '+ 8.4%', dir: 'up' },
-    { label: 'Total Paid', value: formatCurrency(member.totalPaid), delta: '+ 9.1%', dir: 'up' },
-    { label: 'Patient Responsibility', value: formatCurrency(member.totalPatientResp), delta: '+ 6.7%', dir: 'up' },
-    { label: 'Open Balance', value: formatCurrency(member.totalPatientResp), delta: '- 12.3%', dir: 'down' },
+    { label: 'Total Allowed', value: formatCurrency(member.totalAllowed), note: `Across ${claimCount.toLocaleString()} claims` },
+    { label: 'Total Paid', value: formatCurrency(member.totalPaid), note: 'Payer payments in the database' },
     { label: 'Active Claims', value: claimCount.toLocaleString(), note: `${claimCount - member.deniedCount} active, ${member.deniedCount} denied` },
     { label: 'Last Encounter', value: formatDate(member.latestClaim.dos), note: member.latestClaim.placeOfService },
   ]
@@ -371,25 +380,50 @@ function getDashboardMetricDescription(label) {
 }
 
 function buildProviderKpis(claim, claimsData) {
-  const providerClaims = claimsData.filter((row) => row.billingProvider === claim.billingProvider)
+  const providerAllClaims = claimsData.filter((row) => row.billingProvider === claim.billingProvider)
+  const latestDate = providerAllClaims.reduce((latest, row) => row.dos > latest ? row.dos : latest, '')
+  const latestYear = Number(latestDate.slice(0, 4))
+  const priorYear = latestYear - 1
+  const throughMonthDay = latestDate.slice(5)
+  const providerClaims = providerAllClaims.filter((row) => Number(row.dos.slice(0, 4)) === latestYear)
+  const priorClaims = providerAllClaims.filter((row) => (
+    Number(row.dos.slice(0, 4)) === priorYear && row.dos.slice(5) <= throughMonthDay
+  ))
   const totalAllowed = sum(providerClaims, 'allowed')
   const totalPaid = sum(providerClaims, 'paid')
-  const totalPatientResp = sum(providerClaims, 'patientResp')
+  const priorAllowed = sum(priorClaims, 'allowed')
+  const priorPaid = sum(priorClaims, 'paid')
   const denied = providerClaims.filter((row) => row.status === 'Denied').length
+  const priorDenied = priorClaims.filter((row) => row.status === 'Denied').length
   const approvalRate = providerClaims.length ? ((providerClaims.length - denied) / providerClaims.length) * 100 : 0
   const denialRate = providerClaims.length ? (denied / providerClaims.length) * 100 : 0
   const reimbursementRate = totalAllowed ? (totalPaid / totalAllowed) * 100 : 0
+  const priorApprovalRate = priorClaims.length ? ((priorClaims.length - priorDenied) / priorClaims.length) * 100 : 0
+  const priorDenialRate = priorClaims.length ? (priorDenied / priorClaims.length) * 100 : 0
+  const priorReimbursementRate = priorAllowed ? (priorPaid / priorAllowed) * 100 : 0
+  const submissionLags = providerClaims
+    .filter((row) => row.dos && row.submissionDate)
+    .map((row) => Math.max(0, Math.round((new Date(`${row.submissionDate}T00:00:00`) - new Date(`${row.dos}T00:00:00`)) / 86_400_000)))
+  const priorSubmissionLags = priorClaims
+    .filter((row) => row.dos && row.submissionDate)
+    .map((row) => Math.max(0, Math.round((new Date(`${row.submissionDate}T00:00:00`) - new Date(`${row.dos}T00:00:00`)) / 86_400_000)))
+  const average = (values) => values.length ? values.reduce((total, value) => total + value, 0) / values.length : 0
+  const percentDelta = (current, previous) => previous ? ((current - previous) / previous) * 100 : null
+  const moneyDelta = (current, previous) => {
+    const delta = percentDelta(current, previous)
+    return delta === null ? null : `${delta >= 0 ? '+' : ''}${delta.toFixed(1)}%`
+  }
+  const pointsDelta = (current, previous) => `${current - previous >= 0 ? '+' : ''}${(current - previous).toFixed(1)} pts`
+  const lag = average(submissionLags)
+  const priorLag = average(priorSubmissionLags)
 
   return [
-    { label: 'Total Allowed', value: formatCompactCurrency(totalAllowed), delta: '+ 7.6%' },
-    { label: 'Total Paid', value: formatCompactCurrency(totalPaid), delta: '+ 8.3%' },
-    { label: 'Patient Responsibility', value: formatCompactCurrency(totalPatientResp), delta: '+ 6.1%' },
+    { label: 'Total Paid', value: formatCompactCurrency(totalPaid), delta: moneyDelta(totalPaid, priorPaid) },
     { label: 'Claims Submitted', value: providerClaims.length.toLocaleString() },
-    { label: 'Approval Rate', value: formatPercent(approvalRate), delta: '+ 3.2 pts' },
-    { label: 'Denial Rate', value: formatPercent(denialRate), delta: '- 1.8 pts', dir: 'down' },
-    { label: 'Average Reimbursement %', value: formatPercent(reimbursementRate), delta: '+ 1.4 pts' },
-    { label: 'Average Days to Pay', value: '24.3', delta: '- 2.6 days', dir: 'down' },
-    { label: 'Open AR', value: formatCompactCurrency(totalPatientResp) },
+    { label: 'Approval Rate', value: formatPercent(approvalRate), delta: pointsDelta(approvalRate, priorApprovalRate) },
+    { label: 'Denial Rate', value: formatPercent(denialRate), delta: pointsDelta(denialRate, priorDenialRate), dir: denialRate <= priorDenialRate ? 'down' : 'up' },
+    { label: 'Average Reimbursement %', value: formatPercent(reimbursementRate), delta: pointsDelta(reimbursementRate, priorReimbursementRate) },
+    { label: 'Average Submission Lag', value: `${lag.toFixed(1)} days`, delta: `${lag - priorLag >= 0 ? '+' : ''}${(lag - priorLag).toFixed(1)} days`, dir: lag <= priorLag ? 'down' : 'up' },
   ]
 }
 
@@ -625,6 +659,7 @@ function App() {
               onSearchChange={updateSearchQuery}
               onSelectMember={openMemberDetail}
               onOpenClaim={openClaimDetail}
+              onOpenPrediction={openPredictionDetail}
               onBackToEncounters={backToEncounters}
             />
           )}
@@ -707,7 +742,7 @@ function TopBar() {
   )
 }
 
-function PatientWorkspace({ selectedClaim, selectedMemberId, searchQuery, onSearchChange, onSelectMember, onOpenClaim, onBackToEncounters }) {
+function PatientWorkspace({ selectedClaim, selectedMemberId, searchQuery, onSearchChange, onSelectMember, onOpenClaim, onOpenPrediction, onBackToEncounters }) {
   const { membersById } = useAppData()
   const selectedMember = selectedMemberId ? membersById.get(selectedMemberId) : null
 
@@ -722,6 +757,7 @@ function PatientWorkspace({ selectedClaim, selectedMemberId, searchQuery, onSear
             onBackToEncounters={onBackToEncounters}
             onSelectMember={onSelectMember}
             onOpenClaim={onOpenClaim}
+            onOpenPrediction={onOpenPrediction}
           />
         ) : (
           <EncounterSearch
@@ -821,66 +857,73 @@ function ClaimsWorkspace({ selectedClaim, searchQuery, onSearchChange, onOpenCla
 
 function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, onBackToPredictions }) {
   const { claimsData, payerOptions } = useAppData()
-  const [riskFilter, setRiskFilter] = useState('At Risk')
+  const [scenarios, setScenarios] = useState([])
+  const [scenarioMeta, setScenarioMeta] = useState(null)
+  const [scenarioLoading, setScenarioLoading] = useState(true)
+  const [scenarioError, setScenarioError] = useState('')
+  const [riskFilter, setRiskFilter] = useState('All Scenarios')
   const [payerFilter, setPayerFilter] = useState('All Payers')
-  const [sortBy, setSortBy] = useState('Highest Risk')
+  const [sortBy, setSortBy] = useState('Highest Repeat Risk')
   const [currentPage, setCurrentPage] = useState(1)
-  const pageSize = 8
+  const pageSize = 10
   const normalizedQuery = searchQuery.trim().toLowerCase()
-  const predictionRows = useMemo(
-    () => claimsData.map((claim) => ({ claim, prediction: predictClaim(claim, claimsData) })),
-    [claimsData],
-  )
 
-  const filteredRows = useMemo(() => predictionRows
-    .filter(({ claim, prediction }) => {
+  useEffect(() => {
+    let cancelled = false
+    setScenarioLoading(true)
+    fetchJson('/api/predictions/scenarios')
+      .then((payload) => {
+        if (cancelled) return
+        setScenarios(Array.isArray(payload.items) ? payload.items : [])
+        setScenarioMeta({ ...payload.model, totalClaims: payload.totalClaims })
+        setScenarioError('')
+      })
+      .catch(() => {
+        if (cancelled) return
+        setScenarios([])
+        setScenarioError('The Python prediction service is unavailable. Start the Flask backend and refresh this page.')
+      })
+      .finally(() => {
+        if (!cancelled) setScenarioLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [claimsData.length])
+
+  const filteredScenarios = useMemo(() => scenarios
+    .filter((scenario) => {
       const matchesSearch = !normalizedQuery || [
-        claim.number,
-        claim.patient,
-        claim.memberId,
-        claim.payer,
-        claim.billingProvider,
-        claim.cptCode,
-        claim.cptDescription,
-        claim.diagnosisCode,
-        claim.diagnosisDescription,
+        scenario.anchor.number,
+        scenario.patient,
+        scenario.memberId,
+        scenario.payer,
+        scenario.provider,
+        scenario.condition,
+        scenario.diagnosisCode,
       ].some((value) => value?.toString().toLowerCase().includes(normalizedQuery))
-      const matchesPayer = payerFilter === 'All Payers' || claim.payer === payerFilter
-      const matchesRisk = riskFilter === 'All' ||
-        (riskFilter === 'At Risk' && prediction.risks.overall.level !== 'Low') ||
-        prediction.risks.overall.level === riskFilter
+      const matchesPayer = payerFilter === 'All Payers' || scenario.payer === payerFilter
+      const matchesRisk = riskFilter === 'All Scenarios' || scenario.risk.level === riskFilter
 
       return matchesSearch && matchesPayer && matchesRisk
     })
     .sort((a, b) => {
-      if (sortBy === 'Predicted Paid') {
-        return b.prediction.money.predictedPaid - a.prediction.money.predictedPaid
-      }
-      if (sortBy === 'Adjustment Risk') {
-        return b.prediction.risks.adjustment.score - a.prediction.risks.adjustment.score
-      }
-      if (sortBy === 'Patient Balance') {
-        return b.prediction.money.predictedPatientResp - a.prediction.money.predictedPatientResp
-      }
-      if (sortBy === 'Newest DOS') {
-        return b.claim.dos.localeCompare(a.claim.dos)
-      }
-      return b.prediction.risks.overall.score - a.prediction.risks.overall.score
-    }), [predictionRows, normalizedQuery, payerFilter, riskFilter, sortBy])
+      if (sortBy === 'Avoidable Spend') return b.avoidableSpend - a.avoidableSpend
+      if (sortBy === 'Predicted Paid') return b.forecast.paid - a.forecast.paid
+      if (sortBy === 'Most Visits') return b.totalVisitCount - a.totalVisitCount
+      if (sortBy === 'Newest Episode') return b.episodeEnd.localeCompare(a.episodeEnd)
+      return b.risk.score - a.risk.score
+    }), [scenarios, normalizedQuery, payerFilter, riskFilter, sortBy])
 
-  const summary = useMemo(
-    () => buildPredictionSummary(filteredRows.map(({ claim }) => claim), claimsData),
-    [filteredRows, claimsData],
-  )
-  const predictionCatalog = useMemo(
-    () => buildPredictionCatalog(filteredRows),
-    [filteredRows],
-  )
-  const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize))
+  const summary = useMemo(() => ({
+    totalScenarios: filteredScenarios.length,
+    highRiskCount: filteredScenarios.filter((scenario) => scenario.risk.level === 'High').length,
+    predictedPaid: filteredScenarios.reduce((total, scenario) => total + scenario.forecast.paid, 0),
+    avoidableSpend: filteredScenarios.reduce((total, scenario) => total + scenario.avoidableSpend, 0),
+  }), [filteredScenarios])
+  const pageCount = Math.max(1, Math.ceil(filteredScenarios.length / pageSize))
   const safePage = Math.min(currentPage, pageCount)
-  const displayedRows = useMemo(
-    () => filteredRows.slice((safePage - 1) * pageSize, safePage * pageSize),
-    [filteredRows, safePage],
+  const displayedScenarios = useMemo(
+    () => filteredScenarios.slice((safePage - 1) * pageSize, safePage * pageSize),
+    [filteredScenarios, safePage],
   )
 
   useEffect(() => {
@@ -897,18 +940,17 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
           <>
             <div className="predictions-header">
               <div>
-                <h1>Predictions</h1>
-                <p>Ten claim predictions generated from the current 837 claim data across patient, provider, doctor, and insurance views.</p>
+                <h1>Provider Case Predictions</h1>
+                <p>Provider-focused payment forecasts, repeat-utilisation risk, and actionable claim opportunities.</p>
               </div>
               <div className="prediction-controls">
                 <label className="prediction-select">
                   <span>Risk</span>
                   <select value={riskFilter} onChange={(event) => setRiskFilter(event.target.value)}>
-                    <option>At Risk</option>
+                    <option>All Scenarios</option>
                     <option>High</option>
                     <option>Medium</option>
                     <option>Low</option>
-                    <option>All</option>
                   </select>
                   <ChevronDown size={16} />
                 </label>
@@ -924,36 +966,40 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
                 <label className="prediction-select">
                   <span>Sort</span>
                   <select value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
-                    <option>Highest Risk</option>
+                    <option>Highest Repeat Risk</option>
+                    <option>Avoidable Spend</option>
                     <option>Predicted Paid</option>
-                    <option>Adjustment Risk</option>
-                    <option>Patient Balance</option>
-                    <option>Newest DOS</option>
+                    <option>Most Visits</option>
+                    <option>Newest Episode</option>
                   </select>
                   <ChevronDown size={16} />
                 </label>
               </div>
             </div>
 
-            <PredictionCatalog catalog={predictionCatalog} />
-            <PredictionSummary summary={summary} />
-            <AtRiskClaimsQueue
-              title="Prediction Queue"
-              subtitle={`${filteredRows.length.toLocaleString()} matching claim${filteredRows.length === 1 ? '' : 's'} from the current database`}
-              items={displayedRows}
-              onOpenClaim={onOpenPrediction}
-              emptyMessage="No claims match the current prediction filters."
-              footer={(
-                <ClaimsTableFooter
-                  currentPage={safePage}
-                  pageCount={pageCount}
-                  pageSize={pageSize}
-                  totalCount={filteredRows.length}
-                  onPageChange={setCurrentPage}
+            {scenarioLoading ? <Card className="scenario-service-state"><RefreshCw className="spin" size={22} /> Building predictions from the claims database…</Card> : null}
+            {scenarioError ? <Card className="scenario-service-state error"><Info size={22} /> {scenarioError}</Card> : null}
+            {!scenarioLoading && !scenarioError ? (
+              <>
+                <PredictionSummary summary={summary} />
+                <PredictionScenarioDirectory
+                  scenarios={displayedScenarios}
+                  totalCount={filteredScenarios.length}
+                  onOpenScenario={(scenario) => onOpenPrediction(scenario.anchor)}
+                  emptyMessage="No patient episodes match the current scenario filters."
+                  footer={(
+                    <ClaimsTableFooter
+                      currentPage={safePage}
+                      pageCount={pageCount}
+                      pageSize={pageSize}
+                      totalCount={filteredScenarios.length}
+                      onPageChange={setCurrentPage}
+                    />
+                  )}
                 />
-              )}
-            />
-            <PredictionMethodPanel totalCount={filteredRows.length} />
+                <PredictionMethodPanel totalCount={scenarioMeta?.totalClaims || claimsData.length} scenarioCount={filteredScenarios.length} model={scenarioMeta} />
+              </>
+            ) : null}
           </>
         )}
       </section>
@@ -962,13 +1008,35 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
 }
 
 function PredictionDetailPage({ claim, onBackToPredictions }) {
-  const { claimsData } = useAppData()
-  const prediction = predictClaim(claim, claimsData)
-  const topDrivers = prediction.riskDrivers.slice(0, 6)
-  const detailCatalog = useMemo(
-    () => buildPredictionCatalog([{ claim, prediction }], { detailMode: true }),
-    [claim, prediction],
-  )
+  const [scenario, setScenario] = useState(null)
+  const [caseError, setCaseError] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    setScenario(null)
+    setCaseError('')
+    fetchJson(`/api/predictions/provider-case/${encodeURIComponent(claim.number || claim.claimId)}`)
+      .then((payload) => {
+        if (!cancelled) setScenario(payload.item || null)
+      })
+      .catch(() => {
+        if (!cancelled) setCaseError('Unable to build this provider case prediction from the current claim data.')
+      })
+    return () => { cancelled = true }
+  }, [claim.number, claim.claimId])
+
+  if (caseError) {
+    return (
+      <Card className="scenario-service-state error">
+        <Info size={22} /> {caseError}
+        <button className="back-link" type="button" onClick={onBackToPredictions}>Back to predictions</button>
+      </Card>
+    )
+  }
+
+  if (!scenario) {
+    return <Card className="scenario-service-state"><RefreshCw className="spin" size={22} /> Building provider case prediction…</Card>
+  }
 
   return (
     <>
@@ -978,269 +1046,139 @@ function PredictionDetailPage({ claim, onBackToPredictions }) {
           Back to Predictions
         </button>
         <div className="data-stamp">
-          Forecast generated from {prediction.peerCount.toLocaleString()} peer claim{prediction.peerCount === 1 ? '' : 's'}
+          {scenario.totalVisitCount} related claims · {scenario.peerCount.toLocaleString()} financial peers · {scenario.confidence} confidence
           <RefreshCw size={15} />
         </div>
       </div>
-
-      <Card className="prediction-detail-hero">
-        <div>
-          <span className={`claim-status ${statusClass(claim.status)}`}>{statusLabel(claim.status)}</span>
-          <h1>Prediction Detail - {claim.number}</h1>
-          <p>{claim.patient} · {claim.memberId} · {claim.payer} · {getService(claim)}</p>
-        </div>
-        <RiskBadge level={prediction.risks.overall.level} score={prediction.risks.overall.score} />
-      </Card>
-
-      <div className="prediction-detail-grid">
-        <PaymentForecastCard prediction={prediction} />
-        <Card className="prediction-driver-card">
-          <div className="prediction-card-header">
-            <div>
-              <h2>Driver Breakdown</h2>
-              <p>Dominant risk signals ranked for this claim.</p>
-            </div>
-            <span>{prediction.confidence} confidence</span>
-          </div>
-          <div className="prediction-driver-grid">
-            {topDrivers.map((driver) => (
-              <div className="prediction-driver-item" key={driver.label}>
-                <div>
-                  <strong>{driver.label}</strong>
-                  <RiskBadge level={riskLevelForScore(driver.score)} score={driver.score} />
-                </div>
-                <p>{driver.reason}</p>
-              </div>
-            ))}
-          </div>
-        </Card>
-      </div>
-
-      <Card className="prediction-action-card">
-        <div className="prediction-card-header">
-          <div>
-            <h2>Recommended Actions</h2>
-            <p>Situation-specific fixes based on the highest current risk drivers.</p>
-          </div>
-          <span>{prediction.fixes.length} action{prediction.fixes.length === 1 ? '' : 's'}</span>
-        </div>
-        <ol>
-          {prediction.fixes.map((fix) => (
-            <li key={fix}>{fix}</li>
-          ))}
-        </ol>
-      </Card>
-
-      <PredictionCatalog catalog={detailCatalog} title="All 10 Claim Predictions" compact />
-
-      <SelectedClaimDetail claim={claim} />
+      <PredictionScenarioMap scenario={scenario} />
     </>
   )
 }
 
-function riskLevelForScore(score) {
-  if (score >= 50) return 'High'
-  if (score >= 35) return 'Medium'
-  return 'Low'
+function PredictionScenarioDirectory({ scenarios, totalCount, onOpenScenario, emptyMessage, footer }) {
+  return (
+    <Card className="scenario-directory">
+      <div className="scenario-directory-heading">
+        <div>
+          <span className="section-kicker">Episode worklist</span>
+          <h2>Provider case predictions</h2>
+          <p>{totalCount.toLocaleString()} provider-focused episodes built from diagnosis, utilisation, payer, and payment history.</p>
+        </div>
+        <div className="scenario-view-legend" aria-label="Scenario viewpoints">
+          <span><Hospital size={15} /> Provider perspective</span>
+        </div>
+      </div>
+
+      {scenarios.length ? (
+        <div className="scenario-card-grid">
+          {scenarios.map((scenario) => (
+            <article className={`scenario-card scenario-${scenario.category}`} key={scenario.id}>
+              <header className="scenario-card-header">
+                <div className="scenario-condition-icon"><ShieldCheck size={24} /></div>
+                <div>
+                  <span>{scenario.pathway.label} · {scenario.diagnosisCode}</span>
+                  <h3>{scenario.condition}</h3>
+                  <p>{scenario.patient} · {scenario.memberId}</p>
+                </div>
+                <RiskBadge level={scenario.risk.level} score={scenario.risk.score} />
+              </header>
+
+              <div className="scenario-card-views">
+                <div>
+                  <span><Hospital size={15} /> Provider</span>
+                  <strong>{scenario.provider}</strong>
+                  <small>{scenario.payer}</small>
+                </div>
+                <div>
+                  <span><Banknote size={15} /> Financial forecast</span>
+                  <strong>{formatCurrency(scenario.forecast.paid)} predicted paid</strong>
+                  <small>{formatCurrency(scenario.forecast.adjustment)} predicted adjustment</small>
+                </div>
+                <div>
+                  <span><Target size={15} /> Provider opportunity</span>
+                  <strong>{scenario.risk.level} · {scenario.risk.score}% repeat risk</strong>
+                  <small>{scenario.bestSavingsPhase}</small>
+                </div>
+              </div>
+
+              <div className="scenario-card-footer">
+                <div>
+                  <span>Likely outcome</span>
+                  <strong>{scenario.likelyOutcome}</strong>
+                </div>
+                <button type="button" onClick={() => onOpenScenario?.(scenario)}>
+                  Open scenario <ArrowRight size={16} />
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : <div className="empty-state">{emptyMessage}</div>}
+
+      {footer}
+    </Card>
+  )
 }
 
-function getDriver(prediction, label) {
-  return prediction.riskDrivers.find((driver) => driver.label === label) || { label, score: 0, reason: '' }
-}
-
-function highestPredictionRow(rows, selector) {
-  return rows.reduce((best, row) => {
-    if (!best) return row
-    return selector(row) > selector(best) ? row : best
-  }, null)
-}
-
-function buildOutcomeSummary(rows) {
-  const outcomeCounts = rows.reduce((counts, { prediction }) => {
-    const outcome = prediction.outcome.likely
-    counts.set(outcome, (counts.get(outcome) || 0) + 1)
-    return counts
-  }, new Map())
-  return [...outcomeCounts.entries()].sort((a, b) => b[1] - a[1])[0] || ['No claims', 0]
-}
-
-function emptyPredictionCatalog() {
-  return [
-    'Money forecast',
-    'Denial risk + likely reason',
-    'Claim outcome',
-    'High adjustment / write-off risk',
-    'Patient responsibility + collection risk',
-    'Eligibility / auth / referral failure',
-    'Secondary / COB / forwarded payer risk',
-    'Repeat claim / avoidable cost risk',
-    'Provider performance risk',
-    'Resubmission success',
-  ].map((title, index) => ({
-    number: String(index + 1).padStart(2, '0'),
-    title,
-    view: index === 4 ? 'Patient view' : index === 7 ? 'Doctor view' : [1, 2, 5, 6].includes(index) ? 'Insurance view' : 'Provider view',
-    level: 'Low',
-    score: 0,
-    metric: 'No matching claims',
-    claimLine: 'Adjust filters to populate this prediction.',
-    providerThinking: 'Provider thinking: no current claim data is available for this prediction slice.',
-    action: 'Broaden filters or import more 837/835 history.',
-  }))
-}
-
-function buildPredictionCatalog(rows, options = {}) {
-  if (!rows.length) return emptyPredictionCatalog()
-
-  const detailMode = options.detailMode || rows.length === 1
-  const totalPredictedPaid = rows.reduce((total, { prediction }) => total + prediction.money.predictedPaid, 0)
-  const totalAdjustment = rows.reduce((total, { prediction }) => total + prediction.money.predictedAdjustment, 0)
-  const totalPatientBalance = rows.reduce((total, { prediction }) => total + prediction.money.predictedPatientResp, 0)
-  const [topOutcome, topOutcomeCount] = buildOutcomeSummary(rows)
-
-  const moneyRow = highestPredictionRow(rows, ({ prediction }) => prediction.money.predictedPaid)
-  const denialRow = highestPredictionRow(rows, ({ prediction }) => prediction.risks.denial.score)
-  const outcomeRow = highestPredictionRow(rows, ({ prediction }) => prediction.risks.overall.score)
-  const adjustmentRow = highestPredictionRow(rows, ({ prediction }) => prediction.risks.adjustment.score)
-  const collectionRow = highestPredictionRow(rows, ({ prediction }) => prediction.risks.collection.score)
-  const authRow = highestPredictionRow(rows, ({ prediction }) => Math.max(getDriver(prediction, 'Authorization').score, getDriver(prediction, 'Referral').score))
-  const cobRow = highestPredictionRow(rows, ({ prediction }) => prediction.risks.cob.score)
-  const repeatRow = highestPredictionRow(rows, ({ prediction }) => prediction.risks.repeat.score)
-  const providerRow = highestPredictionRow(rows, ({ prediction }) => prediction.risks.provider.score)
-  const resubmitRow = highestPredictionRow(
-    rows.filter(({ prediction }) => prediction.resubmissionSuccess),
-    ({ prediction }) => prediction.resubmissionSuccess?.score || 0,
-  ) || denialRow
-
-  const claimLine = (row) => `${row.claim.number} · ${row.claim.patient} · ${row.claim.payer}`
-  const scoreLine = (score) => `${Math.round(score)}%`
-  const topFix = (row) => row.prediction.fixes[0] || 'Submit with standard claim review.'
-
-  return [
-    {
-      number: '01',
-      title: 'Money forecast',
-      view: 'Provider view',
-      level: moneyRow.prediction.confidence,
-      score: moneyRow.prediction.risks.overall.score,
-      metric: detailMode ? formatCurrency(moneyRow.prediction.money.predictedPaid) : formatCurrency(totalPredictedPaid),
-      claimLine: claimLine(moneyRow),
-      providerThinking: `Provider thinking: expected payer cash is based on ${moneyRow.prediction.peerCount.toLocaleString()} peer claim(s) matched by ${moneyRow.prediction.basis}.`,
-      action: `Plan revenue follow-up around ${formatCurrency(moneyRow.prediction.money.predictedPaid)} expected paid and ${formatCurrency(moneyRow.prediction.money.predictedAdjustment)} expected adjustment.`,
-    },
-    {
-      number: '02',
-      title: 'Denial risk + likely reason',
-      view: 'Insurance view',
-      level: denialRow.prediction.risks.denial.level,
-      score: denialRow.prediction.risks.denial.score,
-      metric: `${scoreLine(denialRow.prediction.risks.denial.score)} denial risk`,
-      claimLine: claimLine(denialRow),
-      providerThinking: `Provider thinking: payer denial exposure is driven by ${denialRow.prediction.risks.denial.reason}`,
-      action: topFix(denialRow),
-    },
-    {
-      number: '03',
-      title: 'Claim outcome',
-      view: 'Insurance view',
-      level: outcomeRow.prediction.risks.overall.level,
-      score: outcomeRow.prediction.risks.overall.score,
-      metric: detailMode ? outcomeRow.prediction.outcome.likely : `${topOutcome} (${topOutcomeCount})`,
-      claimLine: claimLine(outcomeRow),
-      providerThinking: `Provider thinking: likely outcome is inferred from peer status mix, denial score, COB signal, and filing indicator.`,
-      action: outcomeRow.prediction.outcome.likely.includes('review') ? topFix(outcomeRow) : 'Release standard claims and monitor payer response.',
-    },
-    {
-      number: '04',
-      title: 'High adjustment / write-off risk',
-      view: 'Provider view',
-      level: adjustmentRow.prediction.risks.adjustment.level,
-      score: adjustmentRow.prediction.risks.adjustment.score,
-      metric: detailMode ? formatCurrency(adjustmentRow.prediction.money.predictedAdjustment) : formatCurrency(totalAdjustment),
-      claimLine: claimLine(adjustmentRow),
-      providerThinking: `Provider thinking: expected write-off is ${adjustmentRow.prediction.money.adjustmentRate}% of charge against this payer/service pattern.`,
-      action: `Compare ${adjustmentRow.claim.cptCode} charge to payer contract and allowed-rate history before final billing.`,
-    },
-    {
-      number: '05',
-      title: 'Patient responsibility + collection risk',
-      view: 'Patient view',
-      level: collectionRow.prediction.risks.collection.level,
-      score: collectionRow.prediction.risks.collection.score,
-      metric: detailMode ? formatCurrency(collectionRow.prediction.money.predictedPatientResp) : formatCurrency(totalPatientBalance),
-      claimLine: claimLine(collectionRow),
-      providerThinking: `Provider thinking: patient balance risk affects collections, estimates, and payment-plan timing for ${collectionRow.claim.memberId}.`,
-      action: `Prepare patient estimate for ${formatCurrency(collectionRow.prediction.money.predictedPatientResp)} and review payment outreach.`,
-    },
-    {
-      number: '06',
-      title: 'Eligibility / auth / referral failure',
-      view: 'Insurance view',
-      level: riskLevelForScore(Math.max(getDriver(authRow.prediction, 'Authorization').score, getDriver(authRow.prediction, 'Referral').score)),
-      score: Math.max(getDriver(authRow.prediction, 'Authorization').score, getDriver(authRow.prediction, 'Referral').score),
-      metric: `${authRow.claim.priorAuth ? 'Auth present' : 'Auth missing'} · ${authRow.claim.referral ? 'Referral present' : 'Referral missing'}`,
-      claimLine: claimLine(authRow),
-      providerThinking: `Provider thinking: payer rules should be cleared before submission because missing auth/referral can delay or deny revenue.`,
-      action: topFix(authRow),
-    },
-    {
-      number: '07',
-      title: 'Secondary / COB / forwarded payer risk',
-      view: 'Insurance view',
-      level: cobRow.prediction.risks.cob.level,
-      score: cobRow.prediction.risks.cob.score,
-      metric: `${scoreLine(cobRow.prediction.risks.cob.score)} COB risk`,
-      claimLine: claimLine(cobRow),
-      providerThinking: `Provider thinking: payer order and forwarded status affect cash timing and downstream rework.`,
-      action: `Verify payer sequence for ${cobRow.claim.memberId} before release to avoid avoidable forwarding delays.`,
-    },
-    {
-      number: '08',
-      title: 'Repeat claim / avoidable cost risk',
-      view: 'Doctor view',
-      level: repeatRow.prediction.risks.repeat.level,
-      score: repeatRow.prediction.risks.repeat.score,
-      metric: `${scoreLine(repeatRow.prediction.risks.repeat.score)} repeat risk`,
-      claimLine: claimLine(repeatRow),
-      providerThinking: `Provider thinking: repeat utilization creates avoidable cost exposure and care-management opportunity for ${repeatRow.claim.memberId}.`,
-      action: getDriver(repeatRow.prediction, 'Repeat').score ? repeatCareActionText(repeatRow.claim) : 'Monitor longitudinal utilization pattern.',
-    },
-    {
-      number: '09',
-      title: 'Provider performance risk',
-      view: 'Provider view',
-      level: providerRow.prediction.risks.provider.level,
-      score: providerRow.prediction.risks.provider.score,
-      metric: `${scoreLine(providerRow.prediction.risks.provider.score)} provider risk`,
-      claimLine: `${providerRow.claim.billingProvider} · ${providerRow.claim.payer}`,
-      providerThinking: `Provider thinking: denial and adjustment history should guide coding review, contract review, and provider education.`,
-      action: `Review ${providerRow.claim.billingProvider}'s coding pattern for ${providerRow.claim.payer} and ${providerRow.claim.cptCode}.`,
-    },
-    {
-      number: '10',
-      title: 'Resubmission success',
-      view: 'Provider view',
-      level: resubmitRow.prediction.resubmissionSuccess ? riskLevelForScore(100 - resubmitRow.prediction.resubmissionSuccess.score) : 'Low',
-      score: resubmitRow.prediction.resubmissionSuccess?.score || Math.max(0, 100 - resubmitRow.prediction.risks.denial.score),
-      metric: resubmitRow.prediction.resubmissionSuccess ? `${resubmitRow.prediction.resubmissionSuccess.score}% success` : 'No denied claim selected',
-      claimLine: claimLine(resubmitRow),
-      providerThinking: `Provider thinking: recovery depends on correcting the denial driver and attaching payer-ready support before resubmission.`,
-      action: resubmitRow.prediction.resubmissionSuccess?.action || topFix(resubmitRow),
-    },
+function PredictionScenarioMap({ scenario }) {
+  const selectedClaim = scenario.selectedClaim || scenario.anchor
+  const topMetrics = [
+    ['Repeat risk', `${scenario.repeatRisk.score}%`, scenario.repeatRisk.level],
+    ['Denial risk', `${scenario.denialRisk.score}%`, scenario.denialRisk.level],
+    ['Expected payment', formatCurrency(scenario.forecast.paid), `${formatCurrency(scenario.forecast.paidRange.low)}–${formatCurrency(scenario.forecast.paidRange.high)}`],
+    ['Potentially avoidable spend', formatCurrency(scenario.avoidableSpend), scenario.avoidableSpendSupported ? 'Evidence supported' : 'Insufficient evidence'],
+    ['Model confidence', `${scenario.confidenceScore}%`, `${scenario.confidence} · ${scenario.peerCount} peer episodes`],
   ]
-}
 
-function repeatCareActionText(claim) {
-  if (claim.placeOfServiceCode === '23') {
-    return `Route ${claim.memberId} for ED revisit review tied to ${claim.diagnosisCode || 'the diagnosis'}.`
-  }
-  if (claim.placeOfServiceCode === '51') {
-    return `Review behavioral-health follow-up before another psychiatric facility claim is submitted.`
-  }
-  if (claim.placeOfServiceCode === '81') {
-    return `Check lab frequency and medical necessity before billing another related lab claim.`
-  }
-  return `Review care-management follow-up for ${claim.memberId}'s ${claim.diagnosisCode || 'related'} pattern.`
+  return (
+    <Card className="provider-forecast-detail">
+      <header className="provider-forecast-heading">
+        <div>
+          <span>Provider case forecast · {scenario.episodeId}</span>
+          <h1>{scenario.condition}</h1>
+          <p>{scenario.provider} · {scenario.payer} · claim {selectedClaim.number || selectedClaim.claimId}</p>
+        </div>
+        <span className="priority-chip">Priority {scenario.priorityScore}/100</span>
+      </header>
+
+      <div className="provider-forecast-metrics">
+        {topMetrics.map(([label, value, note]) => (
+          <div key={label}><span>{label}</span><strong>{value}</strong><small>{note}</small></div>
+        ))}
+      </div>
+
+      <div className="provider-forecast-sections">
+        <section>
+          <h2>Episode timeline</h2>
+          <p>{formatDate(scenario.episodeStart)}–{formatDate(scenario.episodeEnd)} · {scenario.totalVisitCount} claims · diagnosis family {scenario.diagnosisFamily}</p>
+          <div className="episode-claim-list">
+            {scenario.claims.map((claim) => (
+              <div className={claim.claimId === selectedClaim.claimId ? 'selected' : ''} key={claim.claimId}>
+                <strong>{claim.number || claim.claimId}</strong><span>{formatDate(claim.dos)}</span><span>{claim.cptCode} · {claim.cptDescription}</span><span>{claim.status}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+        <section>
+          <h2>Financial forecast</h2>
+          <p>Allowed {formatCurrency(scenario.forecast.allowedRange.low)}–{formatCurrency(scenario.forecast.allowedRange.high)} · patient responsibility {formatCurrency(scenario.forecast.patientResp)} · adjustment {formatCurrency(scenario.forecast.adjustment)}</p>
+          <small>{scenario.forecast.peerHierarchy}; only earlier adjudicated peer episodes are used.</small>
+        </section>
+        <section>
+          <h2>Risk and evidence</h2>
+          <ul>{scenario.riskDrivers.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+          <small>Repeat probability: 30 days {Math.round(scenario.repeatRisk.probabilities['30'] * 100)}%, 60 days {Math.round(scenario.repeatRisk.probabilities['60'] * 100)}%, 90 days {Math.round(scenario.repeatRisk.probabilities['90'] * 100)}%.</small>
+        </section>
+        <section>
+          <h2>Recommended provider actions</h2>
+          <ol>{scenario.recommendedActions.map((action) => <li key={action}>{action}</li>)}</ol>
+          <small>Recommended phase: {scenario.bestSavingsPhase}. Priority indicates administrative review order, not clinical acuity.</small>
+        </section>
+      </div>
+
+      <footer className="provider-forecast-note">{scenario.method} · Decision support only. No determination of medical necessity.</footer>
+    </Card>
+  )
 }
 
 function filterClaimsByTime(claims, timeFilter, defaultDateRange) {
@@ -1375,7 +1313,7 @@ function EncounterSearch({ searchQuery, onSearchChange, onSelectMember, onOpenCl
   )
 }
 
-function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMember, onOpenClaim }) {
+function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMember, onOpenClaim, onOpenPrediction }) {
   const { defaultDateRange } = useAppData()
   const latestClaim = selectedClaim || member.latestClaim
   const memberStats = buildMemberStats(member)
@@ -1393,7 +1331,7 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
         </div>
       </div>
 
-      <div className="patient-grid">
+      <div className="patient-grid provider-focus">
         <div className="patient-main">
           <div className="summary-grid">
             <Card className="member-card">
@@ -1464,17 +1402,16 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
           </div>
 
           <div className="chart-grid">
-            <PaymentOverview member={member} />
-            <TrendCard member={member} />
+            <ProviderInformation claim={latestClaim} />
+            <ProviderKpis claim={latestClaim} />
           </div>
 
           <RecentEncounters title="Member Encounters" claims={member.claims.slice(0, 8)} onSelectMember={onSelectMember} onOpenClaim={onOpenClaim} />
           <ClaimTimeline claim={latestClaim} />
         </div>
 
-        <aside className="patient-aside">
-          <ProviderInformation claim={latestClaim} />
-          <ProviderKpis claim={latestClaim} />
+        <aside className="patient-aside grok-aside">
+          <ProviderLlmPanel claim={latestClaim} onCasePrediction={() => onOpenPrediction(latestClaim)} />
         </aside>
       </div>
     </>
@@ -1905,108 +1842,6 @@ function getClaimReasonRows(claim) {
   ]
 }
 
-function PaymentOverview({ member }) {
-  const allowed = member.totalAllowed
-  const paid = member.totalPaid
-  const patientResp = member.totalPatientResp
-  const adjustments = member.totalAdjustment
-  const paidPercent = allowed ? (paid / allowed) * 100 : 0
-  const patientPercent = allowed ? (patientResp / allowed) * 100 : 0
-
-  return (
-    <Card className="payment-overview">
-      <SectionTitle title="Payments Overview (YTD)" />
-      <div className="payment-body">
-        <div className="donut" style={{ '--paid-share': `${paidPercent}%` }}>
-          <div>
-            <strong>{formatCompactCurrency(allowed)}</strong>
-            <span>Total Allowed</span>
-          </div>
-        </div>
-        <ul className="legend-list">
-          <li>
-            <span className="dot green"></span>
-            <div>
-              <strong>Paid by Payer</strong>
-              <span>{formatCurrency(paid)} ({paidPercent.toFixed(1)}%)</span>
-            </div>
-          </li>
-          <li>
-            <span className="dot blue"></span>
-            <div>
-              <strong>Patient Responsibility</strong>
-              <span>{formatCurrency(patientResp)} ({patientPercent.toFixed(1)}%)</span>
-            </div>
-          </li>
-          <li>
-            <span className="dot gray"></span>
-            <div>
-              <strong>Adjustments</strong>
-              <span>{formatCurrency(adjustments)}</span>
-            </div>
-          </li>
-        </ul>
-      </div>
-    </Card>
-  )
-}
-
-function TrendCard({ member }) {
-  const latestClaims = member.claims.slice(0, 6).reverse()
-  const maxValue = Math.max(...latestClaims.map((claim) => Math.max(claim.paid, claim.patientResp)), 1)
-  const axisMax = Math.ceil(maxValue / 100) * 100 || 100
-  const yScale = (value) => 182 - (value / axisMax) * 140
-  const axisTicks = [
-    { label: formatCompactCurrency(axisMax), y: 42 },
-    { label: formatCompactCurrency(axisMax * 0.66), y: 88 },
-    { label: formatCompactCurrency(axisMax * 0.33), y: 134 },
-    { label: '$0', y: 182 },
-  ]
-  const points = latestClaims.map((claim, index) => {
-    const x = 90 + index * 100
-    const paidY = yScale(claim.paid)
-    const respY = yScale(claim.patientResp)
-    return { claim, x, paidY, respY }
-  })
-  const paidPath = points.map((point, index) => `${index === 0 ? 'M' : 'L'}${point.x} ${point.paidY}`).join(' ')
-  const respPath = points.map((point, index) => `${index === 0 ? 'M' : 'L'}${point.x} ${point.respY}`).join(' ')
-
-  return (
-    <Card className="trend-card">
-      <SectionTitle title="Paid vs Patient Responsibility (Trend)" />
-      <div className="chart-legend">
-        <span><span className="line-key green"></span>Paid by Payer</span>
-        <span><span className="line-key blue"></span>Patient Responsibility</span>
-      </div>
-      <svg className="trend-svg" viewBox="0 0 640 220" role="img" aria-label="Paid and patient responsibility trend">
-        {axisTicks.map(({ y }) => (
-          <line key={y} x1="58" x2="608" y1={y} y2={y} className="grid-line" />
-        ))}
-        <line x1="58" x2="608" y1="182" y2="182" className="axis-line" />
-        <path d={paidPath} className="trend-line green-line" />
-        <path d={respPath} className="trend-line blue-line" />
-        {points.map((point) => (
-          <g key={`${point.claim.number}-paid`}>
-            <circle cx={point.x} cy={point.paidY} r="4" className="green-point" />
-            <text x={point.x} y={point.paidY - 10} textAnchor="middle">{formatCompactCurrency(point.claim.paid)}</text>
-          </g>
-        ))}
-        {points.map((point) => (
-          <g key={`${point.claim.number}-resp`}>
-            <circle cx={point.x} cy={point.respY} r="4" className="blue-point" />
-          </g>
-        ))}
-        {points.map((point) => (
-          <text key={point.claim.number} x={point.x} y="206" textAnchor="middle" className="x-label">{formatDate(point.claim.dos).replace(', 2026', '')}</text>
-        ))}
-        {axisTicks.map(({ label, y }) => (
-          <text key={`${label}-${y}`} x="34" y={y + 4} textAnchor="middle" className="y-label">{label}</text>
-        ))}
-      </svg>
-    </Card>
-  )
-}
-
 function RecentEncounters({
   claims,
   title = 'All Encounters',
@@ -2108,7 +1943,7 @@ function ProviderInformation({ claim }) {
 
   return (
     <Card className="provider-info">
-      <SectionTitle title="Provider Information" action="View Provider 360" />
+      <SectionTitle title="Provider Information" />
       {providerRows.map((row) => {
         const Icon = row.icon
         return (
@@ -2149,7 +1984,7 @@ function ProviderKpis({ claim }) {
 
   return (
     <Card className="provider-kpis">
-      <SectionTitle title="Provider KPIs (YTD)" action="View Full Performance" />
+      <SectionTitle title="Provider KPIs (YTD)" />
       <div className="provider-kpi-grid">
         {providerKpis.map((kpi) => (
           <div className="provider-kpi" key={kpi.label}>
@@ -2158,11 +1993,189 @@ function ProviderKpis({ claim }) {
             {kpi.delta ? (
               <small className={kpi.dir === 'down' ? 'down' : 'up'}>{kpi.delta}</small>
             ) : null}
-            <em>vs prior 12 months</em>
+            <em>vs prior YTD</em>
           </div>
         ))}
       </div>
     </Card>
+  )
+}
+
+function ProviderLlmPanel({ claim, onCasePrediction }) {
+  const [result, setResult] = useState(null)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    setResult(null)
+    setError('')
+  }, [claim.number, claim.claimId])
+
+  const runAnalysis = async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const payload = await fetchJson(
+        `/api/predictions/provider-case/${encodeURIComponent(claim.number || claim.claimId)}/llm`,
+        { method: 'POST' },
+      )
+      setResult(payload)
+    } catch (requestError) {
+      setError(requestError.message || 'Provider LLM analysis is unavailable.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <Card className="provider-llm-card">
+      <div className="provider-llm-header">
+        <div>
+          <span className="provider-llm-kicker"><Sparkles size={14} /> Groq provider assistant</span>
+          <h2>Provider LLM Analysis</h2>
+          <p>Analyses de-identified provider, payer, procedure, utilisation and payment facts for this claim episode.</p>
+        </div>
+        <div className="provider-llm-actions">
+          <button className="llm-secondary-button" type="button" onClick={onCasePrediction}>View {claim.number || claim.claimId} forecast</button>
+          <button className="llm-primary-button" type="button" onClick={runAnalysis} disabled={loading}>
+            {loading ? <RefreshCw className="spin" size={16} /> : <Sparkles size={16} />}
+            {loading ? 'Analysing…' : 'Run LLM analysis'}
+          </button>
+        </div>
+      </div>
+
+      {!result && !error ? (
+        <div className="llm-intro">Run a concise provider-side explanation for this exact claim. Successful results are cached for faster repeat viewing.</div>
+      ) : null}
+      {error ? <div className="llm-config-note error">{error}</div> : null}
+      {result && !result.configured ? (
+        <div className="llm-config-note">
+          <strong>LLM setup required</strong>
+          <span>{result.message}</span>
+        </div>
+      ) : null}
+      {result?.forecast ? <ProviderLlmResult result={result} /> : null}
+    </Card>
+  )
+}
+
+function ProviderLlmResult({ result }) {
+  const forecast = result.forecast || {}
+  const facts = result.actual_claim_facts || {}
+  const analysis = result.llm_analysis || result.analysis || {}
+  const outcome = forecast.predicted_claim_outcome || {}
+  const denial = forecast.denial_risk || {}
+  const repeat = forecast.repeat_service_risk || {}
+  const confidence = forecast.confidence || {}
+  const avoidable = forecast.potentially_avoidable_spend || {}
+  const basis = result.prediction_basis || {}
+  const riskDrivers = Array.isArray(result.risk_drivers) ? result.risk_drivers : []
+  const actions = Array.isArray(result.recommended_actions) ? result.recommended_actions : []
+  const evidence = Array.isArray(result.evidence_used) ? result.evidence_used : []
+  const limitations = Array.isArray(result.limitations) ? result.limitations : []
+  const snapshotCards = [
+    { label: 'Predicted claim outcome', value: outcome.display_value || 'Unavailable', note: `Probability: ${formatProbability(outcome.probability)}`, lines: [`Peer sample: ${confidence.peer_sample_size || 0}`] },
+    { label: 'Denial risk', value: formatProbability(denial.probability), note: `${denial.level || 'unknown'} risk`, lines: [`Peer sample: ${confidence.peer_sample_size || 0}`] },
+    { label: 'Repeat-service forecast', value: `90 days: ${formatProbability(repeat.probability_90d)}`, lines: [`30 days: ${formatProbability(repeat.probability_30d)}`, `60 days: ${formatProbability(repeat.probability_60d)}`, `Risk level: ${repeat.level || 'unknown'}`, `Peer sample: ${confidence.peer_sample_size || 0}`] },
+    { label: 'Predicted allowed', value: formatOptionalCurrency(forecast.predicted_allowed?.value), note: formatPredictionRange(forecast.predicted_allowed), lines: [`Peer sample: ${confidence.peer_sample_size || 0}`] },
+    { label: 'Predicted paid', value: formatOptionalCurrency(forecast.predicted_paid?.value), note: formatPredictionRange(forecast.predicted_paid), lines: [`Peer sample: ${confidence.peer_sample_size || 0}`] },
+    { label: 'Predicted patient responsibility', value: formatOptionalCurrency(forecast.predicted_patient_responsibility?.value), note: formatPredictionRange(forecast.predicted_patient_responsibility), lines: [`Peer sample: ${confidence.peer_sample_size || 0}`] },
+    { label: 'Predicted adjustment', value: formatOptionalCurrency(forecast.predicted_adjustment?.value), note: formatPredictionRange(forecast.predicted_adjustment), lines: [`Peer sample: ${confidence.peer_sample_size || 0}`] },
+    { label: 'Potentially avoidable spend', value: avoidable.available ? formatOptionalCurrency(avoidable.value) : 'Not enough evidence', note: avoidable.available ? avoidable.savings_phase : (avoidable.reason || 'Estimate unavailable'), lines: [`Peer sample: ${confidence.peer_sample_size || 0}`] },
+    { label: 'Model confidence', value: Number.isFinite(confidence.score) ? formatProbability(confidence.score) : 'Unavailable', note: confidence.level || 'unknown', lines: [`Peer sample: ${confidence.peer_sample_size || 0}`] },
+    { label: 'Peer sample size', value: Number.isFinite(confidence.peer_sample_size) ? confidence.peer_sample_size.toLocaleString() : 'Unavailable', note: `${confidence.peer_episode_count || 0} peer episodes` },
+    { label: 'Prediction method', value: (confidence.prediction_method || 'Unavailable').replaceAll('_', ' '), note: confidence.model_version || '' },
+  ]
+
+  const factRows = [
+    ['Claim ID', facts.claim_id], ['Actual claim status', facts.claim_status], ['CPT', [facts.cpt_code, facts.cpt_description].filter(Boolean).join(' — ')],
+    ['ICD-10 diagnosis family', [facts.diagnosis_family, facts.diagnosis_description].filter(Boolean).join(' — ')],
+    ['Place of service', [facts.place_of_service_code, facts.place_of_service_description].filter(Boolean).join(' — ')],
+    ['Actual charge', formatOptionalCurrency(facts.charge_amount)], ['Actual allowed', formatOptionalCurrency(facts.allowed_amount)],
+    ['Actual paid', formatOptionalCurrency(facts.paid_amount)], ['Actual patient responsibility', formatOptionalCurrency(facts.patient_responsibility)],
+    ['Actual adjustment', formatOptionalCurrency(facts.adjustment_amount)], ['Actual denial reason', facts.denial_reason || 'None recorded'],
+    ['Prior authorization', facts.has_prior_auth ? 'Present' : 'Missing — requirement unknown'], ['Referral', facts.has_referral ? 'Present' : 'Missing — requirement unknown'],
+  ]
+
+  const forecastRows = [
+    ['Predicted allowed', forecast.predicted_allowed], ['Predicted paid', forecast.predicted_paid],
+    ['Predicted patient responsibility', forecast.predicted_patient_responsibility], ['Predicted adjustment', forecast.predicted_adjustment],
+  ]
+
+  return (
+    <div className="provider-llm-result">
+      <section className="llm-wide-section prediction-snapshot">
+        <div className="llm-section-heading"><span>Prediction snapshot</span><small>All values below are model estimates</small></div>
+        <div className="llm-snapshot-grid">
+          {snapshotCards.map((card) => (
+            <article className="llm-snapshot-card" key={card.label}>
+              <span>{card.label}</span><strong>{card.value}</strong>
+              {card.note ? <small>{card.note}</small> : null}
+              {card.lines?.map((line) => <small key={line}>{line}</small>)}
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="llm-wide-section actual-facts-section">
+        <div className="llm-section-heading"><span>Actual claim facts</span><small>{facts.adjudicated ? 'Actual adjudicated result' : 'Historical claim record'}</small></div>
+        <dl className="llm-facts-grid">{factRows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || 'Unavailable'}</dd></div>)}</dl>
+      </section>
+
+      <section className="llm-wide-section forecast-detail-section">
+        <div className="llm-section-heading"><span>{forecast.forecast_label || 'Forecast'}</span><small>Predictions are separate from actual adjudication</small></div>
+        <div className="llm-financial-grid">
+          {forecastRows.map(([label, item]) => (
+            <article key={label}><span>{label}</span><strong>{formatOptionalCurrency(item?.value)}</strong><small>Low {formatOptionalCurrency(item?.low)} · High {formatOptionalCurrency(item?.high)}</small><em>{confidence.peer_sample_size || 0} peer claims</em></article>
+          ))}
+        </div>
+      </section>
+
+      <section className="llm-wide-section">
+        <div className="llm-section-heading"><span>Provider summary</span></div>
+        <p>{analysis.provider_summary || 'A provider explanation is unavailable; the deterministic prediction snapshot remains available above.'}</p>
+      </section>
+
+      <section className="llm-wide-section prediction-basis-section">
+        <div className="llm-section-heading"><span>Prediction basis</span></div>
+        <dl className="llm-facts-grid">
+          <div><dt>Peer claims used</dt><dd>{basis.peer_claims_used?.toLocaleString?.() || 0}</dd></div>
+          <div><dt>Matching level</dt><dd>{basis.matching_level || 'Unavailable'}</dd></div>
+          <div><dt>Fallback</dt><dd>{basis.fallback_explanation || 'Unavailable'}</dd></div>
+          <div><dt>Historical peer denial rate</dt><dd>{formatProbability(basis.historical_peer_denial_rate)}</dd></div>
+          <div><dt>Median allowed rate</dt><dd>{formatProbability(basis.median_allowed_rate)}</dd></div>
+          <div><dt>Median paid-to-allowed rate</dt><dd>{formatProbability(basis.median_paid_to_allowed_rate)}</dd></div>
+        </dl>
+        <p className="confidence-explanation"><strong>{confidence.level || 'Unknown'} confidence.</strong> {confidence.explanation || 'Confidence explanation unavailable.'}</p>
+      </section>
+
+      <section className="llm-wide-section">
+        <div className="llm-section-heading"><span>Risk drivers</span></div>
+        <div className="llm-driver-list">{riskDrivers.length ? riskDrivers.map((driver) => <article key={driver.title}><header><strong>{driver.title}</strong><b>{driver.value}</b></header><p>{driver.reason}</p><small>{driver.source_type?.replaceAll('_', ' ')} · {driver.risk_direction} · Evidence: {(driver.evidence_ids || []).join(', ')}</small></article>) : <p>No risk drivers are available.</p>}</div>
+      </section>
+
+      <section className="llm-wide-section">
+        <div className="llm-section-heading"><span>Recommended provider actions</span></div>
+        <div className="llm-action-list">{actions.length ? actions.map((action) => <article key={action.code}><strong>{action.title}</strong><p>{action.reason}</p></article>) : <p>No claim-specific administrative action is supported.</p>}</div>
+      </section>
+
+      <section className="llm-wide-section">
+        <div className="llm-section-heading"><span>Evidence used</span></div>
+        <div className="llm-evidence-list">{evidence.map((item) => <article key={item.claim_id}><strong>Claim {item.claim_id}</strong><dl><div><dt>Service date</dt><dd>{formatDate(item.service_date)}</dd></div><div><dt>CPT</dt><dd>{item.cpt_code} — {item.cpt_description}</dd></div><div><dt>Diagnosis family</dt><dd>{item.diagnosis_family} — {item.diagnosis_description}</dd></div><div><dt>Place of service</dt><dd>{item.place_of_service_code} — {item.place_of_service_description}</dd></div><div><dt>Status</dt><dd>{item.claim_status}</dd></div><div><dt>Actual allowed</dt><dd>{formatOptionalCurrency(item.actual_allowed)}</dd></div><div><dt>Actual paid</dt><dd>{formatOptionalCurrency(item.actual_paid)}</dd></div><div><dt>Actual patient responsibility</dt><dd>{formatOptionalCurrency(item.actual_patient_responsibility)}</dd></div><div><dt>Actual adjustment</dt><dd>{formatOptionalCurrency(item.actual_adjustment)}</dd></div></dl><small>Prediction fields used: {(item.prediction_fields_used || []).join(', ')}</small></article>)}</div>
+      </section>
+
+      <section className="llm-wide-section">
+        <div className="llm-section-heading"><span>Limitations</span></div>
+        <ul>{limitations.map((item) => <li key={item}>{item}</li>)}</ul>
+      </section>
+
+      <details className="llm-exact-output">
+        <summary>Exact model output</summary>
+        <pre>{JSON.stringify(result.exact_model_output || {}, null, 2)}</pre>
+      </details>
+
+      <small className="llm-result-meta">Model: {result.model} · {result.promptVersion}{result.cached ? ' · cached' : ` · ${result.latencyMs || 0} ms`}{result.fallback ? ' · deterministic fallback' : ''}. Decision support only.</small>
+    </div>
   )
 }
 
@@ -2323,10 +2336,10 @@ function DashboardMetric({ label, value, note, icon: Icon, tone }) {
 
 function PredictionSummary({ summary }) {
   const cards = [
-    { label: 'Predicted Paid', value: formatCurrency(summary.totalPredictedPaid), note: 'from matched payer/provider history', tone: 'green' },
-    { label: 'Predicted Adjustment', value: formatCurrency(summary.totalPredictedAdjustment), note: 'calculated write-off exposure', tone: 'orange' },
-    { label: 'At-Risk Claims', value: summary.atRiskCount.toLocaleString(), note: `${summary.highRiskCount} high, ${summary.denialQueueCount} denial review`, tone: 'violet' },
-    { label: 'Average Risk', value: `${summary.averageOverallRisk}%`, note: 'weighted claim risk model', tone: 'blue' },
+    { label: 'Provider Cases', value: summary.totalScenarios.toLocaleString(), note: 'claim episodes available for provider review', tone: 'blue' },
+    { label: 'High Repeat Risk', value: summary.highRiskCount.toLocaleString(), note: 'episodes needing pathway review', tone: 'violet' },
+    { label: 'Predicted Paid', value: formatCurrency(summary.predictedPaid), note: 'episode forecast from financial peers', tone: 'green' },
+    { label: 'Avoidable Spend', value: formatCurrency(summary.avoidableSpend), note: 'modeled opportunity after the first visit', tone: 'orange' },
   ]
 
   return (
@@ -2342,12 +2355,12 @@ function PredictionSummary({ summary }) {
   )
 }
 
-function PredictionMethodPanel({ totalCount }) {
+function PredictionMethodPanel({ totalCount, scenarioCount, model }) {
   const methods = [
-    ['Data source', `${totalCount.toLocaleString()} filtered 837 claim records from MongoDB`],
-    ['Money forecast', 'Allowed and paid amounts are estimated from historical peer rates by payer, provider, CPT, and place of service.'],
-    ['Risk model', 'Denial, adjustment, collection, COB, repeat-claim, and provider patterns are scored separately then blended.'],
-    ['Action logic', 'The next action comes from the highest scoring driver for that claim, not a static checklist.'],
+    ['Episode source', `${scenarioCount.toLocaleString()} scenarios grouped in Python from ${totalCount.toLocaleString()} current database claim records`],
+    ['Provider view', 'Uses provider, diagnosis, utilisation, payer, service setting, and adjudication history.'],
+    ['Money forecast', 'Allowed, paid, patient balance, and adjustment use peer rates by payer, provider, CPT, and place of service.'],
+    ['Model status', `${model?.name || 'Explainable episode forecast'} · ${model?.source || 'database'} source`],
   ]
 
   return (
@@ -2358,196 +2371,6 @@ function PredictionMethodPanel({ totalCount }) {
           <strong>{value}</strong>
         </div>
       ))}
-    </Card>
-  )
-}
-
-function PredictionCatalog({ catalog, title = '10 Claim Predictions', compact = false }) {
-  const viewCounts = catalog.reduce((counts, item) => {
-    counts[item.view] = (counts[item.view] || 0) + 1
-    return counts
-  }, {})
-
-  return (
-    <Card className={`prediction-catalog-card ${compact ? 'compact' : ''}`}>
-      <div className="prediction-catalog-header">
-        <div>
-          <h2>{title}</h2>
-          <p>Each prediction is grouped by viewpoint, but the thinking and action are written only from the provider point of view.</p>
-        </div>
-        <div className="prediction-view-chips" aria-label="Prediction view counts">
-          {['Patient view', 'Provider view', 'Doctor view', 'Insurance view'].map((view) => (
-            <span key={view}>{view.replace(' view', '')}: {viewCounts[view] || 0}</span>
-          ))}
-        </div>
-      </div>
-
-      <div className="prediction-catalog-grid">
-        {catalog.map((item) => (
-          <article className={`prediction-output-card ${item.view.toLowerCase().replaceAll(' ', '-')}`} key={item.number}>
-            <div className="prediction-output-topline">
-              <span>{item.number}</span>
-              <b>{item.view}</b>
-            </div>
-            <small className="prediction-output-label">Predicted output</small>
-            <h3>{item.title}</h3>
-            <div className="prediction-output-metric">
-              <strong>{item.metric}</strong>
-              <RiskBadge level={item.level} score={item.score} />
-            </div>
-            <p className="prediction-output-claim">{item.claimLine}</p>
-            <div className="prediction-thinking-block">
-              <span>Provider thinking</span>
-              <p>{item.providerThinking.replace(/^Provider thinking:\\s*/i, '')}</p>
-            </div>
-            <div className="prediction-action-line">
-              <span>Provider action</span>
-              <p>{item.action}</p>
-            </div>
-          </article>
-        ))}
-      </div>
-    </Card>
-  )
-}
-
-function getTopPredictionDrivers(prediction, limit = 3) {
-  return prediction.riskDrivers
-    .filter((driver) => driver.score >= 18)
-    .slice(0, limit)
-}
-
-function getPredictionEvidence(claim, prediction) {
-  const topDriver = prediction.riskDrivers[0]
-  const evidence = [
-    ['Peer set', `${prediction.peerCount.toLocaleString()} claims by ${prediction.basis}`],
-    ['Allowed rate', `${prediction.money.allowedRate}%`],
-    ['Paid rate', `${prediction.money.paidToAllowedRate}% of allowed`],
-    ['Adjustment', `${prediction.money.adjustmentRate}% of charge`],
-  ]
-
-  if (!claim.priorAuth && prediction.risks.denial.score >= 35) {
-    evidence.push(['Auth', 'No prior auth on claim'])
-  }
-  if (!claim.referral && ['HM', 'MC', 'MB'].includes(claim.filingIndicator)) {
-    evidence.push(['Referral', 'Not provided'])
-  }
-  if (topDriver?.score >= 30) {
-    evidence.push([topDriver.label, `${topDriver.score}% driver`])
-  }
-
-  return evidence.slice(0, 6)
-}
-
-function getPredictionAction(claim, prediction) {
-  const topDriver = prediction.riskDrivers[0]
-  const fallback = prediction.fixes[0] || 'Submit with standard claim review.'
-  const secondary = [
-    claim.priorAuth ? 'Auth on file' : 'Auth missing',
-    claim.referral ? 'Referral on file' : 'Referral missing',
-    `${claim.cptCode || 'CPT'} at ${claim.placeOfServiceCode || 'POS'}`,
-  ].join(' · ')
-
-  return {
-    focus: topDriver?.label || 'Standard',
-    fix: fallback,
-    secondary,
-  }
-}
-
-function AtRiskClaimsQueue({
-  items,
-  onOpenClaim,
-  title = 'At-Risk Claims Queue',
-  subtitle,
-  emptyMessage = 'No at-risk claims match the current filters.',
-  footer,
-}) {
-  return (
-    <Card className="risk-queue-card">
-      <div className="risk-queue-heading">
-        <div>
-          <h2>{title}</h2>
-          {subtitle ? <p>{subtitle}</p> : null}
-        </div>
-      </div>
-      <div className="risk-queue-table-wrap">
-        <table className="data-table risk-queue-table">
-          <thead>
-            <tr>
-              <th>Claim</th>
-              <th>Patient</th>
-              <th>Overall Risk</th>
-              <th>Forecast</th>
-              <th>Data Drivers</th>
-              <th>Next Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.length ? items.map(({ claim, prediction }) => {
-              const evidence = getPredictionEvidence(claim, prediction)
-              const drivers = getTopPredictionDrivers(prediction)
-              const action = getPredictionAction(claim, prediction)
-
-              return (
-                <tr key={claim.number}>
-                  <td>
-                    <button className="claim-link-button" type="button" onClick={() => onOpenClaim?.(claim)}>
-                      {claim.number}
-                    </button>
-                    <span>{claim.payer}</span>
-                    <small>{claim.cptCode} · {claim.placeOfServiceCode}</small>
-                  </td>
-                  <td>
-                    <strong className="queue-patient-name">{claim.patient}</strong>
-                    <span className="queue-muted">{claim.memberId}</span>
-                    <span className="queue-muted">{claim.billingProvider}</span>
-                  </td>
-                  <td>
-                    <RiskBadge level={prediction.risks.overall.level} score={prediction.risks.overall.score} />
-                    <div className="queue-driver-stack">
-                      {drivers.map((driver) => (
-                        <span key={driver.label}>{driver.label} {driver.score}%</span>
-                      ))}
-                    </div>
-                  </td>
-                  <td className="risk-forecast-cell">
-                    <div className="forecast-mini-grid">
-                      <span><b>{formatCurrency(prediction.money.predictedPaid)}</b> paid</span>
-                      <span>{formatCurrency(prediction.money.predictedAllowed)} allowed</span>
-                      <span>{formatCurrency(prediction.money.predictedPatientResp)} patient</span>
-                      <span>{formatCurrency(prediction.money.predictedAdjustment)} adj.</span>
-                    </div>
-                    <small>{prediction.outcome.likely} · {prediction.confidence}</small>
-                  </td>
-                  <td>
-                    <div className="queue-evidence-grid">
-                      {evidence.map(([label, value]) => (
-                        <span className="queue-evidence-chip" key={`${claim.number}-${label}`}>
-                          <b>{label}</b>
-                          {value}
-                        </span>
-                      ))}
-                    </div>
-                  </td>
-                  <td>
-                    <div className="queue-action-block">
-                      <span>{action.focus} review</span>
-                      <strong>{action.fix}</strong>
-                      <small>{action.secondary}</small>
-                    </div>
-                  </td>
-                </tr>
-              )
-            }) : (
-              <tr>
-                <td className="empty-table-cell" colSpan={6}>{emptyMessage}</td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-      {footer}
     </Card>
   )
 }

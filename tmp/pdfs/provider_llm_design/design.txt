@@ -1,0 +1,713 @@
+PROVIDER CLAIMS INTELLIGENCE
+
+
+PROVIDER CLAIMS INTELLIGENCE
+
+Provider LLM Prediction Enhancement
+and Batch Pseudocode for 1,502 Claims
+A provider-focused technical design for converting the current descriptive LLM card into a data-driven
+prediction, prioritisation and decision-support workflow.
+ Scope
+ This document uses the attached Provider LLM Analysis screen as the baseline scenario. It defines a reusable episode-level
+ algorithm, detailed pseudocode, batch processing logic for all 1,502 claims, model/LLM separation, financial prediction rules,
+ caching, validation and UI recommendations.
+
+                                                                     Provider operations, claims analytics, revenue cycle, AI/ML
+ Primary audience
+                                                                     engineering
+                                                                     Forecast claim CLM-000143: 4 related claims, 1 denied, CPT 99214
+ Baseline scenario
+                                                                     repeated 3 times, 1 care setting
+ Batch scope                                                         All 1,502 claim rows, grouped into member episodes before scoring
+                                                                     Predict utilisation, denial exposure, payment range, avoidable spend
+ Main outcome
+                                                                     and next-best provider action
+                                                                     Decision support only; does not determine medical necessity or
+ Safety boundary
+                                                                     replace clinical judgement
+                                                                             Prepared as a senior developer / solution architecture document
+
+
+
+
+                                     Provider LLM Prediction Enhancement | 1,502-Claim Batch Design
+PROVIDER CLAIMS INTELLIGENCE
+
+Document contents
+  1. Current Provider LLM interface
+  2. Assessment of the current implementation
+  3. Target episode-level prediction model
+  4. Claims data contract and feature engineering
+  5. Prediction outputs and money logic
+  6. Scenario algorithm for CLM-000143
+  7. Detailed pseudocode for the current scenario
+  8. Batch pseudocode for all 1,502 claims
+  9. LLM integration and structured output contract
+  10. Provider UI changes
+  11. Validation, caching, monitoring and deployment checklist
+
+
+
+
+                                  Provider LLM Prediction Enhancement | 1,502-Claim Batch Design
+PROVIDER CLAIMS INTELLIGENCE
+
+1. Current Provider LLM interface
+The current screen is visually clean and already provides a provider summary, recommended action, evidence and
+limitations. It is used below as the baseline for enhancement.
+
+
+
+
+                               Figure 1. Current Provider LLM Analysis interface supplied by the user.
+
+ Observed facts in the current interface
+ Anchor forecast claim: CLM-000143. The displayed episode contains 4 claims, 1 denied claim, 3 repeated CPT 99214 services
+ and 1 care setting. The current recommendation also flags ambulance authorization review. These are treated as observed
+ interface facts, not newly invented data.
+
+
+
+
+                                   Provider LLM Prediction Enhancement | 1,502-Claim Batch Design
+PROVIDER CLAIMS INTELLIGENCE
+
+2. Assessment of the current implementation
+2.1 What it already does well
+ Clear provider focus: translates claim history into an operational summary rather than exposing only raw EDI fields.
+ Evidence visibility: lists the key facts used by the analysis.
+ Action orientation: recommends denial review, duplication review and authorization validation.
+ Safety disclosure: correctly states that the result is decision support only.
+ Caching: reduces unnecessary LLM cost and latency.
+
+2.2 Main limitation
+The current component is mostly descriptive, not predictive. It explains what has happened but does not quantify what
+is likely to happen next, how much money is exposed, how confident the system is, or which action has the highest
+expected financial value.
+ Current / Missing capability                                           Required enhancement
+ Current summary                                                        4 claims, 1 denied, 3 repeated CPT services, medium repeat risk.
+ Future utilisation                                                     30/60/90-day repeat probabilities, likely next service and care setting.
+                                                                        Expected allowed, paid, patient responsibility, adjustment, denial
+ Financial forecast
+                                                                        exposure and avoidable spend.
+                                                                        Probability interval, model version, feature coverage and comparable-
+ Confidence
+                                                                        episode sample size.
+ Counterfactual                                                         Observed pathway vs lower-cost alternative pathway.
+ Prioritisation                                                         Episode priority score to rank the full 1,502-claim population.
+ Traceability                                                           Claim/date/status and feature-level evidence links.
+ Core design principle: separate prediction from explanation
+ The rules/ML layer calculates probabilities and money. The retrieval layer finds similar episodes and payer/authorization
+ context. The LLM explains the supplied outputs, recommends actions and states limitations. The LLM must not invent risk
+ percentages or dollar values.
+
+
+
+
+3. Target episode-level prediction model
+The system should continue to score every claim and member, but it must first split each member history into distinct
+episodes of care. This prevents unrelated diagnoses from being mixed together and makes repeat-use and cost prediction
+meaningful.
+ EPISODE =
+   same member
+   + same or clinically related diagnosis group
+   + related procedure/service group
+   + same provider or care pathway where relevant
+   + service dates within a configurable 30/60/90-day window
+
+
+ Claims DB            Episode builder    Feature engine       ML / rules          RAG retrieval          LLM explanation      Provider UI
+
+
+
+
+                                        Provider LLM Prediction Enhancement | 1,502-Claim Batch Design
+PROVIDER CLAIMS INTELLIGENCE
+
+4. Claims data contract and feature engineering
+4.1 Minimum required fields
+ Category                                   Required fields                                 Purpose
+                                            Member_ID, Claim_ID, ICD-10, service
+ Episode identity                                                                           Group related claims and trace evidence
+                                            dates, provider NPI, payer ID
+                                            CPT/HCPCS, modifiers, units, place of           Duplicate checks, utilisation and money
+ Procedure facts
+                                            service, charge                                 features
+                                            Status, denial reason, allowed, paid, patient
+ Adjudication                                                                               Training targets and historical payment ratios
+                                            responsibility, adjustment
+                                            Prior auth, referral, service-specific          Denial prevention and action
+ Authorization
+                                            requirement                                     recommendations
+                                            First/last visit, days between claims,
+ Timing                                                                                     Repeat-use prediction
+                                            30/60/90-day windows
+                                            Historical denial and payment ratios for
+ Provider/payer history                                                                     Risk and financial baselines
+                                            comparable claims
+                                            Resolved/not resolved, follow-up completed,
+ Optional outcomes                                                                          Avoidable spend and value-based analysis
+                                            treatment response
+
+
+4.2 Derived features
+ Feature                                                            Meaning
+ episode_claim_count                                                Number of claims in the grouped episode
+ denied_claim_count                                                 Number of denied claims in the episode
+ repeat_cpt_count                                                   Repeated occurrences of the same CPT/HCPCS
+ unique_care_setting_count                                          Distinct places of service
+ days_first_to_last                                                 Elapsed days across the episode
+ same_dx_claims_30d / 60d / 90d                                     Related diagnosis claim counts by time window
+ has_prior_auth / has_referral                                      Boolean authorization indicators
+ provider_denial_rate                                               Historical denied / comparable submitted claims
+ allowed_rate                                                       Allowed amount / charge amount
+ paid_to_allowed_rate                                               Paid amount / allowed amount
+ adjustment_rate                                                    Adjustment amount / charge amount
+ patient_share_rate                                                 Patient responsibility / allowed amount
+ duplicate_service_signal                                           Repeated CPT plus overlapping dates, units, modifier and provider
+ similar_episode_count                                              Number of comparable historical episodes
+ Data-leakage rule
+ For a pre-submission forecast, actual allowed amount, paid amount, adjustment, final status and denial reason are target
+ outcomes. They must not be used as inputs for the claim being predicted. They may be used only from historical claims that
+ were already adjudicated.
+
+
+
+
+                                    Provider LLM Prediction Enhancement | 1,502-Claim Batch Design
+PROVIDER CLAIMS INTELLIGENCE
+
+5. Prediction outputs and financial logic
+     Prediction group                                                     Output
+                                                                          30/60/90-day repeat probabilities, likely next service and likely care
+     Utilisation forecast
+                                                                          setting
+                                                                          Probability, risk band, likely reason category and pre-submission
+     Denial forecast
+                                                                          checks
+                                                                          Expected allowed, paid, patient responsibility, adjustment and denial
+     Financial forecast
+                                                                          exposure
+                                                                          Repeat-service spend, estimated avoidable spend and best savings
+     Cost optimisation
+                                                                          phase
+                                                                          Ranked actions with affected claim IDs, owner, priority and expected
+     Operational action
+                                                                          financial impact
+                                                                          Prediction range, confidence, similar-episode sample size, model
+     Trust information
+                                                                          version and limitations
+
+
+5.1 Data-driven money formulas for the MVP
+Until trained regression models are available, use historical median ratios from comparable adjudicated claims. Label all
+results as estimates.
+     predicted_allowed = new_charge * median_allowed_rate(similar_claims)
+     predicted_paid = predicted_allowed * median_paid_to_allowed_rate(similar_claims)
+     predicted_adjustment = new_charge - predicted_allowed
+     predicted_patient_responsibility = predicted_allowed * median_patient_share_rate(similar_claims)
+     expected_denial_exposure = denial_probability * expected_allowed_amount
+     estimated_avoidable_spend = observed_or_forecast_episode_cost - matched_resolved_episode_cost - intervention_cost
+
+
+     Important financial constraint
+     The attached LLM screenshot does not show charge, allowed, paid or adjustment values. The enhanced LLM must say that
+     financial prediction is unavailable when the required fields or comparable historical claims are missing. It must never fabricate a
+     dollar value.
+
+
+
+
+6. Scenario algorithm for CLM-000143
+1.  Load the anchor claim CLM-000143 and all adjudicated historical claims.
+2.  Normalize identifiers, dates, amounts, CPT/HCPCS, diagnosis codes, modifiers, place of service and authorization
+    fields.
+3. Build an episode around the anchor claim using the same member, related diagnosis group and configurable 90-day
+    window.
+4. Calculate the observed interface facts: 4 claims, 1 denial, CPT 99214 repeated 3 times, 1 care setting and authorization
+    indicators.
+5. Retrieve comparable episodes by payer, provider, diagnosis group, CPT pattern, care setting and time window.
+6. Predict utilisation, denial risk and money using validated models or controlled historical-ratio fallbacks.
+7. Calculate confidence from model calibration, feature completeness and comparable-episode sample size.
+8. Rank provider actions by expected financial impact and operational feasibility.
+9. Retrieve claim facts, similar episodes and payer/authorization guidance for the LLM.
+10. Require structured JSON separating facts, predictions, recommendations and limitations.
+11. Store results with model/version timestamps and re-score when source data changes.
+
+
+
+
+                                          Provider LLM Prediction Enhancement | 1,502-Claim Batch Design
+PROVIDER CLAIMS INTELLIGENCE
+
+7. Detailed pseudocode - current scenario
+ ALGORITHM ProviderEpisodePrediction
+ INPUT:
+     anchor_claim_id = "CLM-000143"
+     claims_table
+     claim_lines_table
+     adjudications_table
+     authorization_table
+     provider_history_table
+     payer_rules_index
+     trained_models
+     episode_window_days = 90
+ OUTPUT:
+     provider_episode_forecast
+ BEGIN
+
+ 1. LOAD AND VALIDATE ANCHOR CLAIM
+     anchor_claim <- GET claim WHERE claim_id = anchor_claim_id
+     IF anchor_claim does not exist:
+         RETURN ERROR("Anchor claim not found")
+     member_id <- anchor_claim.member_id
+     anchor_dx_group <- MAP_DIAGNOSIS_GROUP(anchor_claim.icd10_codes)
+
+ 2. BUILD MEMBER EPISODE
+     candidate_claims <- GET claims WHERE
+         member_id = anchor_claim.member_id
+         AND ABS(service_date - anchor_claim.service_date) <= episode_window_days
+     episode_claims <- []
+     FOR each claim IN candidate_claims:
+         claim_dx_group <- MAP_DIAGNOSIS_GROUP(claim.icd10_codes)
+         IF RELATED_DIAGNOSIS(claim_dx_group, anchor_dx_group):
+             ADD claim TO episode_claims
+     SORT episode_claims BY service_date ASC
+
+ 3. CALCULATE OBSERVED FACTS
+     claim_count <- COUNT(episode_claims)
+     denied_claim_count <- COUNT(claim WHERE final_status = "Denied")
+     all_lines <- GET service lines FOR episode_claims
+     cpt_frequency <- COUNT_BY(all_lines, cpt_code)
+     most_repeated_cpt <- ARGMAX(cpt_frequency)
+     repeat_cpt_count <- cpt_frequency[most_repeated_cpt]
+     care_setting_count <- COUNT(UNIQUE(episode_claims.place_of_service_code))
+     authorization_flags <- CHECK_AUTHORIZATION_REQUIREMENTS(...)
+
+ 4. VERIFY SCREEN FACTS
+     warnings <- []
+     IF claim_count != 4:
+         ADD "DB episode does not match displayed 4-claim scenario" TO warnings
+     IF denied_claim_count != 1:
+         ADD "DB denial count differs from current interface" TO warnings
+     IF most_repeated_cpt != "99214" OR repeat_cpt_count != 3:
+         ADD "Repeated CPT pattern differs from current interface" TO warnings
+
+ 5. CREATE FEATURES
+     features <- {
+         claim_count,
+         denied_claim_count,
+         repeat_cpt_count,
+         care_setting_count,
+         days_first_to_last,
+         same_dx_claims_30d,
+         same_dx_claims_60d,
+         same_dx_claims_90d,
+         authorization_flags,
+         provider_denial_rate,
+         payer_denial_rate,
+         duplicate_service_signal
+     }
+
+ 6. FIND COMPARABLE EPISODES
+     similar_episodes <- SEARCH episode_store WHERE
+         same payer_id
+         AND same diagnosis_group
+         AND similar provider/facility
+         AND similar CPT pattern
+         AND comparable care setting
+     IF COUNT(similar_episodes) < MIN_SAMPLE_SIZE:
+         similar_episodes <- RELAX_MATCHING_HIERARCHY(
+             payer + diagnosis_group + CPT,
+             then diagnosis_group + CPT,
+             then diagnosis_group
+         )
+
+ 7. PREDICT UTILISATION
+                                    Provider LLM Prediction Enhancement | 1,502-Claim Batch Design
+PROVIDER CLAIMS INTELLIGENCE
+    repeat_30d <- PREDICT_OR_RULE(repeat_model_30d, features)
+    repeat_60d <- PREDICT_OR_RULE(repeat_model_60d, features)
+    repeat_90d <- PREDICT_OR_RULE(repeat_model_90d, features)
+    repeat_risk_band <- TO_RISK_BAND(repeat_90d)
+
+ 8. PREDICT DENIAL
+     denial_probability <- PREDICT_OR_RULE(denial_model, features)
+     likely_denial_reason <- INFER_DENIAL_CATEGORY(
+         similar_episodes, authorization_flags, duplicate_service_signal
+     )
+
+ 9. PREDICT MONEY ONLY WHEN SUFFICIENT
+     money_available <- HAS_REQUIRED_MONEY_FIELDS(episode_claims, similar_episodes)
+     IF money_available:
+         predicted_allowed <- PREDICT_ALLOWED(features, similar_episodes)
+         predicted_paid <- PREDICT_PAID(features, predicted_allowed, similar_episodes)
+         predicted_patient_responsibility <- PREDICT_PATIENT_SHARE(...)
+         predicted_adjustment <- PREDICT_ADJUSTMENT(...)
+         expected_denial_exposure <- denial_probability * predicted_allowed
+     ELSE:
+         financial_status <- "Unavailable - insufficient money history"
+
+ 10. CALCULATE ACTIONS AND PRIORITY
+     actions <- RANK_ACTIONS_BY_VALUE([
+         review_denied_claim,
+         validate_distinct_CPT_99214_encounters,
+         confirm_ambulance_authorization,
+         review_repeat_visit_episode
+     ])
+     priority_score <- SCORE_PRIORITY(
+         repeat_90d,
+         denial_probability,
+         expected_denial_exposure,
+         estimated_avoidable_spend
+     )
+
+ 11. RETRIEVE EVIDENCE AND EXPLAIN
+     rag_context <- RETRIEVE(
+         exact episode claims,
+         similar episodes,
+         payer rules,
+         authorization guidance
+     )
+     llm_input <- {
+         observed_facts,
+         model_predictions,
+         ranked_actions,
+         rag_context,
+         limitations
+     }
+     llm_response <- CALL_LLM_WITH_JSON_SCHEMA(llm_input)
+
+ 12. STORE AND RETURN
+     SAVE prediction, explanation, model_version, timestamps, evidence_links
+     RETURN provider_episode_forecast
+ END
+
+
+
+
+                                  Provider LLM Prediction Enhancement | 1,502-Claim Batch Design
+PROVIDER CLAIMS INTELLIGENCE
+
+8. Batch pseudocode - all 1,502 claims
+This batch design ensures the same logic works across the complete spreadsheet. Numeric scoring runs for every valid
+claim/episode; expensive LLM generation runs only on demand or for high-priority cases.
+ ALGORITHM BatchScoreAllClaims
+ INPUT:
+     claims_csv_or_excel          // expected 1,502 claim rows
+     column_alias_map
+     episode_window_days = 90
+     min_comparable_sample = 5
+     trained_models
+ OUTPUT:
+     claim_predictions
+     episode_predictions
+     provider_priority_queue
+     batch_quality_report
+ BEGIN
+
+ 1. INGEST AND NORMALIZE
+     raw_rows <- READ_FILE(claims_csv_or_excel)
+     normalized_rows <- NORMALIZE_COLUMNS(raw_rows, column_alias_map)
+     validated_rows, rejected_rows <- VALIDATE_ROWS(normalized_rows)
+     deduplicated_claims <- DEDUPLICATE(validated_rows, key = Claim_ID)
+
+ 2. LOAD STRUCTURED TABLES
+     UPSERT patients FROM deduplicated_claims
+     UPSERT providers FROM deduplicated_claims
+     UPSERT claims FROM deduplicated_claims
+     UPSERT service_lines FROM deduplicated_claims
+     UPSERT adjudications FROM deduplicated_claims
+
+ 3. PRECOMPUTE HISTORICAL BASELINES
+     adjudicated_history <- FILTER claims WHERE final outcome is known
+     baseline_index <- BUILD_BASELINE_INDEX(
+         payer_id,
+         provider_npi,
+         diagnosis_group,
+         cpt_code,
+         place_of_service,
+         units_band
+     )
+     provider_metrics <- CALCULATE_PROVIDER_METRICS(adjudicated_history)
+     payer_metrics <- CALCULATE_PAYER_METRICS(adjudicated_history)
+
+ 4. BUILD EPISODES FOR EVERY MEMBER
+     members <- UNIQUE(deduplicated_claims.Member_ID)
+     all_episodes <- []
+     FOR each member_id IN members:
+         member_claims <- SORT claims WHERE Member_ID = member_id BY service_date
+         diagnosis_clusters <- GROUP_BY_RELATED_DIAGNOSIS(member_claims)
+         FOR each cluster IN diagnosis_clusters:
+             episodes <- SPLIT_BY_TIME_WINDOW(cluster, episode_window_days)
+             ADD episodes TO all_episodes
+
+ 5. CREATE CLAIM-LEVEL FEATURES
+     FOR each claim IN deduplicated_claims:
+         claim_features <- FEATURE_ENGINEER_CLAIM(
+             claim,
+             member_history,
+             provider_metrics,
+             payer_metrics,
+             authorization_flags
+         )
+         similar_claims <- FIND_COMPARABLE_CLAIMS(
+             claim,
+             baseline_index,
+             fallback_hierarchy
+         )
+         claim_prediction <- SCORE_CLAIM(
+             claim_features,
+             similar_claims,
+             trained_models
+         )
+         SAVE claim_prediction
+
+ 6. CREATE EPISODE-LEVEL FEATURES
+     FOR each episode IN all_episodes:
+         episode_features <- FEATURE_ENGINEER_EPISODE(
+             claim_count,
+             denied_count,
+             repeated_CPT_count,
+             unique_care_settings,
+             timing,
+
+                                  Provider LLM Prediction Enhancement | 1,502-Claim Batch Design
+PROVIDER CLAIMS INTELLIGENCE
+             money_totals,
+             authorization_flags,
+             duplicate_service_signal
+         )
+         similar_episodes <- FIND_COMPARABLE_EPISODES(
+             episode,
+             min_comparable_sample,
+             fallback_hierarchy
+         )
+         episode_prediction <- SCORE_EPISODE(
+             episode_features,
+             similar_episodes,
+             trained_models
+         )
+         SAVE episode_prediction
+
+ 7. PRIORITISE PROVIDER WORK
+     FOR each episode_prediction:
+         priority_score <-
+             repeat_risk * estimated_avoidable_spend
+             + denial_risk * expected_allowed_amount
+             + authorization_or_duplicate_weight
+         ASSIGN priority_band = Critical / High / Medium / Low
+     provider_priority_queue <- SORT episode_predictions BY priority_score DESC
+
+ 8. GENERATE LLM EXPLANATIONS SELECTIVELY
+     FOR each episode_prediction:
+         IF provider opened episode
+            OR priority_band IN ["Critical", "High"]
+            OR prediction materially changed:
+             evidence <- RETRIEVE_RAG_EVIDENCE(episode_prediction)
+             llm_result <- CALL_LLM_WITH_STRUCTURED_SCHEMA(
+                 facts,
+                 predictions,
+                 evidence,
+                 limitations
+             )
+             CACHE llm_result BY episode_id + model_version + data_version
+         ELSE:
+             DO NOT call LLM
+
+ 9. CREATE QUALITY REPORT
+     batch_quality_report <- {
+         input_row_count,
+         validated_row_count,
+         rejected_row_count,
+         duplicate_claim_count,
+         member_count,
+         episode_count,
+         scored_claim_count,
+         scored_episode_count,
+         money_prediction_available_count,
+         low_comparable_sample_count,
+         missing_authorization_count,
+         model_version,
+         run_timestamp
+     }
+
+ 10. RETURN
+     RETURN claim_predictions,
+            episode_predictions,
+            provider_priority_queue,
+            batch_quality_report
+ END
+
+
+ How this scales to 1,502 claims
+ The algorithm does not run one unconstrained LLM prompt per spreadsheet row. It first normalizes all rows, groups related
+ claims into episodes, batch-scores numeric predictions, stores results, ranks episodes, and generates LLM explanations only
+ when a provider opens a case, the episode is high priority, or the underlying data changes.
+
+
+
+
+                                    Provider LLM Prediction Enhancement | 1,502-Claim Batch Design
+PROVIDER CLAIMS INTELLIGENCE
+8.1 Operational batch design
+ Stage                                      Runs for all 1,502 claims?                      Notes
+                                                                                            Fast, deterministic; reject or quarantine
+ ETL validation                             Yes
+                                                                                            malformed rows.
+                                                                                            Vectorised/dataframe or SQL batch
+ Feature engineering                        Yes
+                                                                                            operations.
+                                                                                            Run claim-level and episode-level scoring in
+ Numeric ML/rules scoring                   Yes
+                                                                                            batch.
+ RAG retrieval                              Selective                                       Only for opened or high-priority episodes.
+                                                                                            Cache by episode, model version and data
+ LLM explanation                            Selective
+                                                                                            version.
+                                                                                            New claim, denial, payment, auth or material
+ Re-scoring                                 Event-driven
+                                                                                            episode change.
+
+
+
+
+9. LLM integration and structured output contract
+The LLM should receive only de-identified structured facts, validated model outputs and retrieved evidence. It should not
+perform the money calculations itself.
+
+9.1 System prompt
+ You are a provider claims decision-support assistant.
+
+ You receive:
+ 1. Structured claim and episode facts
+ 2. Predictions generated by validated ML or rules models
+ 3. Retrieved evidence from claims, payer policies and similar episodes
+
+ Responsibilities:
+ - Explain supplied predictions from the provider perspective
+ - Identify data-supported risk drivers
+ - Recommend specific operational actions
+ - Explain financial impact only when supplied
+ - Separate observed facts, predictions, recommendations and limitations
+
+ Rules:
+ - Do not invent or recalculate risk percentages or dollar values
+ - Do not change supplied model outputs
+ - Do not infer medical necessity or make a diagnosis
+ - Do not claim avoidable savings without a supplied estimate
+ - Return valid JSON matching the required schema
+
+
+
+
+9.2 Required JSON response
+ {
+     "provider_summary": "string",
+     "risk_drivers": [
+        {"fact": "string", "source_claim_ids": ["string"]}
+     ],
+     "financial_forecast_explanation": "string or unavailable statement",
+     "recommended_actions": [
+        {
+          "priority": 1,
+          "action": "string",
+          "reason": "string",
+          "expected_financial_impact": null,
+          "claim_ids": ["string"]
+        }
+     ],
+     "evidence_used": ["string"],
+     "limitations": ["string"],
+     "unsupported_assumptions": []
+ }
+
+
+
+
+10. Recommended provider UI changes
+Keep the current visual design, but move quantified prediction and action priority above the narrative summary.
+ UI block                                                           Display
+                                                                    Repeat risk, denial risk, expected payment, avoidable spend and
+ Top KPI row
+                                                                    confidence
+                                    Provider LLM Prediction Enhancement | 1,502-Claim Batch Design
+PROVIDER CLAIMS INTELLIGENCE
+ Episode forecast                                                    30/60/90-day probabilities, likely next service and care setting
+                                                                     Allowed, paid, patient responsibility, adjustment, denial exposure and
+ Financial forecast
+                                                                     range
+ Next-best actions                                                   Ranked actions with claim IDs, owner, priority and expected impact
+                                                                     Compare current pathway with authorization correction, duplicate
+ What-if simulation
+                                                                     review or earlier intervention
+ Evidence trail                                                      Claim-level date, CPT, status, denial and feature values
+ Similar episodes                                                    Comparable sample size and historical outcomes
+ Limitations                                                         Missing fields, weak sample size and decision-support boundary
+ Proposed top card for the current scenario
+ Episode facts: 4 claims | 1 denied | CPT 99214 repeated 3 times | 1 care setting. Repeat utilisation: show calibrated probability
+ when available. Denial forecast: elevated due to existing denial, repeated service pattern and possible authorization issue.
+ Money forecast: explicitly unavailable until the required claim amounts and comparable history are present. Priority action:
+ review denial, validate distinct CPT encounters and confirm ambulance authorization.
+
+
+
+
+                                     Provider LLM Prediction Enhancement | 1,502-Claim Batch Design
+PROVIDER CLAIMS INTELLIGENCE
+
+11. Validation, caching, monitoring and deployment checklist
+11.1 Validation criteria
+ Episode grouping reproduces the displayed four-claim episode for CLM-000143.
+ Every prediction is traceable to a model output or documented fallback rule.
+ Money values are absent or explicitly unavailable when source data is insufficient.
+ Risk probabilities are calibrated on a time-based holdout set.
+ Prediction ranges and comparable sample size are displayed.
+ LLM output passes JSON schema validation and contains no unsupported dollar values.
+ Claim IDs in evidence links resolve to exact source records.
+ Observed facts, predictions, recommendations and limitations are clearly separated.
+ All 1,502 rows are accounted for in the batch quality report: valid, rejected or duplicate.
+
+11.2 Cache and re-scoring policy
+ Generate numeric predictions in batch for all claims and open episodes.
+ Generate the LLM explanation only when a provider opens the episode, the episode is high priority, or the prediction
+  changes materially.
+ Cache using episode_id + data_version + model_version + prompt_version.
+ Re-score when a new claim arrives, claim status changes, denial/payment posts, authorization changes, or episode
+  membership changes.
+
+11.3 Minimum test suite
+ Test                                       Expected result                                 Scope
+                                            1,502 input rows are counted and each row is
+ Row ingestion                                                                              Dataset
+                                            valid/rejected/deduplicated
+                                            Related claims grouped; unrelated diagnoses
+ Episode grouping                                                                           Member-level
+                                            remain separate
+                                            4 claims, 1 denial, CPT 99214 repeated 3
+ CLM-000143 scenario                                                                        Regression
+                                            times, 1 setting when source data matches
+                                            No target outcome used as input for the
+ Money leakage guard                                                                        ML
+                                            current pre-submission claim
+                                            Financial forecast says unavailable, no
+ Insufficient money data                                                                    LLM/UI
+                                            fabricated amount
+                                            Model uses broader comparables when exact
+ Fallback hierarchy                                                                         Prediction
+                                            sample is too small
+ JSON validation                            LLM response conforms to schema                 Integration
+                                            Unchanged episode does not trigger repeat
+ Caching                                                                                    Performance
+                                            LLM call
+ Evidence traceability                      Each driver links to exact claim IDs            Audit
+ Final product direction
+ The provider assistant should evolve from a descriptive summary into a ranked decision engine: predict what may happen next,
+ quantify financial exposure when data supports it, explain why, show confidence and evidence, and direct the provider to the
+ highest-value action across the complete claims population.
+
+
+
+
+                                    Provider LLM Prediction Enhancement | 1,502-Claim Batch Design
+

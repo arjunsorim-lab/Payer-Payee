@@ -1,0 +1,731 @@
+          Claims Scenario Maps + AI Prediction
+                                                          System
+        How to link scenario-map images to Excel/CSV claims data, database tables, ML predictions,
+                                                      and LLM explanations
+
+        Provider-focused | Money prediction | 837 claims data | 834 eligibility reference | LLM explanation layer
+
+    Executive summary
+
+         The scenario-map images are the front-end story: patient view, doctor view, provider view, money prediction,
+          cost leakage, and savings phase.
+         The Excel/CSV claims file is the data engine: patient, provider, CPT, ICD-10, units, charge, allowed, paid, patient
+          responsibility, adjustment, status, denial reason, prior auth, and referral.
+         The AI system should calculate money predictions with rules/ML, then use an LLM to explain the result in plain
+          language and recommend provider actions.
+         The provider view should be the primary decision screen because it connects claim quality, payment
+          prediction, avoidable spend, and resubmission opportunities.
+
+
+
+
+1. Product goal
+Build a provider-focused claims intelligence app that connects Excel/CSV claims data to scenario-map dashboards and
+predicts the money outcome of a claim or episode of care.
+
+The app should answer:
+
+        How much will the payer likely allow?
+        How much will insurance likely pay?
+        How much will become patient responsibility?
+        How much will be adjusted/write-off?
+        Will the claim be denied, forwarded, or processed?
+        Where can the provider avoid repeated spend?
+        Which phase creates the best savings opportunity?
+
+
+
+2. System architecture
+    Excel / CSV claims data
+          ↓
+    ETL cleaner and validator
+          ↓
+    Database tables: patients, providers, claims, service lines, adjudications, episodes
+          ↓
+    Feature engineering
+                    Claims Scenario Intelligence Blueprint | Provider-focused money prediction using claims data + AI/LLM
+      ↓
+ ML / rules prediction engine
+      ↓
+ LLM explanation engine
+      ↓
+ React dashboard scenario map
+
+
+
+
+3. Database schema to create from Excel/CSV
+Do not keep the claims spreadsheet as one flat table forever. Import it, clean it, then split it into normalized tables.
+
+ Table                                          Key columns                                     Purpose
+                                                member_id, subscriber_id, patient name,         Patient View, member search, repeated
+ patients
+                                                DOB, gender, group_id, payer_id                 claim history
+                                                member_id, payer_id, plan_id, coverage
+                                                                                                Eligibility check, payer routing, coverage
+ eligibility_834                                dates, coverage status, benefit type,
+                                                                                                risk
+                                                primary/secondary payer
+                                                billing_provider_npi,
+                                                billing_provider_name,                          Provider View, NPI tracking, provider
+ providers
+                                                rendering_provider_npi, provider type,          performance
+                                                location, contract_id
+                                                claim_id, member_id, payer_id, provider
+ claims                                         NPI, service dates, place of service, status,   Claim lifecycle, submission, status tracking
+                                                denial reason, prior auth, referral
+                                                claim_id, CPT, CPT description, ICD-10,         Doctor View, coding checks, payment
+ claim_service_lines
+                                                diagnosis description, units, charge amount     prediction inputs
+                                                claim_id, allowed, paid, patient
+                                                                                                Payment Analytics, adjudication output,
+ adjudications                                  responsibility, adjustment, claim status,
+                                                                                                model training targets
+                                                denial reason, 835/payment dates
+                                                episode_id, member_id, diagnosis_group,
+                                                                                                Ulcer 4-visit scenario, repeat-cost
+ care_episodes                                  first/last visit, visit_count, total
+                                                                                                prediction
+                                                charges/allowed/paid, repeat risk
+                                                claim_id, scenario_type, predicted money
+                                                                                                Scenario map cards and recommendation
+ claim_predictions                              fields, denial risk, repeat risk, avoidable
+                                                                                                layer
+                                                spend, best savings phase, LLM explanation
+
+
+
+
+4. Data fields required for accurate predictions
+ Data category                                  Required fields                                 Why it matters
+                                                member_id, DOB, gender, plan, group,
+                                                                                                Repeat-visit risk, patient responsibility,
+ Patient / member                               subscriber relationship, coverage dates,
+                                                                                                eligibility risk
+                                                prior claims
+                                                active coverage status, benefit type,
+                                                                                                Allowed/paid/patient responsibility
+ Eligibility / coverage                         deductible, copay, coinsurance,
+                                                                                                accuracy; COB/forwarding prediction
+                                                primary/secondary payer, plan rules
+                                                billing NPI, rendering NPI, facility,
+                                                                                                Allowed amount, provider-level denial risk,
+ Provider                                       specialty, network status, contract ID,
+                                                                                                payment performance
+                                                location
+                                                CPT, ICD-10, units, place of service, service
+ Claim service line                             dates, charge amount, modifier, diagnosis       Denial risk, money prediction, coding risk
+                                                pointers
+                                                prior auth number, referral number, auth        Denial prevention and resubmission
+ Authorization/referral
+                                                required flag, attached documentation           guidance
+                                                allowed, paid, patient responsibility,
+                                                                                                Training targets, payment forecasting,
+ Adjudication/payment                           adjustment, status, denial reason, 835
+                                                                                                dashboard KPI accuracy
+                                                dates, payment posting
+ Historical patterns                            same patient/same diagnosis count, same         Avoidable spend, episode cost, repeat claim
+
+                   Claims Scenario Intelligence Blueprint | Provider-focused money prediction using claims data + AI/LLM
+                                                   CPT history, repeat visit windows, provider
+                                                                                                      prediction
+                                                   denial rates
+                                                   resolved/not resolved, follow-up completed,        Value-based and outcome-oriented
+ Clinical outcome
+                                                   test result, treatment response                    predictions
+
+
+
+
+5. Scenario map logic
+Each scenario is a different dashboard view, but all views are populated from the same data pipeline: database fields
++ model outputs + LLM explanation.
+
+ Scenario                             Relevant data                         Prediction focus                       Best savings phase
+                                      ICD: I48.91, I25.10, I10/I11.9,       Expected allowed/paid,
+ Cardio                               R07.9; CPT: ECG, labs, echo,          adjustment, repeat ER risk,            Early triage + follow-up
+                                      stress test                           duplicate testing risk
+                                      Dental procedure codes, tooth
+                                      number, surface, X-ray result,        Early filling cost vs delayed
+ Cavity                                                                                                            Early diagnosis
+                                      filling/root canal/crown, dental      root-canal/crown pathway
+                                      plan coverage
+                                      GI diagnosis group,
+                                                                            Outpatient vs ER spend, repeat
+                                      office/urgent/ER place of                                                    Early triage + medication
+ Stomach upset                                                              visit risk, unnecessary imaging
+                                      service, labs, medication plan,                                              follow-up
+                                                                            risk
+                                      follow-up history
+                                      Same member, same ulcer/GI
+                                                                            Episode total cost, repeat-visit
+                                      diagnosis group, 4 visits in                                                 Early diagnosis + targeted
+ Ulcer - 4 visits                                                           risk, avoidable spend, root-
+                                      30/60/90 days,                                                               treatment
+                                                                            cause testing opportunity
+                                      treatment/outcome status
+
+
+
+
+6. Prediction models to build
+ Prediction                           Main inputs                           Model output                           Business value
+                                      Charge, CPT, ICD-10, units, payer,
+ Expected allowed amount              provider NPI, place of service,       predicted_allowed_amount               Provider revenue baseline
+                                      plan/contract
+                                      Predicted allowed, payer, plan,
+ Expected paid amount                 patient benefit fields, claim type,   predicted_paid_amount                  Cash/revenue forecast
+                                      historical paid-to-allowed rate
+                                      Plan benefit, deductible, copay,
+ Patient responsibility               coinsurance, allowed, paid,           predicted_patient_responsibility       Patient billing and collection risk
+                                      secondary payer info
+                                      Charge and predicted allowed;
+ Adjustment/write-off                                                       predicted_adjustment_amount            Write-off risk and pricing insight
+                                      payer/provider contract pattern
+                                      CPT/ICD match, modifier,
+                                                                                                                   Prevent denials before
+ Denial risk                          auth/referral, provider denial        denial_risk_score + likely_reason
+                                                                                                                   submission
+                                      history, payer rules
+                                      Primary/secondary coverage,
+                                                                                                                   COB handling and payment delay
+ Forwarded/secondary payer risk       claim filing indicator, payer         forwarding_risk
+                                                                                                                   prediction
+                                      history
+                                      Same member + diagnosis group
+                                                                                                                   Cost avoidance and care
+ Repeat visit risk                    + recent visits + unresolved          repeat_visit_risk_score
+                                                                                                                   management
+                                      outcome
+                                      Repeat claims, high-cost setting,
+                                                                                                                   Value-based care / savings
+ Avoidable spend                      duplicate services, outcome           estimated_avoidable_spend
+                                                                                                                   opportunity
+                                      status, benchmark pathway cost
+
+
+
+
+                     Claims Scenario Intelligence Blueprint | Provider-focused money prediction using claims data + AI/LLM
+7. Feature engineering formulas
+ adjustment_rate = adjustment_amount / charge_amount
+ allowed_rate = allowed_amount / charge_amount
+ paid_rate = paid_amount / charge_amount
+ patient_share_rate = patient_responsibility / allowed_amount
+ has_prior_auth = prior_auth_number is not null and prior_auth_number != ""
+ has_referral = referral_number is not null and referral_number != ""
+ length_of_service_days = service_date_to - service_date_from + 1
+ same_dx_repeat_count_30d = count claims for same member + diagnosis_group in prior 30 days
+ days_since_last_same_dx = current_service_date - previous_same_diagnosis_service_date
+ provider_denial_rate_90d = denied claims for provider in last 90 days / total claims for provider in last 90 days
+ payer_allowed_rate_by_cpt = median(allowed_amount / charge_amount) grouped by payer_id + cpt_code
+ expected_adjustment = charge_amount - predicted_allowed_amount
+
+
+
+
+8. LLM role vs ML role
+Use rules/ML for calculations. Use the LLM for explanation, summarization, and recommended actions. Do not make
+the LLM invent money values.
+
+ Layer                                                 Should do                                    Should not do
+                                                       Calculate risk scores, predicted amounts,
+                                                                                                    Write long explanations without
+ Rules/ML                                              repeat counts, cost leakage, best savings
+                                                                                                    clinical/business context
+                                                       phase
+                                                       Explain why the prediction happened,
+                                                                                                    Calculate final payment from scratch or
+ LLM                                                   what to fix, what phase saves money, and
+                                                                                                    invent missing data
+                                                       how provider should act
+                                                       Render scenario cards, gauges, workflow      Contain business logic that belongs in
+ Frontend
+                                                       timelines, tables, and AI recommendations    backend services
+
+
+
+
+9. API endpoints for React scenario maps
+ GET /api/scenarios/cardio?member_id=MBR00018
+ GET /api/scenarios/cavity?member_id=MBR00018
+ GET /api/scenarios/stomach-upset?member_id=MBR00018
+ GET /api/scenarios/ulcer-episode?member_id=MBR00018
+ GET /api/claims/{claim_id}/prediction
+ POST /api/claims/upload-csv
+ POST /api/predictions/run
+ POST /api/llm/explain-claim
+ GET /api/providers/{npi}/performance
+ GET /api/episodes?member_id=MBR00018&diagnosis_group=ulcer
+
+
+
+
+10. Example JSON returned to the dashboard
+ {
+     "scenario": "ulcer_4_visits",
+     "patient_view": {
+      "member_id": "MBR00018",
+      "visit_count": 4,
+      "problem": "same ulcer issue",
+      "patient_impact": ["repeat visits", "higher out-of-pocket concerns", "not cured yet"]
+     },
+                          Claims Scenario Intelligence Blueprint | Provider-focused money prediction using claims data + AI/LLM
+     "doctor_view": {
+      "diagnosis_group": "ulcer",
+      "recommended_action": "root-cause testing and targeted treatment",
+      "clinical_risk": "high repeat-visit risk"
+     },
+     "provider_view": {
+      "total_charges": 2400,
+      "predicted_allowed": 1760,
+      "predicted_paid": 1320,
+      "predicted_patient_responsibility": 280,
+      "predicted_adjustment": 640,
+      "estimated_avoidable_spend": 720,
+      "best_savings_phase": "early diagnosis and targeted treatment",
+      "cost_leakage_risks": [
+          "repeated symptomatic treatment only",
+          "same-diagnosis revisit pattern",
+          "higher cumulative spend without cure"
+      ]
+     },
+     "llm_explanation": "This episode shows repeated cost without resolution. The provider should identify the root cause earlier and move to
+ targeted ulcer management to reduce repeat claims."
+ }
+
+
+
+
+11. Frontend component structure
+ ScenarioMapPage
+     ├── ScenarioSelector
+     ├── PatientViewCard
+     ├── DoctorViewCard
+     ├── ProviderPredictionCard
+     ├── MoneySavingsCard
+     ├── CostLeakageRiskCard
+     ├── WorkflowTimeline
+     └── LLMRecommendationCard
+
+
+
+
+12. Detailed Codex prompt
+Paste the following prompt into Codex to implement the first working MVP. It asks Codex to build the database-
+backed app, load CSV/Excel data, calculate predictions, call an LLM explanation service, and render the scenario-map
+dashboards.
+
+ You are an expert full-stack engineer. Build a provider-focused healthcare claims intelligence MVP that links Excel/CSV claims data to scenario-map dashboards using
+ AI/ML-style predictions and an LLM explanation layer.
+
+
+ PROJECT NAME
+ Claims Scenario Intelligence
+
+
+ PRIMARY GOAL
+ Create a working app where a user uploads 837 claims CSV/Excel data and the system:
+ 1. Cleans and stores the data in a database.
+ 2. Splits the data into patients, providers, claims, service lines, adjudications, care episodes, and predictions.
+ 3. Generates money-oriented predictions: expected allowed amount, expected paid amount, patient responsibility, adjustment/write-off, denial risk, repeat visit risk,
+ avoidable spend, and best savings phase.
+ 4. Uses an LLM explanation layer to explain each scenario in plain English from a provider view.
+ 5. Renders four scenario maps: Cardio, Cavity, Stomach Upset, and Ulcer - 4 Visits.
+
+
+
+                        Claims Scenario Intelligence Blueprint | Provider-focused money prediction using claims data + AI/LLM
+IMPORTANT PRODUCT DIRECTION
+The provider view is the most important view. Patient View and Doctor View provide context, but the Provider View must drive the business decision: expected
+payment, write-off risk, denial risk, repeat-cost risk, avoidable spend, and best savings phase.
+
+
+TECH STACK
+Frontend: React + Vite + TypeScript + Tailwind CSS
+Backend: Python FastAPI
+Database: PostgreSQL using SQLAlchemy ORM and Alembic migrations
+Data processing: pandas, openpyxl
+ML/rules: start with rules and historical medians; structure code so later models like XGBoost/LightGBM can be added
+LLM: create a provider-agnostic service with environment variable LLM_PROVIDER. Implement a mock LLM fallback that returns deterministic explanations when no
+API key is present.
+
+
+DATABASE TABLES
+Create these tables:
+
+
+patients:
+- id
+- member_id unique
+- subscriber_member_id
+- patient_first_name
+- patient_last_name
+- patient_dob
+- patient_gender
+- group_id
+- group_name
+- payer_id
+- payer_name
+
+
+eligibility_834:
+- id
+- member_id foreign key
+- payer_id
+- plan_id
+- coverage_start_date
+- coverage_end_date
+- coverage_status
+- benefit_type
+- primary_insurance
+- secondary_insurance
+
+
+providers:
+- id
+- provider_npi unique
+- provider_name
+- provider_type
+- facility_name
+- specialty
+- location
+- network_status
+- contract_id
+
+
+claims:
+- id
+- claim_id unique
+- claim_number_for_member
+- member_id foreign key
+- payer_id
+- payer_name
+- billing_provider_npi
+- rendering_provider_npi
+- service_date_from
+- service_date_to
+- place_of_service_code
+- place_of_service_description
+- claim_filing_indicator
+
+                       Claims Scenario Intelligence Blueprint | Provider-focused money prediction using claims data + AI/LLM
+- prior_auth_number
+- referral_number
+- submission_date
+- claim_status_code
+- claim_status_description
+- denial_reason
+
+
+claim_service_lines:
+- id
+- claim_id foreign key
+- cpt_code
+- cpt_description
+- icd10_code
+- icd10_description
+- units
+- charge_amount
+
+
+adjudications:
+- id
+- claim_id foreign key
+- allowed_amount
+- paid_amount
+- patient_responsibility
+- adjustment_amount
+- claim_status_code
+- claim_status_description
+- denial_reason
+- received_835_date
+- payment_posted_date
+
+
+care_episodes:
+- id
+- episode_id unique
+- member_id
+- diagnosis_group
+- first_visit_date
+- last_visit_date
+- visit_count
+- total_charges
+- total_allowed
+- total_paid
+- total_patient_responsibility
+- total_adjustment
+- repeat_visit_risk
+- avoidable_spend_estimate
+- best_savings_phase
+- episode_status
+
+
+claim_predictions:
+- id
+- claim_id nullable foreign key
+- episode_id nullable
+- scenario_type
+- predicted_allowed_amount
+- predicted_paid_amount
+- predicted_patient_responsibility
+- predicted_adjustment_amount
+- denial_risk_score
+- denial_risk_label
+- repeat_visit_risk_score
+- repeat_visit_risk_label
+- cost_leakage_risk
+- estimated_avoidable_spend
+- best_savings_phase
+- model_confidence
+- llm_explanation
+- recommended_action
+
+                       Claims Scenario Intelligence Blueprint | Provider-focused money prediction using claims data + AI/LLM
+- created_at
+
+
+CSV/EXCEL INPUT FIELDS TO SUPPORT
+Support the uploaded claims file structure with columns like:
+ISA_Control_Number, GS_Control_Number, ST_Transaction_Set_ID, Claim_ID, Claim_Number_For_Member, Member_ID, Group_ID, Group_Name, Payer_Name, Payer_ID,
+Patient_Last_Name, Patient_First_Name, Patient_DOB, Patient_Gender, Patient_Account_Number, Subscriber_Last_Name, Subscriber_First_Name,
+Subscriber_Member_ID, Billing_Provider_NPI, Billing_Provider_Name, Rendering_Provider_NPI, Rendering_Provider_Name, Service_Date_From, Service_Date_To,
+Place_of_Service_Code, Place_of_Service_Description, CPT_Code, CPT_Description, ICD10_Diagnosis_Code, ICD10_Diagnosis_Description, Units, Charge_Amount,
+Allowed_Amount, Paid_Amount, Patient_Responsibility, Adjustment_Amount, Claim_Status_Code, Claim_Status_Description, Denial_Reason, Claim_Filing_Indicator,
+Prior_Auth_Number, Referral_Number, EDI_Version, Submission_Date, Created_Timestamp.
+
+
+If a file has slightly different column names, implement a mapping layer that normalizes aliases.
+
+
+FEATURE ENGINEERING
+Implement these features:
+- adjustment_rate = adjustment_amount / charge_amount
+- allowed_rate = allowed_amount / charge_amount
+- paid_rate = paid_amount / charge_amount
+- patient_share_rate = patient_responsibility / allowed_amount
+- has_prior_auth = prior_auth_number is not blank
+- has_referral = referral_number is not blank
+- length_of_service_days = service_date_to - service_date_from + 1
+- same_dx_repeat_count_30d = count claims for same member + diagnosis group in previous 30 days
+- days_since_last_same_dx
+- provider_denial_rate_90d
+- payer_allowed_rate_by_cpt = median allowed_rate grouped by payer_id + cpt_code
+- provider_allowed_rate_by_cpt = median allowed_rate grouped by billing_provider_npi + cpt_code
+
+
+PREDICTION ENGINE
+Start with deterministic rules and historical medians:
+1. predicted_allowed_amount = charge_amount * median_allowed_rate for payer + CPT. Fallback to provider + CPT. Fallback to global median allowed_rate.
+2. predicted_paid_amount = predicted_allowed_amount * median_paid_to_allowed_rate. Fallback global rate.
+3. predicted_adjustment_amount = charge_amount - predicted_allowed_amount.
+4. predicted_patient_responsibility = max(predicted_allowed_amount - predicted_paid_amount, 0), unless historical patient_share_rate exists.
+5. denial_risk_score increases if:
+ - CPT/ICD combination historically denied
+ - missing prior auth for high-cost CPT or service category
+ - missing referral where required
+ - adjustment_rate is unusually high
+ - same provider has high denial rate
+ - denial reason patterns include CO-4, CO-97, CO-11
+6. repeat_visit_risk_score increases if:
+ - same member has same diagnosis group repeated within 30/60/90 days
+ - symptoms/diagnosis not resolved in episode data
+ - same CPT/diagnosis pattern repeats
+7. estimated_avoidable_spend for episodes = estimated repeat cost that could be prevented by earlier triage, diagnosis, follow-up, or targeted treatment.
+
+
+SCENARIO LOGIC
+Create four scenario endpoints and dashboards:
+
+
+1. Cardio scenario
+Relevant diagnosis groups: atrial fibrillation, coronary artery disease, hypertension, chest pain if available.
+Relevant services: ECG, labs, echocardiogram, stress test, chest X-ray.
+Provider prediction focus: expected allowed/paid, adjustment, repeat ER risk, duplicate testing risk.
+Best savings phase: early triage + follow-up.
+
+
+2. Cavity scenario
+This may require a synthetic dental CSV if no dental data exists. Support dental fields if present: dental code, tooth number, surface, dental diagnosis, X-ray result,
+filling/root canal/crown, dental plan coverage.
+Provider prediction focus: early filling pathway vs delayed root-canal/crown pathway.
+Best savings phase: early diagnosis.
+
+
+3. Stomach upset scenario
+Relevant diagnosis groups: GERD, gastritis, abdominal pain, nausea/vomiting, gastroenteritis.
+Provider prediction focus: outpatient vs ER cost, repeat visit risk, unnecessary imaging risk.
+
+
+                     Claims Scenario Intelligence Blueprint | Provider-focused money prediction using claims data + AI/LLM
+Best savings phase: early triage + medication follow-up.
+
+
+4. Ulcer - 4 visits scenario
+This is an episode-of-care prediction, not a single claim prediction.
+Find same member + ulcer/GI diagnosis group repeated 4 times within a chosen window such as 30/60/90 days.
+Provider prediction focus: total episode charges, total predicted allowed, total predicted paid, total patient responsibility, total adjustment, avoidable spend, high repeat-
+visit risk.
+Best savings phase: early diagnosis + targeted treatment.
+
+
+API ENDPOINTS
+Implement:
+POST /api/claims/upload-csv
+GET /api/claims
+GET /api/claims/{claim_id}
+GET /api/claims/{claim_id}/prediction
+POST /api/predictions/run
+GET /api/scenarios/cardio?member_id=...
+GET /api/scenarios/cavity?member_id=...
+GET /api/scenarios/stomach-upset?member_id=...
+GET /api/scenarios/ulcer-episode?member_id=...
+GET /api/providers/{npi}/performance
+GET /api/episodes?member_id=...&diagnosis_group=...
+POST /api/llm/explain-claim
+
+
+FRONTEND COMPONENTS
+Create:
+ScenarioMapPage
+ScenarioSelector
+PatientViewCard
+DoctorViewCard
+ProviderPredictionCard
+MoneySavingsCard
+CostLeakageRiskCard
+WorkflowTimeline
+LLMRecommendationCard
+ClaimsUploadPage
+ClaimsTablePage
+ClaimDetailPage
+ProviderDashboardPage
+
+
+UI STYLE
+Use professional healthcare analytics SaaS style.
+Provider View should be visually larger than Patient View and Doctor View.
+Use scenario-specific colors:
+- Cardio: red
+- Cavity: teal
+- Stomach upset: orange
+- Ulcer 4 visits: purple
+Each scenario page must show:
+- Patient View: patient journey
+- Doctor View: clinical/treatment actions
+- Provider View: money prediction, avoidable spend, leakage risk, best savings phase
+- Bottom workflow timeline
+
+
+LLM EXPLANATION SERVICE
+Implement a function explain_claim_or_episode(input_data). It should accept structured data and return:
+- simple_summary
+- why_paid_adjusted_denied_or_forwarded
+- money_prediction_explanation
+- cost_leakage_risks
+- best_savings_phase
+- recommended_provider_action
+- confidence_notes
+
+
+The LLM must follow this rule: do not invent codes, facts, or dollar values. If data is missing, say what data is missing.
+
+
+
+                       Claims Scenario Intelligence Blueprint | Provider-focused money prediction using claims data + AI/LLM
+    EXAMPLE LLM SYSTEM PROMPT
+    You are a healthcare claims analyst helping a provider understand claim payment prediction and avoidable spend. Use only the supplied structured data and prediction
+    outputs. Explain the result in simple business language. Focus on provider actions, money leakage, avoidable cost, and best savings phase. Do not invent missing clinical
+    facts or dollar values.
+
+
+    TEST DATA
+    Seed the database with the uploaded claims CSV if available. Also create optional synthetic rows for the cavity scenario because dental data may not exist in the current
+    medical 837 file.
+
+
+    ACCEPTANCE CRITERIA
+    1. User can upload a CSV/Excel file and view normalized records.
+    2. Database tables are populated correctly.
+    3. Prediction endpoints return valid JSON with predicted allowed, paid, patient responsibility, adjustment, denial risk, repeat risk, avoidable spend, and best savings
+    phase.
+    4. Scenario dashboards render Cardio, Cavity, Stomach Upset, and Ulcer 4 Visits.
+    5. Provider View is dominant and money-oriented.
+    6. LLM explanation works with mock fallback if no LLM API key is configured.
+    7. No data leakage: do not use paid_amount as an input when predicting paid_amount for new unprocessed claims.
+    8. Include unit tests for feature engineering and prediction calculations.
+    9. Include README with setup instructions.
+    10. Include .env.example for database and LLM settings.
+
+
+    IMPLEMENTATION PHASES
+    Phase 1: Project scaffold, database models, CSV upload, normalized import.
+    Phase 2: Feature engineering and rules/median prediction engine.
+    Phase 3: Scenario API endpoints.
+    Phase 4: React scenario dashboards.
+    Phase 5: LLM explanation service and recommendation cards.
+    Phase 6: Tests, README, and polish.
+
+
+    OUTPUT FORMAT
+    Generate complete runnable code. Include commands to run backend and frontend locally. Use clear file names and comments where needed. Avoid overengineering,
+    but keep the architecture expandable.
+
+
+
+
+13. Implementation checklist
+    Phase                                                                                  Task
+                                                                                           Create FastAPI + React + PostgreSQL project scaffold. Add upload
+    Phase 1
+                                                                                           endpoint and normalized schema.
+                                                                                           Build ETL layer for CSV/Excel claim files and column alias
+    Phase 2
+                                                                                           mapping.
+    Phase 3                                                                                Build feature engineering functions and prediction engine.
+                                                                                           Build scenario APIs for Cardio, Cavity, Stomach Upset, Ulcer 4
+    Phase 4
+                                                                                           Visits.
+                                                                                           Build React scenario-map dashboards with provider view as the
+    Phase 5
+                                                                                           main panel.
+                                                                                           Add LLM explanation service with mock fallback and no-invention
+    Phase 6
+                                                                                           guardrails.
+    Phase 7                                                                                Add tests for ETL, prediction formulas, and API outputs.
+    Phase 8                                                                                Add README, screenshots, and demo workflow.
+
+
+
+
+14. Accuracy limitations and data gaps
+       The current claims file is enough for a prototype, but production predictions require thousands of historical
+        claims across many patients, providers, payers, diagnosis groups, and procedure codes.
+       Cavity/dental prediction requires dental-specific claim data. Medical 837 data alone is not enough for accurate
+        dental cost prediction.
+
+
+                          Claims Scenario Intelligence Blueprint | Provider-focused money prediction using claims data + AI/LLM
+   Patient responsibility accuracy requires benefit design fields such as deductible, copay, coinsurance, out-of-
+    pocket maximum, and secondary payer logic.
+   Avoidable spend predictions require episode/outcome data such as resolved/not resolved, repeat visit windows,
+    follow-up completion, and treatment response.
+   LLM explanations should always state when data is missing and should not invent clinical or financial details.
+
+
+
+15. Final product direction
+The app should not be only a claims viewer. It should become a provider decision engine:
+
+   Predict expected money before submission.
+   Detect high-risk and high-cost claims.
+   Explain why payment, adjustment, denial, or forwarding may happen.
+   Show where avoidable spend can be reduced.
+   Guide providers toward earlier diagnosis, better follow-up, cleaner claims, and lower total cost.
+
+
+
+
+               Claims Scenario Intelligence Blueprint | Provider-focused money prediction using claims data + AI/LLM
+

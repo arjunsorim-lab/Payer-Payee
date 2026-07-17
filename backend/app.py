@@ -10,8 +10,14 @@ from werkzeug.exceptions import HTTPException
 
 try:
     from .db import connect_mongo, get_mongo_config
+    from .llm_service import generate_provider_llm_analysis
+    from .prediction_service import build_prediction_scenarios, summarize_scenarios
+    from .provider_prediction import build_provider_prediction_payload, find_case
 except ImportError:
     from db import connect_mongo, get_mongo_config
+    from llm_service import generate_provider_llm_analysis
+    from prediction_service import build_prediction_scenarios, summarize_scenarios
+    from provider_prediction import build_provider_prediction_payload, find_case
 
 FRONTEND_DIST_DIR = Path(__file__).resolve().parent.parent / "dist"
 
@@ -290,6 +296,123 @@ def get_prediction_dashboard():
             reverse=True,
         )[: int(request.args.get("limit", 10) or 10)],
     })
+
+
+@app.get("/api/predictions/scenarios")
+def get_prediction_scenarios():
+    """Build provider-facing episode scenarios from the current database rows."""
+    db = connect_mongo()
+    query = build_claim_query(request.args)
+    claims = list(db.claims.find(query).sort([("dos", 1), ("claimId", 1)]))
+    scenarios = build_prediction_scenarios(claims)
+    return json_response({
+        "summary": summarize_scenarios(scenarios),
+        "totalClaims": len(claims),
+        "items": scenarios,
+        "model": {
+            "name": "Explainable episode forecast v1",
+            "backend": "Python",
+            "source": get_mongo_config()["dataSource"],
+        },
+    })
+
+
+def build_provider_case(db, claim_number):
+    """Build one exact provider case from the current database records."""
+    selected_claim = db.claims.find_one({"$or": [{"number": claim_number}, {"claimId": claim_number}]})
+    if not selected_claim:
+        return None, "Claim not found"
+
+    all_claims = list(db.claims.find({}).sort([("dos", 1), ("claimId", 1)]))
+    scenario, report = find_case(
+        all_claims,
+        claim_number,
+        window_days=int(os.getenv("PROVIDER_EPISODE_WINDOW_DAYS", "90")),
+        min_peers=int(os.getenv("PROVIDER_MIN_PEERS", "5")),
+    )
+    if not scenario:
+        return None, "Unable to build provider case prediction"
+    anchor = scenario["anchor"]
+    scenario.update({
+        "id": scenario["episodeId"],
+        "patient": selected_claim.get("patient") or "Unknown patient",
+        "memberId": selected_claim.get("memberId"),
+        "payer": selected_claim.get("payer") or "Unknown payer",
+        "provider": selected_claim.get("billingProvider") or "Unknown provider",
+        "diagnosisCode": selected_claim.get("diagnosisCode"),
+        "condition": selected_claim.get("diagnosisDescription") or selected_claim.get("diagnosisCode") or "Unspecified condition",
+        "category": "provider",
+        "pathway": {"label": "Provider episode"},
+        "totalVisitCount": scenario["features"]["claimCount"],
+        "risk": scenario["repeatRisk"],
+        "likelyOutcome": f"{scenario['repeatRisk']['level']} repeat-service risk; {scenario['denialRisk']['level']} denial risk",
+        "riskReasons": scenario["riskDrivers"],
+        "savingsActions": scenario["recommendedActions"],
+        "anchor": anchor,
+        "selectedClaim": next(
+            claim for claim in scenario["claims"]
+            if claim_number in {claim.get("claimId"), claim.get("number")}
+        ),
+        "validation": report["validation"],
+        "quality": report["quality"],
+    })
+    return scenario, None
+
+
+@app.get("/api/predictions/provider-case/<claim_number>")
+def get_provider_case_prediction(claim_number):
+    """Return the provider-focused episode prediction for one exact claim."""
+    db = connect_mongo()
+    scenario, error = build_provider_case(db, claim_number)
+    if error:
+        return json_response({"message": error}, 404 if error == "Claim not found" else 422)
+    structured = build_provider_prediction_payload(scenario)
+    return json_response({
+        **structured,
+        "episode_id": scenario["episodeId"],
+        "member_reference": scenario["memberReference"],
+        "llm_analysis": None,
+        "metadata": {
+            "modelVersion": scenario["method"],
+            "peerCount": scenario["peerCount"],
+            "confidence": scenario["confidence"],
+            "priorityScore": scenario["priorityScore"],
+        },
+        "item": scenario,
+        "model": {
+            "name": "Explainable provider case forecast v1",
+            "backend": "Python",
+            "source": get_mongo_config()["dataSource"],
+        },
+    })
+
+
+@app.post("/api/predictions/provider-case/<claim_number>/llm")
+def get_provider_case_llm_analysis(claim_number):
+    """Generate a de-identified, provider-side LLM analysis for one claim episode."""
+    db = connect_mongo()
+    scenario, error = build_provider_case(db, claim_number)
+    if error:
+        return json_response({"message": error}, 404 if error == "Claim not found" else 422)
+    try:
+        result = generate_provider_llm_analysis(scenario)
+        structured = build_provider_prediction_payload(scenario)
+        return json_response({
+            **structured,
+            **result,
+            "episode_id": scenario["episodeId"],
+            "member_reference": scenario["memberReference"],
+            "llm_analysis": result.get("analysis"),
+            "metadata": {
+                "modelVersion": scenario["method"],
+                "promptVersion": result.get("promptVersion"),
+                "confidence": scenario["confidence"],
+                "peerCount": scenario["peerCount"],
+                "priorityScore": scenario["priorityScore"],
+            },
+        })
+    except RuntimeError as exc:
+        return json_response({"configured": True, "message": str(exc)}, 502)
 
 
 @app.get("/api/predictions/risk-queue")

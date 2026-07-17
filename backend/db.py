@@ -7,9 +7,9 @@ from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
 try:
-    from .fallback_db import load_fallback_database
+    from .fallback_db import FallbackDatabase, load_fallback_database
 except ImportError:
-    from fallback_db import load_fallback_database
+    from fallback_db import FallbackDatabase, load_fallback_database
 
 load_dotenv()
 
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 def connect_mongo():
     global _client, _db, _data_source, _next_mongo_retry_at
 
-    if _db is not None and not getattr(_db, "is_fallback", False):
+    if _db is not None and not isinstance(_db, FallbackDatabase):
         return _db
 
     if _db is not None and time.monotonic() < _next_mongo_retry_at:

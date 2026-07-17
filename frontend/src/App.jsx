@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { formatOptionalCurrency, formatPredictionRange, formatProbability } from './providerLlmFormat.js'
 import {
   ArrowLeft,
@@ -2077,7 +2078,7 @@ function ProviderLlmModal({ claim, result, loading, error, onClose, onRetry }) {
     }
   }, [onClose])
 
-  return (
+  return createPortal(
     <div className="provider-llm-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
       <div className="provider-llm-modal" role="dialog" aria-modal="true" aria-labelledby="provider-llm-modal-title">
         <header className="provider-llm-modal-header">
@@ -2094,7 +2095,8 @@ function ProviderLlmModal({ claim, result, loading, error, onClose, onRetry }) {
           {!loading && result?.forecast ? <ProviderMoneyLlmResult result={result} /> : null}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
@@ -2137,7 +2139,6 @@ function ProviderMoneyLlmResult({ result }) {
   const actions = Array.isArray(result.recommended_actions) ? result.recommended_actions : []
   const drivers = Array.isArray(result.risk_drivers) ? result.risk_drivers : []
   const evidence = Array.isArray(result.evidence_used) ? result.evidence_used : []
-  const limitations = Array.isArray(result.limitations) ? result.limitations : []
   const unavailable = 'Not enough evidence to estimate reliably.'
   const snapshotCards = [
     { label: 'Predicted claim outcome', value: forecast.predicted_claim_outcome?.display_value || 'Unavailable', note: `Probability ${formatProbability(forecast.predicted_claim_outcome?.probability)}` },
@@ -2222,8 +2223,6 @@ function ProviderMoneyLlmResult({ result }) {
         <div className="llm-evidence-list">{evidence.map((item) => <article key={item.claim_id}><strong>Claim {item.claim_id}</strong><small>{formatDate(item.service_date)} · CPT {item.cpt_code} · {item.claim_status}</small><small>Actual allowed {formatOptionalCurrency(item.actual_allowed)} · Actual paid {formatOptionalCurrency(item.actual_paid)}</small></article>)}</div>
       </section>
 
-      <section className="llm-wide-section"><div className="llm-section-heading"><span>Limitations</span></div><ul>{limitations.map((item) => <li key={item}>{item}</li>)}</ul></section>
-      <details className="llm-exact-output"><summary>Exact model output</summary><pre>{JSON.stringify(result.exact_model_output || {}, null, 2)}</pre></details>
       <ProviderPredictionChat result={result} />
     </div>
   )
@@ -2245,12 +2244,11 @@ function ProviderPredictionChat({ result }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [lastQuestion, setLastQuestion] = useState('')
-  const scrollRef = useRef(null)
+  const resultsRef = useRef(null)
   const suggested = result.suggested_questions || ['How was the predicted allowed amount calculated?', 'How much provider revenue is at risk?', 'Which historical claims were used?', 'How confident is the model and why?']
 
   useEffect(() => {
     try { window.localStorage.setItem(storageKey, JSON.stringify(messages)) } catch { /* storage optional */ }
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages, storageKey])
 
   const submit = async (question = draft) => {
@@ -2264,6 +2262,7 @@ function ProviderPredictionChat({ result }) {
         body: JSON.stringify({ claim_id: claimId, episode_id: episodeId, message: text, conversation_id: conversationId }),
       })
       setMessages((current) => [...current, { role: 'assistant', text: response.answer, meta: response }])
+      window.requestAnimationFrame(() => resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
     } catch (requestError) {
       setError(requestError.message || 'Chat response is unavailable.')
     } finally { setLoading(false) }
@@ -2271,14 +2270,19 @@ function ProviderPredictionChat({ result }) {
   const clear = () => { setMessages([{ role: 'assistant', text: 'Chat cleared. Ask a question about this prediction.' }]); setError('') }
 
   return (
-    <section className="llm-wide-section provider-prediction-chat">
-      <div className="llm-section-heading"><span>Ask About This Prediction</span><button type="button" onClick={clear}>Clear chat</button></div>
-      <div className="chat-suggestions">{suggested.slice(0, 6).map((question) => <button type="button" key={question} onClick={() => submit(question)}>{question}</button>)}</div>
-      <div className="chat-messages" ref={scrollRef}>{messages.map((message, index) => <div className={`chat-bubble ${message.role}`} key={`${message.role}-${index}`}><strong>{message.role === 'user' ? 'You' : 'Grok provider assistant'}</strong><p>{message.text}</p>{message.meta?.evidence_claim_ids?.length ? <small>Evidence: {message.meta.evidence_claim_ids.join(', ')}</small> : null}</div>)}{loading ? <div className="chat-bubble assistant"><RefreshCw className="spin" size={15} /> Reviewing the structured prediction…</div> : null}</div>
-      {error ? <div className="chat-error">{error}<button type="button" onClick={() => submit(lastQuestion)}>Retry</button></div> : null}
-      <div className="chat-composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit() } }} placeholder="Ask about this claim prediction…" rows="2" /><button className="llm-primary-button" type="button" onClick={() => submit()} disabled={loading || !draft.trim()}><Send size={16} /> Send</button></div>
-      <small>Enter to send · Shift+Enter for a new line. The browser sends only claim ID, episode ID, question and conversation ID.</small>
-    </section>
+    <>
+      <section className="llm-wide-section provider-chat-results" ref={resultsRef} aria-live="polite">
+        <div className="llm-section-heading"><span>Prediction Assistant Results</span><button type="button" onClick={clear}>Clear chat</button></div>
+        <div className="chat-results-list">{messages.map((message, index) => <article className={`chat-result-card ${message.role}`} key={`${message.role}-${index}`}><strong>{message.role === 'user' ? 'Your question' : 'Grok provider assistant'}</strong><p>{message.text}</p>{message.meta?.evidence_claim_ids?.length ? <small>Evidence: {message.meta.evidence_claim_ids.join(', ')}</small> : null}</article>)}{loading ? <article className="chat-result-card assistant loading"><RefreshCw className="spin" size={16} /> Reviewing the structured prediction…</article> : null}</div>
+      </section>
+      <aside className="provider-chat-prompt" aria-label="Ask About This Prediction">
+        <div className="provider-chat-prompt-title"><Sparkles size={17} /><span>Ask Grok about this prediction</span></div>
+        <div className="chat-suggestions">{suggested.slice(0, 5).map((question) => <button type="button" key={question} onClick={() => submit(question)}>{question}</button>)}</div>
+        {error ? <div className="chat-error">{error}<button type="button" onClick={() => submit(lastQuestion)}>Retry</button></div> : null}
+        <div className="chatgpt-composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit() } }} placeholder="Ask about this claim prediction…" rows="1" /><button type="button" aria-label="Send chat question" onClick={() => submit()} disabled={loading || !draft.trim()}><Send size={18} /></button></div>
+        <small>Enter to send · Shift+Enter for a new line</small>
+      </aside>
+    </>
   )
 }
 

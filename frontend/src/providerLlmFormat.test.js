@@ -25,7 +25,6 @@ test('Provider LLM labels actual and predicted amounts separately', () => {
   assert.match(source, /Actual allowed/)
   assert.match(source, /Predicted allowed/)
   assert.match(source, /Peer sample size/)
-  assert.match(source, /Exact model output/)
 })
 
 test('Provider LLM production files contain no integration-claim hardcoding', () => {
@@ -47,13 +46,29 @@ test('member summary labels the database-backed count as Total Claims', () => {
 
 test('Run LLM Analysis opens an accessible money-oriented modal', () => {
   const source = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
+  const styles = readFileSync(new URL('./App.css', import.meta.url), 'utf8')
   assert.match(source, /role="dialog"/)
   assert.match(source, /aria-modal="true"/)
+  assert.match(source, /createPortal/)
   assert.match(source, /Provider Financial Opportunity Summary/)
   assert.match(source, /Backtest Against Actual Result/)
   assert.match(source, /Provider Money Scenario Map/)
   assert.match(source, /Ask About This Prediction/)
+  assert.match(source, /provider-chat-prompt/)
   assert.match(source, /Close Provider LLM Analysis/)
+  assert.match(styles, /\.provider-llm-modal\s*\{[^}]*inset:\s*0;[^}]*width:\s*100vw;[^}]*height:\s*100vh;/s)
+  assert.match(styles, /\.provider-chat-prompt\s*\{[^}]*position:\s*fixed;[^}]*left:\s*50%;/s)
+})
+
+test('prediction chat uses a floating prompt and inline result cards', () => {
+  const source = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
+  const result = source.slice(source.indexOf('function ProviderMoneyLlmResult'), source.indexOf('function ProviderPredictionChat'))
+  const chat = source.slice(source.indexOf('function ProviderPredictionChat'), source.indexOf('export function ProviderLlmResult'))
+  assert.match(result, /<ProviderPredictionChat result=\{result\}/)
+  assert.doesNotMatch(result, /Limitations|Exact model output/)
+  assert.match(chat, /provider-chat-prompt/)
+  assert.match(chat, /provider-chat-results/)
+  assert.match(chat, /chatgpt-composer/)
 })
 
 test('prediction cards expose metric-specific calculation bases', () => {

@@ -2,6 +2,7 @@ import os
 import json
 import unittest
 from pathlib import Path
+from statistics import median
 from unittest.mock import patch
 
 from backend.import_claims import read_claims
@@ -166,11 +167,17 @@ class ProviderPredictionTests(unittest.TestCase):
         self.assertEqual(money["provider_expected_reimbursement"], forecast["predicted_paid"]["value"])
         expected_exposure = round(forecast["denial_risk"]["probability"] * forecast["predicted_paid"]["value"], 2)
         self.assertEqual(money["expected_denial_exposure"], expected_exposure)
-        self.assertEqual(money["potential_revenue_at_risk"], round(forecast["predicted_adjustment"]["value"] + expected_exposure, 2))
+        self.assertEqual(money["expected_contractual_adjustment"], forecast["predicted_adjustment"]["value"])
+        self.assertNotIn("potential_revenue_at_risk", money)
         allowed_backtest = payload["backtest_against_actual"]["allowed"]
         self.assertEqual(allowed_backtest["absolute_error"], round(abs(allowed_backtest["predicted"] - allowed_backtest["actual"]), 2))
         self.assertIn("reconciliation_difference", payload["financial_reconciliation"])
-        self.assertEqual(payload["provider_money_scenario_map"]["provider_claim_payment_prediction"]["predicted_paid"], forecast["predicted_paid"]["value"])
+        self.assertEqual(payload["provider_money_scenario_map"]["provider_claim_payment_prediction"]["predicted_paid"]["value"], forecast["predicted_paid"]["value"])
+        self.assertNotIn("provider_revenue_at_risk", payload["provider_money_scenario_map"]["provider_claim_payment_prediction"])
+        self.assertIn("member_claim_history", payload["provider_money_scenario_map"])
+        self.assertIn("encounter_and_coding", payload["provider_money_scenario_map"])
+        self.assertIn("where_provider_money_may_be_saved", payload["provider_money_scenario_map"])
+        self.assertIn("claim_workflow", payload["provider_money_scenario_map"])
         self.assertNotIn("cavity", json.dumps(payload["provider_money_scenario_map"]).lower())
 
     def test_savings_opportunity_separates_supported_savings_from_forecast_exposure(self):
@@ -230,10 +237,34 @@ class ProviderPredictionTests(unittest.TestCase):
         self.assertEqual(future["expected_repeat_allowed_exposure"], round(future["repeat_probability_90d"] * payload["forecast"]["predicted_allowed"]["value"], 2))
         self.assertNotEqual(savings["best_action"]["stage"], "Denial correction")
         self.assertFalse(savings["current_claim_opportunity"]["patient_balance_opportunity_available"])
-        self.assertEqual(savings["historical_comparison"]["peer_count"], payload["prediction_basis"]["member_prior_same_cpt_claims"])
-        self.assertEqual(savings["historical_comparison"]["indicators"]["allowed_rate"], "favourable")
-        self.assertEqual(savings["historical_comparison"]["indicators"]["paid_to_allowed_rate"], "favourable")
-        self.assertEqual(savings["historical_comparison"]["indicators"]["adjustment_rate"], "favourable")
+        performance = savings["current_claim_performance"]
+        self.assertEqual(performance["match_level"], "same member + same CPT")
+        self.assertEqual(performance["matched_claim_count"], 14)
+        self.assertEqual(performance["matched_claim_count"], payload["prediction_basis"]["member_prior_same_cpt_claims"])
+        matched = [row for row in rows if row.get("claimId") in set(performance["matched_claim_ids"])]
+        self.assertTrue(all(row["dos"] <= source["dos"] for row in matched))
+        expected_rates = {
+            "allowed": median(row["allowed"] / row["totalCharge"] for row in matched if row["totalCharge"]),
+            "paid_to_allowed": median(row["paid"] / row["allowed"] for row in matched if row["allowed"]),
+            "adjustment": median(row["adjustment"] / row["totalCharge"] for row in matched if row["totalCharge"]),
+            "patient_share": median(row["patientResp"] / row["allowed"] for row in matched if row["allowed"]),
+        }
+        for metric, historical_rate in expected_rates.items():
+            self.assertAlmostEqual(performance["metrics"][metric]["historical_median_rate"], historical_rate, places=7)
+            self.assertEqual(performance["metrics"][metric]["variance_status"], "favourable")
+        self.assertAlmostEqual(performance["metrics"]["allowed"]["actual_rate"], source["allowed"] / source["totalCharge"], places=4)
+        self.assertAlmostEqual(performance["metrics"]["paid_to_allowed"]["actual_rate"], source["paid"] / source["allowed"], places=4)
+        self.assertAlmostEqual(performance["metrics"]["allowed"]["related_dollar_variance"], 116.82, delta=.10)
+        self.assertAlmostEqual(performance["metrics"]["paid_to_allowed"]["related_dollar_variance"], 11.08, delta=.10)
+        self.assertAlmostEqual(performance["metrics"]["adjustment"]["related_dollar_variance"], 116.82, delta=.10)
+        self.assertAlmostEqual(performance["metrics"]["patient_share"]["related_dollar_variance"], 48.96, delta=.10)
+        basis_values = {item["metric"]: item["value"] for item in savings["current_claim_opportunity"]["calculation_basis"]}
+        self.assertEqual(basis_values["potential_underpayment"], 0)
+        self.assertEqual(basis_values["excessive_adjustment"], 0)
+        availability = {item["key"]: item for item in savings["data_availability"]}
+        self.assertEqual(availability["denial_correction_status"]["status"], "Not applicable to this claim")
+        self.assertEqual(availability["collection_status"]["status"], "Missing from dataset")
+        self.assertIn("1 of 4 eligible historical index claim", savings["recurrence_evidence"]["90"]["local_evidence_statement"])
 
     @patch.dict(os.environ, {"GROQ_API_KEY": ""}, clear=False)
     def test_chat_is_claim_scoped_and_uses_structured_backend_values(self):
@@ -289,7 +320,7 @@ class ProviderPredictionTests(unittest.TestCase):
         ]
         case_result, _ = find_case(rows, "TARGET", min_peers=2)
         savings = build_provider_prediction_payload(case_result)["where_provider_money_can_be_saved"]
-        self.assertEqual(savings["historical_comparison"]["match_level"], "same member + same CPT")
+        self.assertEqual(savings["historical_comparison"]["match_level"], "same member + same CPT + same diagnosis family")
         self.assertEqual(savings["current_claim_opportunity"]["sample_size"], 2)
         self.assertEqual(set(savings["historical_comparison"]["affected_claim_ids"]), {"L1", "L2"})
 
@@ -302,8 +333,45 @@ class ProviderPredictionTests(unittest.TestCase):
             self.assertIn("local_denominator", recurrence[horizon])
             self.assertIn("external_numerator", recurrence[horizon])
             self.assertIn("external_denominator", recurrence[horizon])
+            self.assertEqual(recurrence[horizon]["eligible_prior_index_claim_count"], recurrence[horizon]["local_denominator"])
+            self.assertEqual(recurrence[horizon]["recurring_prior_index_claim_count"], recurrence[horizon]["local_numerator"])
+            self.assertIn("eligible historical index claim", recurrence[horizon]["local_evidence_statement"])
+            self.assertNotIn("interval", recurrence[horizon]["local_evidence_statement"].lower())
             self.assertTrue(recurrence[horizon]["filters_used"])
             self.assertEqual(recurrence[horizon]["final_blended_rate"], payload["forecast"]["repeat_service_risk"][f"probability_{horizon}d"])
+
+    def test_data_availability_is_claim_specific_and_schema_driven(self):
+        rows = self.rows[:3] + [claim("S1", "S", "2026-01-01", sourceCsvColumns=["Claim_ID", "Claim_Status_Description", "Patient_Responsibility"])]
+        case_result, _ = find_case(rows, "S1", min_peers=2)
+        savings = build_provider_prediction_payload(case_result)["where_provider_money_can_be_saved"]
+        availability = {item["key"]: item for item in savings["data_availability"]}
+        self.assertEqual(availability["denial_recoverability_status"]["status"], "Not applicable to this claim")
+        self.assertEqual(availability["collection_status"]["status"], "Missing from dataset")
+        self.assertEqual(availability["authorization_requirement"]["status"], "Missing from dataset")
+        self.assertNotEqual(savings["best_action"]["stage"], "No immediate validated savings action")
+
+    def test_every_valid_csv_claim_can_build_the_shared_savings_forecast(self):
+        csv_path = Path(os.getenv("CSV_PATH", Path.home() / "Downloads" / "EDI_834_837_20 members(837_Claims).csv"))
+        if not csv_path.is_file():
+            self.skipTest("Uploaded claims CSV is unavailable")
+        rows = read_claims(csv_path)
+        valid, validation = validate_claims(rows)
+        failures = []
+        for source in valid:
+            try:
+                case_result, _ = find_case(rows, source["claimId"])
+                payload = build_provider_prediction_payload(case_result)
+                savings = payload["where_provider_money_can_be_saved"]
+                reference = savings["forecast_reference"]
+                forecast = payload["forecast"]
+                if reference["predicted_paid"] != forecast["predicted_paid"]["value"]:
+                    failures.append((source["claimId"], "shared forecast mismatch"))
+                if not savings["best_action"].get("action"):
+                    failures.append((source["claimId"], "missing next action"))
+            except Exception as error:  # pragma: no cover - failure details are asserted below
+                failures.append((source.get("claimId"), type(error).__name__))
+        self.assertEqual(validation["validClaims"], len(rows))
+        self.assertEqual(failures, [])
 
     def test_shared_forecast_reference_has_no_duplicate_prediction_values(self):
         case_result, _ = find_case(self.rows, "T2", min_peers=2)
@@ -311,9 +379,13 @@ class ProviderPredictionTests(unittest.TestCase):
         reference = payload["where_provider_money_can_be_saved"]["forecast_reference"]
         forecast = payload["forecast"]
         self.assertEqual(reference["repeat_probability_90d"], forecast["repeat_service_risk"]["probability_90d"])
+        self.assertEqual(reference["repeat_probability_30d"], forecast["repeat_service_risk"]["probability_30d"])
+        self.assertEqual(reference["repeat_probability_60d"], forecast["repeat_service_risk"]["probability_60d"])
         self.assertEqual(reference["predicted_allowed"], forecast["predicted_allowed"]["value"])
         self.assertEqual(reference["predicted_paid"], forecast["predicted_paid"]["value"])
         self.assertEqual(reference["confidence"], forecast["confidence"]["score"])
+        self.assertEqual(reference["peer_sample_size"], forecast["confidence"]["peer_sample_size"])
+        self.assertEqual(reference["prediction_cutoff_date"], payload["prediction_basis"]["prediction_cutoff_date"])
 
     def test_llm_scope_guard_rejects_clinical_or_unsupported_setting_advice(self):
         analysis = {

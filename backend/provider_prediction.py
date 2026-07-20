@@ -12,8 +12,8 @@ import os
 from statistics import median
 
 
-MODEL_VERSION = "provider-money-forecast-v3.2"
-CALCULATION_VERSION = "provider-savings-v2"
+MODEL_VERSION = "provider-money-forecast-v3.3"
+CALCULATION_VERSION = "provider-savings-v5"
 DEFAULT_WINDOW_DAYS = 90
 DEFAULT_MIN_PEERS = 5
 REPEAT_MEDIUM_THRESHOLD = .34
@@ -416,7 +416,10 @@ def _repeat_forecast(anchor, historical_claims, member_history):
             "local_rate": round(member_successes / member_trials, 4) if member_trials else None,
             "external_rate": round(peer_successes / peer_trials, 4) if peer_trials else None,
             "blend_weights": _blend_weights(member_trials, peer_trials, prior_strength),
-            "recurrence_interval_count": member_trials + peer_trials,
+            "eligible_prior_index_claim_count": member_trials,
+            "recurring_prior_index_claim_count": member_successes,
+            "external_eligible_index_claim_count": peer_trials,
+            "external_recurring_index_claim_count": peer_successes,
             "local_numerator": member_successes,
             "local_denominator": member_trials,
             "external_numerator": peer_successes,
@@ -429,10 +432,23 @@ def _repeat_forecast(anchor, historical_claims, member_history):
                 "same member for local history",
                 f"diagnosis family {_diagnosis_family(anchor.get('diagnosisCode'))}",
                 f"procedure family {_procedure_family(anchor.get('cptCode'))}",
-                f"mature consecutive interval for the {horizon}-day horizon",
+                f"eligible index claim has a complete {horizon}-day follow-up window",
+                f"next related claim occurs within {horizon} days",
             ],
+            "exact_filtering_rule": (
+                f"Claims before {cutoff.isoformat()} with diagnosis family "
+                f"{_diagnosis_family(anchor.get('diagnosisCode'))} and procedure family "
+                f"{_procedure_family(anchor.get('cptCode'))}; each eligible index claim must have a complete "
+                f"{horizon}-day follow-up window, and recurrence means its next related claim occurs within {horizon} days."
+            ),
+            "local_evidence_statement": (
+                f"{member_successes} of {member_trials} eligible historical index claim(s) had a related recurrence within {horizon} days."
+            ),
+            "external_evidence_statement": (
+                f"{peer_successes} of {peer_trials} eligible external index claim(s) had a related recurrence within {horizon} days."
+            ),
             "available": bool(member_trials or peer_trials),
-            "reason": None if (member_trials or peer_trials) else "No mature related diagnosis-and-procedure recurrence intervals were available before the cutoff date.",
+            "reason": None if (member_trials or peer_trials) else "No eligible related index claims had a complete follow-up window before the cutoff date.",
         }
     return probabilities, basis
 
@@ -633,11 +649,11 @@ def _conditional_actions(features, denial_probability, repeat, selected_claim, a
 def _recovery_peer_basis(anchor, historical_claims, member_history, min_peers):
     """Select close, earlier adjudicated rows for retrospective recovery checks."""
     dimensions = (
-        ("payer + provider + CPT + diagnosis family + place of service + units", ("payer", "provider", "cpt", "diagnosis", "pos", "units"), historical_claims),
+        ("same member + same CPT + same diagnosis family", ("cpt", "diagnosis"), member_history),
+        ("same member + same CPT", ("cpt",), member_history),
         ("payer + CPT + diagnosis family + place of service", ("payer", "cpt", "diagnosis", "pos"), historical_claims),
         ("payer + CPT + diagnosis family", ("payer", "cpt", "diagnosis"), historical_claims),
         ("CPT + diagnosis family", ("cpt", "diagnosis"), historical_claims),
-        ("same member + same CPT", ("cpt",), member_history),
     )
     rows = []
     label = "insufficient evidence"
@@ -659,11 +675,11 @@ def _recovery_peer_basis(anchor, historical_claims, member_history, min_peers):
         "minimum_sample_size": min_peers,
         "claim_ids": [row["claimId"] for row in rows],
         "prediction_cutoff_date": anchor["_serviceDate"].isoformat(),
-        "matching_dimensions": list(dimensions[level - 1][1]) if rows else [],
-        "median_allowed_rate": round(median(allowed_rates), 4) if allowed_rates else None,
-        "median_paid_to_allowed_rate": round(median(paid_rates), 4) if paid_rates else None,
-        "median_adjustment_rate": round(median(adjustment_rates), 4) if adjustment_rates else None,
-        "median_patient_share_rate": round(median(patient_rates), 4) if patient_rates else None,
+        "matching_dimensions": (["member"] + list(dimensions[level - 1][1])) if rows and level <= 2 else list(dimensions[level - 1][1]) if rows else [],
+        "median_allowed_rate": round(median(allowed_rates), 8) if allowed_rates else None,
+        "median_paid_to_allowed_rate": round(median(paid_rates), 8) if paid_rates else None,
+        "median_adjustment_rate": round(median(adjustment_rates), 8) if adjustment_rates else None,
+        "median_patient_share_rate": round(median(patient_rates), 8) if patient_rates else None,
         "metric_sample_sizes": {
             "allowed_rate": len(allowed_rates),
             "paid_to_allowed_rate": len(paid_rates),
@@ -675,6 +691,75 @@ def _recovery_peer_basis(anchor, historical_claims, member_history, min_peers):
 
 def _avoidable_spend_assessment(episode, all_episodes, anchor, min_peers):
     """Compare a repeated current episode only with earlier lower-repeat episodes."""
+    enrichment = anchor.get("syntheticEnrichment") or {}
+    synthetic_episode_id = str(enrichment.get("Episode_ID") or "").strip()
+    if synthetic_episode_id:
+        cutoff = _claim_order(anchor)
+        all_rows = [row for candidate in all_episodes for row in candidate["claims"]]
+        current_rows = [
+            row for row in all_rows
+            if row.get("memberId") == anchor.get("memberId")
+            and str((row.get("syntheticEnrichment") or {}).get("Episode_ID") or "").strip() == synthetic_episode_id
+            and str((row.get("syntheticEnrichment") or {}).get("Related_Claim_Flag") or "").strip().lower() == "yes"
+            and _claim_order(row) <= cutoff
+        ]
+        current_repeats = max(len(current_rows) - 1, 0)
+        unresolved = any(
+            str((row.get("syntheticEnrichment") or {}).get("Condition_Resolved") or "").strip().lower() in {"no", "false"}
+            or str((row.get("syntheticEnrichment") or {}).get("Treatment_Outcome") or "").strip().lower() in {"not resolved", "unresolved", "persistent"}
+            for row in current_rows
+        )
+        repeat_reasons = [str((row.get("syntheticEnrichment") or {}).get("Repeat_Visit_Reason") or "").strip().lower() for row in current_rows]
+        repeat_reason = next((value for value in repeat_reasons if value and value not in {"planned follow-up", "not applicable", "routine follow-up"}), str(enrichment.get("Repeat_Visit_Reason") or "").strip().lower())
+        non_planned_repeat = bool(repeat_reason and repeat_reason not in {"planned follow-up", "not applicable", "routine follow-up"})
+        grouped = defaultdict(list)
+        for row in all_rows:
+            row_enrichment = row.get("syntheticEnrichment") or {}
+            episode_id = str(row_enrichment.get("Episode_ID") or "").strip()
+            if (
+                not episode_id
+                or episode_id == synthetic_episode_id
+                or _claim_order(row) >= cutoff
+                or (row.get("diagnosisFamily") or _diagnosis_family(row.get("diagnosisCode"))) != (anchor.get("diagnosisFamily") or _diagnosis_family(anchor.get("diagnosisCode")))
+                or (row.get("procedureFamily") or _procedure_family(row.get("cptCode"))) != (anchor.get("procedureFamily") or _procedure_family(anchor.get("cptCode")))
+                or _match_value(row, "payer") != _match_value(anchor, "payer")
+                or str(row_enrichment.get("Related_Claim_Flag") or "").strip().lower() != "yes"
+            ):
+                continue
+            grouped[episode_id].append(row)
+        comparable = [rows for rows in grouped.values() if rows and len(rows) < len(current_rows)]
+        comparable_costs = [sum(row.get("allowed", 0) for row in rows) for rows in comparable]
+        comparable_ids = [episode_id for episode_id, rows in grouped.items() if rows and len(rows) < len(current_rows)]
+        supported = len(current_rows) >= 2 and unresolved and non_planned_repeat and len(comparable_costs) >= min_peers
+        observed_cost = round(sum(row.get("allowed", 0) for row in current_rows), 2)
+        comparison_cost = round(median(comparable_costs), 2) if supported else None
+        amount = round(max(observed_cost - comparison_cost, 0), 2) if supported else None
+        reasons = []
+        if len(current_rows) < 2:
+            reasons.append("The synthetic episode does not contain at least two related claims before the cutoff date.")
+        if not unresolved:
+            reasons.append("The synthetic outcome fields do not indicate an unresolved episode.")
+        if not non_planned_repeat:
+            reasons.append("The synthetic repeat reason is planned follow-up or not applicable.")
+        if len(comparable_costs) < min_peers:
+            reasons.append(f"Only {len(comparable_costs)} comparable lower-repeat episode(s) were available; at least {min_peers} are required.")
+        return {
+            "available": supported,
+            "amount": amount,
+            "reason": None if supported else " ".join(reasons),
+            "observed_or_predicted_episode_cost": observed_cost,
+            "median_lower_repeat_episode_cost": comparison_cost,
+            "comparison_episode_count": len(comparable_costs),
+            "comparison_episode_ids": comparable_ids[:20],
+            "related_claim_count": len(current_rows),
+            "repeated_related_service_count": current_repeats,
+            "prediction_cutoff_date": anchor["_serviceDate"].isoformat(),
+            "synthetic_demo": True,
+            "episode_id": synthetic_episode_id,
+            "condition_unresolved": unresolved,
+            "repeat_reason": enrichment.get("Repeat_Visit_Reason"),
+        }
+
     current_rows = [row for row in episode["claims"] if _related_to_anchor(row, anchor)]
     current_repeats = max(len(current_rows) - len({row.get("cptCode") for row in current_rows}), 0)
     comparable_costs = []
@@ -709,6 +794,7 @@ def _avoidable_spend_assessment(episode, all_episodes, anchor, min_peers):
         "related_claim_count": len(current_rows),
         "repeated_related_service_count": current_repeats,
         "prediction_cutoff_date": anchor["_serviceDate"].isoformat(),
+        "synthetic_demo": False,
     }
 
 
@@ -1002,6 +1088,8 @@ def _provider_financial_metrics(scenario, forecast):
     patient = forecast["predicted_patient_responsibility"].get("value") or 0
     denial_probability = forecast["denial_risk"].get("probability") or 0
     denial_exposure = round(denial_probability * paid, 2)
+    repeat_probability = forecast["repeat_service_risk"].get("probability_90d") or 0
+    repeat_payment_exposure = round(repeat_probability * paid, 2)
     avoidable = forecast["potentially_avoidable_spend"]
     peer_stats = scenario.get("forecast", {}).get("peerStatistics", {})
     lower_adjustment_rate = peer_stats.get("lowerQuartileAdjustmentRate")
@@ -1015,7 +1103,6 @@ def _provider_financial_metrics(scenario, forecast):
         "preventable_adjustment_exposure": preventable_adjustment,
     }
     supported_values = [value for value in opportunity_components.values() if value is not None]
-    opportunity = round(sum(supported_values), 2) if supported_values else None
     return {
         "provider_expected_net_reimbursement": round(paid, 2),
         "provider_expected_reimbursement": round(paid, 2),
@@ -1023,16 +1110,17 @@ def _provider_financial_metrics(scenario, forecast):
         "provider_payment_gap": round(allowed - paid, 2),
         "predicted_patient_balance": round(patient, 2),
         "expected_denial_exposure": denial_exposure,
-        "potential_revenue_at_risk": round(adjustment + denial_exposure, 2),
+        "expected_contractual_adjustment": round(adjustment, 2),
+        "expected_repeat_provider_payment_exposure": repeat_payment_exposure,
         "potentially_avoidable_repeat_spend": avoidable.get("value") if avoidable.get("available") else None,
-        "provider_opportunity_amount": opportunity,
-        "opportunity_available": bool(supported_values),
+        "validated_recovery_opportunity": None,
+        "synthetic_demo_opportunity": None,
         "opportunity_components": opportunity_components,
-        "opportunity_reason": None if supported_values else "Not enough evidence to estimate reliably.",
+        "opportunity_reason": None if supported_values else "No evidence-supported recovery or avoidance amount was calculated.",
         "formulas": {
             "expected_denial_exposure": "denial_probability × predicted_paid",
-            "potential_revenue_at_risk": "predicted_adjustment + expected_denial_exposure",
-            "provider_opportunity_amount": "supported recoverable denial value + potentially avoidable repeat spend + preventable adjustment exposure",
+            "expected_repeat_provider_payment_exposure": "repeat_probability_90d × predicted_paid",
+            "expected_contractual_adjustment": "predicted adjustment shown separately; it is not assumed recoverable",
         },
     }
 
@@ -1073,10 +1161,17 @@ def _rank_provider_actions(scenario, actual, forecast, financial_metrics, reconc
     return actions
 
 
-def _provider_scenario_map(scenario, actual, forecast, financial_metrics, reconciliation, actions):
+def _provider_scenario_map(scenario, actual, forecast, financial_metrics, reconciliation, savings):
     longitudinal = scenario.get("longitudinalBasis", {})
     avoidable_basis = scenario.get("avoidableSpendBasis", {})
     peer_stats = scenario.get("forecast", {}).get("peerStatistics", {})
+    selected = scenario.get("selectedClaim") or scenario.get("anchor") or {}
+    enrichment = selected.get("syntheticEnrichment") or {}
+    best_action = savings.get("best_action", {})
+    synthetic_demo = savings.get("synthetic_demo_opportunity", {})
+    validated_real = savings.get("validated_real_savings", {})
+    future = savings.get("future_exposure", {})
+    avoidable = savings.get("avoidable_spend", {})
     lower_adjustment = None
     if peer_stats.get("lowerQuartileAdjustmentRate") is not None:
         lower_adjustment = round(forecast["charge_basis"] * peer_stats["lowerQuartileAdjustmentRate"], 2)
@@ -1085,36 +1180,94 @@ def _provider_scenario_map(scenario, actual, forecast, financial_metrics, reconc
         and scenario.get("peerMatchLevel", 8) <= 5
         and lower_adjustment is not None
     )
-    return {
+    cutoff = _parse_date(actual.get("service_date"))
+    earlier_claims = [
+        claim for claim in scenario.get("claims", [])
+        if _parse_date(claim.get("dos")) and (cutoff is None or _parse_date(claim.get("dos")) < cutoff)
+    ]
+    claim_timeline = [
+        {"claim_id": claim.get("claimId"), "service_date": claim.get("dos"), "status": claim.get("status"), "cpt": claim.get("cptCode"), "paid": claim.get("paid")}
+        for claim in sorted(earlier_claims, key=_claim_order)[-8:]
+    ]
+    opportunity_types = {item.get("type") for item in synthetic_demo.get("breakdown", [])}
+    cost_leakage_risks = []
+    def add_risk(code, title, evidence, data_source):
+        cost_leakage_risks.append({"code": code, "title": title, "evidence": evidence, "data_source": data_source})
+    if (forecast.get("denial_risk", {}).get("probability") or 0) > 0:
+        add_risk("denial", "Denial risk", f"Predicted probability {forecast['denial_risk'].get('percentage', 0):.1f}%", "prediction")
+    if "underpayment" in opportunity_types:
+        add_risk("underpayment", "Possible underpayment", "Synthetic contract comparison met the configured tolerance.", "synthetic")
+    if "adjustment" in opportunity_types:
+        add_risk("adjustment", "Excessive adjustment", "Synthetic contract adjustment comparison met the configured tolerance.", "synthetic")
+    if "patient_balance" in opportunity_types:
+        add_risk("patient_balance", "Outstanding patient balance", "Synthetic balance, aging and collection fields are actionable for demonstration.", "synthetic")
+    if "authorization" in opportunity_types:
+        add_risk("authorization", "Authorization issue", "Synthetic authorization requirement and status are actionable.", "synthetic")
+    if "referral" in opportunity_types:
+        add_risk("referral", "Referral issue", "Synthetic referral requirement and status are actionable.", "synthetic")
+    if "duplicate_or_correction" in opportunity_types:
+        add_risk("duplicate", "Duplicate or corrected claim", "Synthetic duplicate or claim-correction evidence is present.", "synthetic")
+    if (forecast.get("repeat_service_risk", {}).get("probability_90d") or 0) >= REPEAT_MEDIUM_THRESHOLD:
+        add_risk("repeat", "Repeat-service risk", f"90-day probability {forecast['repeat_service_risk'].get('probability_90d', 0) * 100:.1f}%", "prediction")
+    if reconciliation.get("warnings"):
+        add_risk("reconciliation", "Payment reconciliation issue", reconciliation["warnings"][0], "prediction")
+    if scenario.get("peerMatchLevel", 0) >= 4:
+        add_risk("fallback", "Broad peer fallback", f"Fallback level {scenario.get('peerMatchLevel')}", "prediction")
+
+    stage_by_category = {
+        "denial": "Follow-up", "underpayment": "Financial opportunity", "adjustment": "Financial opportunity",
+        "patient_balance": "Financial opportunity", "authorization": "Validation", "referral": "Validation",
+        "duplicate_or_correction": "Coding", "provider_follow_up": "Follow-up", "routine_monitoring": "Validation",
+    }
+    selected_stage = stage_by_category.get(best_action.get("action_category"), "Validation")
+    workflow = [
+        {"stage": stage, "selected": stage == selected_stage}
+        for stage in ("Encounter", "Coding", "Validation", "Claim submission", "Adjudication", "Payment", "Follow-up", "Financial opportunity")
+    ]
+
+    scenario_map = {
         "member_claim_history": {
             "previous_related_claim_ids": longitudinal.get("priorRelatedClaimIds", []),
-            "visit_count": longitudinal.get("priorRelatedClaimCount", 0),
-            "repeated_cpt_count": longitudinal.get("priorSameCptCount", 0),
+            "earlier_related_claim_count": longitudinal.get("priorRelatedClaimCount", 0),
+            "earlier_same_cpt_claim_count": longitudinal.get("priorSameCptCount", 0),
             "previous_denial_count": longitudinal.get("priorDeniedCount", 0),
-            "previous_payment_trend": longitudinal.get("priorPaymentTrend", "insufficient history"),
+            "payment_trend": longitudinal.get("priorPaymentTrend", "insufficient history"),
+            "recurrence_evidence": forecast.get("repeat_service_risk", {}).get("basis", {}),
+            "claim_timeline": claim_timeline,
         },
         "encounter_and_coding": {
-            "diagnosis_family": actual.get("diagnosis_family"), "cpt_code": actual.get("cpt_code"), "units": actual.get("units"),
-            "place_of_service": actual.get("place_of_service_description"), "prior_authorization": actual.get("has_prior_auth"), "referral": actual.get("has_referral"),
+            "service_date": actual.get("service_date"), "diagnosis": actual.get("diagnosis_code"), "diagnosis_family": actual.get("diagnosis_family"),
+            "cpt_code": actual.get("cpt_code"), "cpt_description": actual.get("cpt_description"), "units": actual.get("units"),
+            "place_of_service": f"{actual.get('place_of_service_code') or ''} — {actual.get('place_of_service_description') or ''}".strip(" —"),
+            "payer": actual.get("payer"), "billing_provider": actual.get("billing_provider"),
+            "authorization_status": enrichment.get("Prior_Auth_Status") or ("Identifier present" if actual.get("has_prior_auth") else "Requirement unknown"),
+            "referral_status": enrichment.get("Referral_Status") or ("Identifier present" if actual.get("has_referral") else "Requirement unknown"),
+            "data_source": "Claims_Original; authorization/referral status may use labelled Dummy_Enrichment",
         },
         "provider_claim_payment_prediction": {
-            "charge": forecast["charge_basis"], "predicted_allowed": forecast["predicted_allowed"].get("value"), "predicted_paid": forecast["predicted_paid"].get("value"),
+            "charge": forecast["charge_basis"], "predicted_allowed": forecast["predicted_allowed"], "predicted_paid": forecast["predicted_paid"],
             "predicted_patient_responsibility": forecast["predicted_patient_responsibility"].get("value"), "predicted_adjustment": forecast["predicted_adjustment"].get("value"),
-            "denial_exposure": financial_metrics.get("expected_denial_exposure"), "provider_revenue_at_risk": financial_metrics.get("potential_revenue_at_risk"),
+            "denial_probability": forecast["denial_risk"].get("probability"),
+            "repeat_probability_30d": forecast["repeat_service_risk"].get("probability_30d"),
+            "repeat_probability_60d": forecast["repeat_service_risk"].get("probability_60d"),
+            "repeat_probability_90d": forecast["repeat_service_risk"].get("probability_90d"),
+            "expected_provider_payment": financial_metrics.get("provider_expected_reimbursement"),
+            "expected_contractual_adjustment": financial_metrics.get("expected_contractual_adjustment"),
+            "expected_denial_revenue_exposure": financial_metrics.get("expected_denial_exposure"),
         },
-        "where_provider_money_may_be_saved": [action["title"] for action in actions],
-        "cost_leakage_risks": [
-            item for item, supported in (
-                ("avoidance opportunity unavailable", not financial_metrics.get("opportunity_available")),
-                ("related-service recurrence", forecast["repeat_service_risk"].get("probability_90d", 0) >= .34),
-                ("excessive adjustment exposure", (financial_metrics.get("opportunity_components", {}).get("preventable_adjustment_exposure") or 0) > 0),
-                ("unreconciled payment components", bool(reconciliation.get("warnings"))),
-                ("broad peer fallback", scenario.get("peerMatchLevel", 0) >= 4),
-            ) if supported
-        ],
-        "provider_money_comparison": {
+        "where_provider_money_may_be_saved": {
+            "validated_real_opportunity": {**validated_real, "amount_type": "validated_real_savings", "confidence": forecast.get("confidence", {}).get("score")},
+            "synthetic_demonstration_opportunity": {**synthetic_demo, "amount_type": "synthetic_demo_opportunity", "confidence": forecast.get("confidence", {}).get("score")},
+            "future_financial_exposure": {**future, "amount_type": "forecast_exposure", "data_source": "prediction"},
+            "potentially_avoidable_spend": {**avoidable, "amount_type": "potentially_avoidable_spend", "data_source": "prediction and historical episodes"},
+            "best_next_provider_action": best_action,
+        },
+        "cost_leakage_risks": cost_leakage_risks,
+        "claim_workflow": workflow,
+    }
+    if comparison_supported:
+        scenario_map["provider_money_comparison"] = {
             "available": comparison_supported,
-            "reason": None if comparison_supported else "Not enough evidence to estimate reliably.",
             "current_predicted_pathway": {
                 "expected_provider_payment": forecast["predicted_paid"].get("value"),
                 "expected_adjustment": forecast["predicted_adjustment"].get("value"),
@@ -1126,10 +1279,10 @@ def _provider_scenario_map(scenario, actual, forecast, financial_metrics, reconc
                 "expected_adjustment": lower_adjustment,
                 "expected_denial_exposure": round((scenario.get("denialRisk", {}).get("basis", {}).get("peer_rate") or 0) * (forecast["predicted_allowed"].get("value") or 0), 2),
                 "expected_repeat_service_spend": avoidable_basis.get("comparable_peer_repeat_expenditure"),
-            } if comparison_supported else None,
-            "estimated_provider_opportunity_amount": financial_metrics.get("provider_opportunity_amount"),
-        },
-    }
+            },
+            "opportunity_difference": savings.get("avoidable_spend", {}).get("amount"),
+        }
+    return scenario_map
 
 
 def _build_savings_opportunity(scenario, actual, forecast, financial_metrics, reconciliation, _scenario_map):
@@ -1148,75 +1301,235 @@ def _build_savings_opportunity(scenario, actual, forecast, financial_metrics, re
     actual_charge = actual.get("charge_amount") or 0
     actual_paid = actual.get("paid_amount") or 0
     actual_adjustment = actual.get("adjustment_amount") or 0
-    expected_peer_paid = round(actual_allowed * recovery["median_paid_to_allowed_rate"], 2) if match_supported and recovery.get("median_paid_to_allowed_rate") is not None else None
-    potential_underpayment = round(max(expected_peer_paid - actual_paid, 0), 2) if expected_peer_paid is not None else None
-    expected_peer_adjustment = round(actual_charge * recovery["median_adjustment_rate"], 2) if match_supported and recovery.get("median_adjustment_rate") is not None else None
-    excessive_adjustment = round(max(actual_adjustment - expected_peer_adjustment, 0), 2) if expected_peer_adjustment is not None else None
-
-    status = str(actual.get("claim_status") or "").lower()
-    denied = status in {"denied", "rejected"}
-    correctable_denial_value = None
-    correctable_reason = (
-        "A denial is recorded, but the CSV has no correction outcome or supported recoverable amount."
-        if denied else "The selected claim is not denied or rejected."
-    )
-    patient_balance_available = False
-    patient_balance_reason = "The CSV contains patient responsibility but no unresolved, delinquent or collections status."
-
-    candidates = [
-        ("denial", correctable_denial_value),
-        ("underpayment", potential_underpayment if match_supported else None),
-        ("adjustment", excessive_adjustment if match_supported else None),
-    ]
-    validated = [(kind, amount) for kind, amount in candidates if amount is not None and amount > minimum_amount]
-    if validated:
-        opportunity_type, opportunity_amount = max(validated, key=lambda item: item[1])
-        opportunity_status = "validated"
-    else:
-        opportunity_type, opportunity_amount = "none", None
-        opportunity_status = "none_identified" if match_supported or denied else "insufficient"
-    current_limitations = []
-    if not match_supported:
-        current_limitations.append("No recovery peer group met the configured sample size and matching-level requirements.")
-    if not patient_balance_available:
-        current_limitations.append(patient_balance_reason)
-    if denied and correctable_denial_value is None:
-        current_limitations.append(correctable_reason)
+    actual_patient = actual.get("patient_responsibility") or 0
 
     actual_rates = {
-        "actual_allowed_rate": round(actual_allowed / actual_charge, 4) if actual_charge else None,
-        "actual_paid_to_allowed_rate": round(actual_paid / actual_allowed, 4) if actual_allowed else None,
-        "actual_adjustment_rate": round(actual_adjustment / actual_charge, 4) if actual_charge else None,
-        "actual_patient_share_rate": round((actual.get("patient_responsibility") or 0) / actual_allowed, 4) if actual_allowed else None,
+        "allowed": round(actual_allowed / actual_charge, 4) if actual_charge else None,
+        "paid_to_allowed": round(actual_paid / actual_allowed, 4) if actual_allowed else None,
+        "adjustment": round(actual_adjustment / actual_charge, 4) if actual_charge else None,
+        "patient_share": round(actual_patient / actual_allowed, 4) if actual_allowed else None,
     }
-    historical_comparison = {
-        **actual_rates,
-        "peer_allowed_rate": recovery.get("median_allowed_rate"),
-        "peer_paid_to_allowed_rate": recovery.get("median_paid_to_allowed_rate"),
-        "peer_adjustment_rate": recovery.get("median_adjustment_rate"),
-        "peer_patient_share_rate": recovery.get("median_patient_share_rate"),
+    peer_rates = {
+        "allowed": recovery.get("median_allowed_rate") if match_supported else None,
+        "paid_to_allowed": recovery.get("median_paid_to_allowed_rate") if match_supported else None,
+        "adjustment": recovery.get("median_adjustment_rate") if match_supported else None,
+        "patient_share": recovery.get("median_patient_share_rate") if match_supported else None,
+    }
+    expected_amounts = {
+        "allowed": round(actual_charge * peer_rates["allowed"], 2) if peer_rates["allowed"] is not None else None,
+        "paid_to_allowed": round(actual_allowed * peer_rates["paid_to_allowed"], 2) if peer_rates["paid_to_allowed"] is not None else None,
+        "adjustment": round(actual_charge * peer_rates["adjustment"], 2) if peer_rates["adjustment"] is not None else None,
+        "patient_share": round(actual_allowed * peer_rates["patient_share"], 2) if peer_rates["patient_share"] is not None else None,
+    }
+    actual_amounts = {
+        "allowed": actual_allowed,
+        "paid_to_allowed": actual_paid,
+        "adjustment": actual_adjustment,
+        "patient_share": actual_patient,
+    }
+
+    performance_metrics = {}
+    for key, label, higher_is_favourable in (
+        ("allowed", "Allowed", True),
+        ("paid_to_allowed", "Provider payment", True),
+        ("adjustment", "Adjustment", False),
+        ("patient_share", "Patient responsibility", False),
+    ):
+        actual_rate = actual_rates[key]
+        historical_rate = peer_rates[key]
+        expected_amount = expected_amounts[key]
+        actual_amount = actual_amounts[key]
+        raw_dollar_difference = round(actual_amount - expected_amount, 2) if expected_amount is not None else None
+        related_dollar_variance = (
+            raw_dollar_difference if higher_is_favourable else round(-raw_dollar_difference, 2)
+        ) if raw_dollar_difference is not None else None
+        if related_dollar_variance is None:
+            indicator = "unavailable"
+        elif related_dollar_variance > .01:
+            indicator = "favourable"
+        elif related_dollar_variance < -.01:
+            indicator = "unfavourable"
+        else:
+            indicator = "aligned"
+        performance_metrics[key] = {
+            "label": label,
+            "actual_rate": actual_rate,
+            "historical_median_rate": historical_rate,
+            "rate_variance_percentage_points": round((actual_rate - historical_rate) * 100, 2) if actual_rate is not None and historical_rate is not None else None,
+            "actual_amount": round(actual_amount, 2),
+            "historical_expected_amount": expected_amount,
+            "related_dollar_variance": related_dollar_variance,
+            "variance_status": indicator,
+            "variance_label": f"{indicator} variance versus history" if indicator in {"favourable", "unfavourable"} else "aligned with history" if indicator == "aligned" else "historical comparison unavailable",
+            "higher_is_favourable": higher_is_favourable,
+        }
+
+    available_metrics = [item for item in performance_metrics.values() if item["variance_status"] != "unavailable"]
+    favourable_count = sum(item["variance_status"] == "favourable" for item in available_metrics)
+    unfavourable_count = sum(item["variance_status"] == "unfavourable" for item in available_metrics)
+    aligned_count = sum(item["variance_status"] == "aligned" for item in available_metrics)
+    if not match_supported:
+        performance_conclusion = "No historical group met the configured matching and sample-size requirements for this claim."
+    else:
+        performance_conclusion = (
+            f"Compared with {recovery.get('sample_size', 0)} matched earlier claim(s), "
+            f"{favourable_count} metric(s) were favourable, {unfavourable_count} were unfavourable and {aligned_count} were aligned."
+        )
+    current_performance = {
+        "available": match_supported,
+        "adjudicated": bool(actual.get("adjudicated")),
+        "metrics": performance_metrics,
+        "matched_claim_count": recovery.get("sample_size", 0),
         "peer_count": recovery.get("sample_size", 0),
         "match_level": recovery.get("match_level", "insufficient evidence"),
         "matching_dimensions": recovery.get("matching_dimensions", []),
         "prediction_cutoff_date": recovery.get("prediction_cutoff_date"),
-        "affected_claim_ids": recovery.get("claim_ids", [])[:20],
+        "matched_claim_ids": recovery.get("claim_ids", []),
+        "affected_claim_ids": recovery.get("claim_ids", []),
+        "conclusion": performance_conclusion,
+        "actual_allowed_rate": actual_rates["allowed"],
+        "peer_allowed_rate": peer_rates["allowed"],
+        "actual_paid_to_allowed_rate": actual_rates["paid_to_allowed"],
+        "peer_paid_to_allowed_rate": peer_rates["paid_to_allowed"],
+        "actual_adjustment_rate": actual_rates["adjustment"],
+        "peer_adjustment_rate": peer_rates["adjustment"],
+        "actual_patient_share_rate": actual_rates["patient_share"],
+        "peer_patient_share_rate": peer_rates["patient_share"],
         "indicators": {
-            "allowed_rate": "favourable" if actual_rates["actual_allowed_rate"] is not None and recovery.get("median_allowed_rate") is not None and actual_rates["actual_allowed_rate"] >= recovery["median_allowed_rate"] else "unfavourable",
-            "paid_to_allowed_rate": "favourable" if actual_rates["actual_paid_to_allowed_rate"] is not None and recovery.get("median_paid_to_allowed_rate") is not None and actual_rates["actual_paid_to_allowed_rate"] >= recovery["median_paid_to_allowed_rate"] else "unfavourable",
-            "adjustment_rate": "favourable" if actual_rates["actual_adjustment_rate"] is not None and recovery.get("median_adjustment_rate") is not None and actual_rates["actual_adjustment_rate"] <= recovery["median_adjustment_rate"] else "unfavourable",
-            "patient_share_rate": "favourable" if actual_rates["actual_patient_share_rate"] is not None and recovery.get("median_patient_share_rate") is not None and actual_rates["actual_patient_share_rate"] <= recovery["median_patient_share_rate"] else "unfavourable",
-        } if match_supported else {},
+            "allowed_rate": performance_metrics["allowed"]["variance_status"],
+            "paid_to_allowed_rate": performance_metrics["paid_to_allowed"]["variance_status"],
+            "adjustment_rate": performance_metrics["adjustment"]["variance_status"],
+            "patient_share_rate": performance_metrics["patient_share"]["variance_status"],
+        },
     }
-    favourable_count = sum(value == "favourable" for value in historical_comparison["indicators"].values())
-    historical_comparison["conclusion"] = (
-        "The selected claim performed favourably on all matched financial rates; no underpayment or excessive-adjustment recovery is supported."
-        if match_supported and favourable_count == 4 and not validated else
-        "One or more selected-claim rates are less favourable than the matched history; only the validated amount above should be treated as an opportunity."
-        if match_supported and favourable_count < 4 else
-        "A reliable current-claim historical comparison is unavailable."
+
+    source_claim = scenario.get("selectedClaim") or scenario.get("anchor") or {}
+    enrichment = source_claim.get("syntheticEnrichment") or {}
+    synthetic_active = str(enrichment.get("Dummy_Data_Flag") or "").strip().lower() in {"yes", "true", "1"}
+    synthetic_fields_used = set()
+
+    def synthetic(field, default=None):
+        value = enrichment.get(field, default)
+        if field in enrichment and str(value or "").strip() and str(value).strip().lower() not in {"n/a", "not applicable"}:
+            synthetic_fields_used.add(field)
+        return value
+
+    def normalized(value):
+        return str(value or "").strip().lower()
+
+    def is_yes(value):
+        return normalized(value) in {"yes", "true", "1", "y"}
+
+    status = normalized(actual.get("claim_status"))
+    denied = "denied" in status or "rejected" in status
+    tolerance = _amount(synthetic("Payment_Tolerance")) if synthetic_active else 0
+    recovered_amount = _amount(synthetic("Recovered_Amount")) if synthetic_active else 0
+    contract_allowed = _amount(synthetic("Contract_Allowed_Amount")) if synthetic_active else 0
+    stated_expected_reimbursement = _amount(synthetic("Expected_Reimbursement")) if synthetic_active else 0
+    expected_peer_paid = expected_amounts["paid_to_allowed"]
+    expected_peer_adjustment = expected_amounts["adjustment"]
+    historical_underpayment = round(max(expected_peer_paid - actual_paid, 0), 2) if expected_peer_paid is not None else None
+    historical_excessive_adjustment = round(max(actual_adjustment - expected_peer_adjustment, 0), 2) if expected_peer_adjustment is not None else None
+
+    opportunities = []
+    if synthetic_active and match_supported and not denied and (stated_expected_reimbursement > 0 or contract_allowed > 0):
+        contract_expected_payment = stated_expected_reimbursement or round(contract_allowed * (peer_rates["paid_to_allowed"] or 0), 2)
+        underpayment = round(max(contract_expected_payment - actual_paid - recovered_amount, 0), 2)
+        if underpayment > max(tolerance, minimum_amount):
+            opportunities.append({
+                "type": "underpayment", "stage": "Payment underpayment review", "amount": underpayment,
+                "owner": "billing", "confidence": forecast.get("confidence", {}).get("score"),
+                "reason": "Actual provider payment is below the synthetic contract expectation by more than the payment tolerance.",
+                "calculation": "max(0, expected reimbursement − actual paid − recovered amount)",
+                "synthetic_fields_used": ["Expected_Reimbursement", "Contract_Allowed_Amount", "Payment_Tolerance", "Recovered_Amount"],
+            })
+    else:
+        contract_expected_payment = stated_expected_reimbursement or None
+        underpayment = None
+
+    expected_contract_adjustment = round(max(actual_charge - contract_allowed, 0), 2) if synthetic_active and contract_allowed > 0 else None
+    excessive_adjustment = round(max(actual_adjustment - expected_contract_adjustment, 0), 2) if expected_contract_adjustment is not None else None
+    if excessive_adjustment is not None and excessive_adjustment > max(tolerance, minimum_amount):
+        opportunities.append({
+            "type": "adjustment", "stage": "Excessive adjustment review", "amount": excessive_adjustment,
+            "owner": "billing", "confidence": forecast.get("confidence", {}).get("score"),
+            "reason": "Actual adjustment exceeds the synthetic contract-derived adjustment by more than the payment tolerance.",
+            "calculation": "max(0, actual adjustment − (actual charge − contract allowed))",
+            "synthetic_fields_used": ["Contract_Allowed_Amount", "Payment_Tolerance"],
+        })
+
+    denial_correctable = is_yes(synthetic("Denial_Correctable_Flag")) if synthetic_active else False
+    appeal_status = normalized(synthetic("Appeal_Status"))
+    resubmission_status = normalized(synthetic("Resubmission_Status"))
+    denial_actionable = appeal_status in {"not appealed", "appeal submitted", "pending", "open"} or resubmission_status in {"pending review", "corrected and resubmitted"}
+    denial_basis_amount = stated_expected_reimbursement or contract_expected_payment or 0
+    correctable_denial_value = round(max(denial_basis_amount - recovered_amount, 0), 2) if denied and denial_correctable and denial_actionable and denial_basis_amount else None
+    if correctable_denial_value is not None and correctable_denial_value > max(tolerance, minimum_amount):
+        opportunities.append({
+            "type": "denial", "stage": "Denial correction", "amount": correctable_denial_value,
+            "owner": "denial management", "confidence": forecast.get("confidence", {}).get("score"),
+            "reason": "The claim is denied or rejected, the synthetic correctable flag is active and appeal or resubmission status is actionable.",
+            "calculation": "max(0, expected reimbursement − already recovered amount)",
+            "recovered_amount": recovered_amount,
+            "synthetic_fields_used": ["Denial_Correctable_Flag", "Appeal_Status", "Resubmission_Status", "Recovered_Amount", "Expected_Reimbursement"],
+        })
+
+    outstanding_balance = _amount(synthetic("Outstanding_Patient_Balance")) if synthetic_active else 0
+    balance_status = normalized(synthetic("Balance_Status"))
+    collection_status = normalized(synthetic("Collection_Status"))
+    aging_bucket = normalized(synthetic("Aging_Bucket"))
+    patient_balance_available = outstanding_balance > 0 and balance_status == "outstanding" and (collection_status in {"in collection", "in collections", "collections"} or aging_bucket in {"61-90", "91+"})
+    patient_balance_reason = (
+        "Synthetic demonstration data shows an actionable outstanding patient balance."
+        if patient_balance_available
+        else "No actionable outstanding, aged or collection-stage patient balance is supported for this claim."
     )
+    if patient_balance_available:
+        opportunities.append({
+            "type": "patient_balance", "stage": "DEMO PATIENT-BALANCE OPPORTUNITY", "amount": outstanding_balance,
+            "owner": "patient financial services", "confidence": forecast.get("confidence", {}).get("score"),
+            "reason": "Synthetic demonstration data marks a balance as outstanding and aged or in collections; this is not verified patient-accounting data.",
+            "calculation": "outstanding patient balance",
+            "data_source": "Dummy_Enrichment",
+            "synthetic_outstanding_balance": outstanding_balance,
+            "synthetic_aging_bucket": synthetic("Aging_Bucket"),
+            "synthetic_collection_status": synthetic("Collection_Status"),
+            "warning": "Synthetic demonstration data. This opportunity is for UI and workflow testing only and is not a verified billing recommendation.",
+            "synthetic_fields_used": ["Outstanding_Patient_Balance", "Balance_Status", "Collection_Status", "Aging_Bucket"],
+        })
+
+    prior_auth_required = is_yes(synthetic("Prior_Auth_Required")) if synthetic_active else False
+    prior_auth_status = normalized(synthetic("Prior_Auth_Status"))
+    auth_actionable = prior_auth_required and prior_auth_status in {"missing", "expired", "denied", "insufficient units"}
+    referral_required = is_yes(synthetic("Referral_Required")) if synthetic_active else False
+    referral_status = normalized(synthetic("Referral_Status"))
+    referral_actionable = referral_required and referral_status in {"missing", "invalid", "expired"}
+    duplicate_actionable = is_yes(synthetic("Duplicate_Claim_Flag")) or normalized(synthetic("Claim_Frequency_Code")) not in {"", "1", "original"} or is_yes(synthetic("Corrected_Claim_Indicator"))
+    if auth_actionable:
+        opportunities.append({"type": "authorization", "stage": "Authorization verification", "amount": None, "owner": "authorization team", "confidence": forecast.get("confidence", {}).get("score"), "reason": f"Synthetic demonstration data marks authorization as required and its status as {synthetic('Prior_Auth_Status')}.", "synthetic_fields_used": ["Prior_Auth_Required", "Prior_Auth_Status"]})
+    if referral_actionable:
+        opportunities.append({"type": "referral", "stage": "Referral verification", "amount": None, "owner": "authorization team", "confidence": forecast.get("confidence", {}).get("score"), "reason": f"Synthetic demonstration data marks a referral as required and its status as {synthetic('Referral_Status')}.", "synthetic_fields_used": ["Referral_Required", "Referral_Status"]})
+    if duplicate_actionable:
+        opportunities.append({"type": "duplicate_or_correction", "stage": "Duplicate-service review", "amount": None, "owner": "coding", "confidence": forecast.get("confidence", {}).get("score"), "reason": "Synthetic duplicate, correction or claim-frequency evidence supports claim validation.", "synthetic_fields_used": ["Duplicate_Claim_Flag", "Claim_Frequency_Code", "Corrected_Claim_Indicator"]})
+
+    for opportunity in opportunities:
+        opportunity.setdefault("data_source", "Dummy_Enrichment")
+        opportunity.setdefault("amount_type", "synthetic_demo_opportunity" if opportunity.get("amount") is not None else "no_amount")
+        opportunity.setdefault("evidence", [actual.get("claim_id")])
+
+    monetary_opportunities = [item for item in opportunities if item.get("amount") is not None and item["amount"] > 0]
+    total_demo_opportunity = None
+    opportunity_status = "identified" if opportunities else "none_identified" if synthetic_active else "insufficient"
+    current_limitations = []
+    if not synthetic_active:
+        current_limitations.append("No matching synthetic enrichment row was available for this claim and member.")
+    if not match_supported:
+        current_limitations.append("No historical group met the configured matching and sample-size requirements.")
 
     future_exposure = {
+        "denial_revenue_exposure": round(denial_probability * predicted_paid, 2),
+        "repeat_allowed_exposure": round(repeat_probability * predicted_allowed, 2),
+        "repeat_provider_payment_exposure": round(repeat_probability * predicted_paid, 2),
         "expected_denial_revenue_exposure": round(denial_probability * predicted_paid, 2),
         "expected_repeat_allowed_exposure": round(repeat_probability * predicted_allowed, 2),
         "expected_repeat_provider_payment_exposure": round(repeat_probability * predicted_paid, 2),
@@ -1233,70 +1546,160 @@ def _build_savings_opportunity(scenario, actual, forecast, financial_metrics, re
         "related_claim_count": avoidable_basis.get("related_claim_count", 0),
         "repeated_related_service_count": avoidable_basis.get("repeated_related_service_count", 0),
         "prediction_cutoff_date": avoidable_basis.get("prediction_cutoff_date"),
+        "synthetic_demo": bool(avoidable_basis.get("synthetic_demo")),
+        "display_label": "Synthetic demonstration estimate" if avoidable_basis.get("available") and avoidable_basis.get("synthetic_demo") else None,
     }
 
-    follow_up = repeat_probability >= REPEAT_MEDIUM_THRESHOLD
-    if correctable_denial_value is not None and correctable_denial_value > minimum_amount:
-        best_action = {"stage": "Denial correction", "action": "Review and correct the supported denial issue.", "owner": "Denials team", "amount_addressed": correctable_denial_value, "amount_type": "validated_opportunity", "reason": correctable_reason}
-    elif potential_underpayment is not None and potential_underpayment > minimum_amount:
-        best_action = {"stage": "Payment underpayment review", "action": "Review the adjudicated payment against the matched historical paid-to-allowed rate.", "owner": "Payment variance team", "amount_addressed": potential_underpayment, "amount_type": "validated_opportunity", "reason": "Actual paid is below the amount implied by the matched historical paid-to-allowed rate."}
-    elif excessive_adjustment is not None and excessive_adjustment > minimum_amount:
-        best_action = {"stage": "Excessive adjustment review", "action": "Review the adjudicated adjustment against the matched historical adjustment rate.", "owner": "Revenue integrity", "amount_addressed": excessive_adjustment, "amount_type": "validated_opportunity", "reason": "Actual adjustment exceeds the amount implied by the matched historical adjustment rate."}
-    elif patient_balance_available:
-        best_action = {"stage": "Patient-balance management", "action": "Review the confirmed unresolved patient balance.", "owner": "Patient financial services", "amount_addressed": actual.get("patient_responsibility"), "amount_type": "validated_opportunity", "reason": "The source data confirms an actionable unresolved patient balance."}
-    elif follow_up:
-        best_action = {"stage": "Provider follow-up monitoring", "action": "Monitor the next related-service window using the provider follow-up workflow.", "owner": "Provider operations", "amount_addressed": future_exposure["expected_repeat_provider_payment_exposure"], "amount_type": "forecast_exposure", "reason": "The shared 90-day repeat probability meets the configured follow-up threshold."}
+    source_columns = {"".join(character for character in str(name).lower() if character.isalnum()) for name in source_claim.get("sourceCsvColumns", [])}
+    def has_original_column(*names):
+        return any("".join(character for character in str(name).lower() if character.isalnum()) in source_columns for name in names)
+    def has_synthetic_value(*names):
+        return any(str(enrichment.get(name) or "").strip() and normalized(enrichment.get(name)) not in {"n/a", "not applicable"} for name in names)
+    def availability(key, label, status_value, detail, fields=None):
+        for field in fields or []:
+            if has_synthetic_value(field):
+                synthetic_fields_used.add(field)
+        return {"key": key, "label": label, "status": status_value, "detail": detail}
+
+    related_count = avoidable_spend["related_claim_count"]
+    repeated_count = avoidable_spend["repeated_related_service_count"]
+    comparison_count = avoidable_spend["comparison_episode_count"]
+    minimum_peers = recovery.get("minimum_sample_size", DEFAULT_MIN_PEERS)
+    synthetic_status = "Available from synthetic enrichment"
+    data_availability = [
+        availability("contract", "Contract and fee schedule", synthetic_status if has_synthetic_value("Contract_Allowed_Amount", "Expected_Reimbursement") else "Missing", "Synthetic contract expectation is available for demonstration." if has_synthetic_value("Contract_Allowed_Amount", "Expected_Reimbursement") else "No contract or fee-schedule amount is available.", ["Contract_Allowed_Amount", "Expected_Reimbursement", "Payment_Tolerance"]),
+        availability("remittance", "CARC/RARC and remittance details", synthetic_status if denied and has_synthetic_value("CARC_Code", "RARC_Code") else "Not applicable" if not denied else "Missing", "The selected claim is not denied." if not denied else "Synthetic remittance reason codes are available." if has_synthetic_value("CARC_Code", "RARC_Code") else "No remittance reason code is available.", ["CARC_Code", "RARC_Code"]),
+        availability("appeal", "Appeal and recovery status", synthetic_status if denied and has_synthetic_value("Appeal_Status", "Denial_Resolution_Status") else "Not applicable" if not denied else "Missing", "The selected claim is not denied or rejected." if not denied else "Synthetic appeal and recovery status is available." if has_synthetic_value("Appeal_Status", "Denial_Resolution_Status") else "No appeal or recovery status is available.", ["Appeal_Status", "Resubmission_Status", "Denial_Resolution_Status", "Recovered_Amount"]),
+        availability("patient_balance", "Patient balance and collections", synthetic_status if has_synthetic_value("Outstanding_Patient_Balance", "Balance_Status") else "Missing", "Synthetic balance, aging and collection fields are available." if has_synthetic_value("Outstanding_Patient_Balance", "Balance_Status") else "No actionable balance status is available.", ["Outstanding_Patient_Balance", "Balance_Status", "Aging_Bucket", "Collection_Status"]),
+        availability("authorization", "Authorization requirement", synthetic_status if has_synthetic_value("Prior_Auth_Required") else "Missing", "Synthetic authorization requirement and status are available." if has_synthetic_value("Prior_Auth_Required") else "No authorization requirement is available.", ["Prior_Auth_Required", "Prior_Auth_Status"]),
+        availability("referral", "Referral requirement", synthetic_status if has_synthetic_value("Referral_Required") else "Missing", "Synthetic referral requirement and status are available." if has_synthetic_value("Referral_Required") else "No referral requirement is available.", ["Referral_Required", "Referral_Status"]),
+        availability("duplicate", "Duplicate and correction information", synthetic_status if has_synthetic_value("Duplicate_Claim_Flag", "Claim_Frequency_Code", "Corrected_Claim_Indicator") else "Missing", "Synthetic duplicate and correction indicators are available." if has_synthetic_value("Duplicate_Claim_Flag", "Claim_Frequency_Code", "Corrected_Claim_Indicator") else "No duplicate or correction indicator is available.", ["Duplicate_Claim_Flag", "Claim_Frequency_Code", "Corrected_Claim_Indicator"]),
+        availability("episode", "Episode and outcome information", synthetic_status if has_synthetic_value("Episode_ID", "Treatment_Outcome") else "Missing", "Synthetic episode and outcome fields are available." if has_synthetic_value("Episode_ID", "Treatment_Outcome") else "No episode outcome information is available.", ["Episode_ID", "Related_Claim_Flag", "Condition_Resolved", "Treatment_Outcome", "Follow_Up_Completed", "Repeat_Visit_Reason"]),
+        availability("patient_cost", "Patient cost components", "Available from original claims" if has_original_column("Patient_Responsibility") else "Missing", "Patient responsibility is read from the original claim and is not replaced by enrichment."),
+        availability("lower_repeat", "Comparable lower-repeat episodes", synthetic_status if comparison_count >= minimum_peers else "Insufficient matched history", f"{comparison_count} comparable lower-repeat episode(s) found; minimum required is {minimum_peers}."),
+    ]
+    # Backward-compatible audit keys remain non-display metadata for existing API consumers.
+    data_availability.extend([
+        {"key": "denial_correction_status", "label": "Denial correction status", "status": "Not applicable to this claim" if not denied else synthetic_status if has_synthetic_value("Appeal_Status", "Resubmission_Status") else "Missing from dataset", "detail": "Compatibility audit field.", "display": False},
+        {"key": "denial_recoverability_status", "label": "Denial recoverability status", "status": "Not applicable to this claim" if not denied else synthetic_status if has_synthetic_value("Denial_Correctable_Flag") else "Missing from dataset", "detail": "Compatibility audit field.", "display": False},
+        {"key": "collection_status", "label": "Patient collection status", "status": synthetic_status if has_synthetic_value("Collection_Status") else "Missing from dataset", "detail": "Compatibility audit field.", "display": False},
+        {"key": "authorization_requirement", "label": "Payer authorization requirement", "status": synthetic_status if has_synthetic_value("Prior_Auth_Required") else "Missing from dataset", "detail": "Compatibility audit field.", "display": False},
+    ])
+
+    action_priority = {
+        "denial": 1, "underpayment": 2, "adjustment": 3, "patient_balance": 5,
+        "authorization": 6, "referral": 7, "duplicate_or_correction": 8,
+    }
+    ranked_opportunities = sorted(opportunities, key=lambda item: (action_priority.get(item.get("type"), 99), -(item.get("amount") or 0)))
+    ranked_monetary = sorted(monetary_opportunities, key=lambda item: (action_priority.get(item.get("type"), 99), -(item.get("amount") or 0)))
+    # Opportunity types may overlap, so expose only the highest-priority supported
+    # amount instead of summing them into a misleading total.
+    total_demo_opportunity = ranked_monetary[0]["amount"] if ranked_monetary else None
+    if ranked_opportunities:
+        chosen = ranked_opportunities[0]
+        is_patient_balance = chosen.get("type") == "patient_balance"
+        action_text = (
+            "Review the synthetic patient-balance workflow fields for demonstration purposes only."
+            if is_patient_balance
+            else f"Perform {chosen['stage'].lower()} using the supporting synthetic demonstration fields."
+        )
+        best_action = {
+            "stage": chosen["stage"], "action": action_text, "action_category": chosen["type"],
+            "owner": chosen["owner"], "amount": chosen.get("amount"), "amount_addressed": chosen.get("amount"),
+            "amount_type": "synthetic_demo_opportunity" if chosen.get("amount") is not None else "no_amount",
+            "reason": chosen["reason"], "evidence": [actual.get("claim_id")], "data_source": "synthetic",
+        }
+    elif repeat_probability >= REPEAT_MEDIUM_THRESHOLD:
+        best_action = {"stage": "Provider follow-up monitoring", "action": "Monitor for a related service within 90 days and use pre-submission validation if one is initiated.", "action_category": "provider_follow_up", "owner": "provider operations", "amount": future_exposure["repeat_provider_payment_exposure"], "amount_addressed": future_exposure["repeat_provider_payment_exposure"], "amount_type": "forecast_exposure", "reason": "The shared 90-day repeat probability meets the configured follow-up threshold.", "evidence": [actual.get("claim_id")], "data_source": "prediction"}
     else:
-        best_action = {"stage": "No immediate validated savings action", "action": "Continue routine provider monitoring; no recovery action is supported for this claim.", "owner": "Provider operations", "amount_addressed": None, "amount_type": "none", "reason": "No validated current-claim amount or elevated repeat threshold is supported."}
+        best_action = {"stage": "Routine monitoring", "action": "Continue routine monitoring and validate CPT, diagnosis, place of service and payer requirements before a future related claim.", "action_category": "routine_monitoring", "owner": "provider operations", "amount": None, "amount_addressed": None, "amount_type": "no_amount", "reason": performance_conclusion, "evidence": [actual.get("claim_id")], "data_source": "prediction"}
     best_action["confidence"] = forecast.get("confidence", {}).get("score")
     best_action["affected_claim_ids"] = [actual.get("claim_id")]
+    best_action["financial_exposures_addressed"] = [
+        {"type": "denial_revenue", "amount": future_exposure["expected_denial_revenue_exposure"], "amount_type": "forecast_exposure"},
+        {"type": "repeat_provider_payment", "amount": future_exposure["expected_repeat_provider_payment_exposure"], "amount_type": "forecast_exposure"},
+    ]
 
-    data_required = ["Payer contract or fee-schedule information", "Denial correction and recoverability status", "Unresolved or collections patient-balance status"]
-    if not match_supported:
-        data_required.append("More closely matched payer, provider, CPT, diagnosis, place-of-service and units peers")
-    if not avoidable_spend["available"]:
-        data_required.append("More repeated related episodes and comparable lower-repeat episode history")
+    best_action["synthetic_data_used"] = best_action.get("data_source") == "synthetic"
+    missing_data = [item["label"] for item in data_availability if item["status"] in {"Missing", "Insufficient matched history"}]
+    # Member identity is used only inside the workbook join and never included in the Groq payload.
+    original_fields_used = ["Claim_ID", "Service_Date", "Claim_Status", "CPT", "ICD_10", "Payer", "Provider", "Charge", "Allowed", "Paid", "Patient_Responsibility", "Adjustment"]
+    data_provenance = {
+        "data_mode": "synthetic_demo" if synthetic_active else "original_only",
+        "original_fields_used": original_fields_used,
+        "synthetic_fields_used": sorted(synthetic_fields_used),
+        "source_workbook": source_claim.get("sourceWorkbook") or "claims_with_dummy_savings_fields.xlsx",
+        "synthetic_warning": "Synthetic enrichment data is active. Savings and recovery recommendations are for demonstration only and must not be used for real billing decisions." if synthetic_active else None,
+    }
+    validated_real_savings = {
+        "amount": None,
+        "available": False,
+        "breakdown": [],
+        "reason": "The original claims data does not contain verified contract, appeal-recovery, or patient-accounting evidence for a current recovery amount.",
+        "data_source": "Claims_Original",
+    }
+    synthetic_demo_opportunity = {
+        "amount": total_demo_opportunity,
+        "available": bool(monetary_opportunities),
+        "breakdown": opportunities,
+        "warning": "Synthetic demonstration data. This opportunity is for UI and workflow testing only and is not a verified billing recommendation." if synthetic_active else None,
+        "data_source": "Dummy_Enrichment" if synthetic_active else None,
+    }
     return {
         "forecast_reference": {
             "denial_probability": forecast["denial_risk"].get("probability"),
+            "repeat_probability_30d": forecast["repeat_service_risk"].get("probability_30d"),
+            "repeat_probability_60d": forecast["repeat_service_risk"].get("probability_60d"),
             "repeat_probability_90d": forecast["repeat_service_risk"].get("probability_90d"),
             "predicted_allowed": forecast["predicted_allowed"].get("value"),
             "predicted_paid": forecast["predicted_paid"].get("value"),
             "confidence": forecast["confidence"].get("score"),
+            "peer_sample_size": forecast["confidence"].get("peer_sample_size"),
+            "prediction_cutoff_date": recovery.get("prediction_cutoff_date"),
             "model_version": forecast["confidence"].get("model_version"),
             "calculation_version": scenario.get("calculationVersion", CALCULATION_VERSION),
             "source_dataset_hash": scenario.get("sourceDatasetHash"),
             "source_csv_hash": scenario.get("sourceCsvHash"),
         },
+        "current_claim_performance": current_performance,
+        "validated_real_savings": validated_real_savings,
+        "synthetic_demo_opportunity": synthetic_demo_opportunity,
         "current_claim_opportunity": {
             "status": opportunity_status,
-            "type": opportunity_type,
-            "amount": opportunity_amount,
+            "opportunities": opportunities,
+            "total_demo_opportunity": total_demo_opportunity,
+            "type": ranked_monetary[0]["type"] if ranked_monetary else opportunities[0]["type"] if opportunities else "none",
+            "amount": ranked_monetary[0]["amount"] if ranked_monetary else None,
             "calculation_basis": [
                 {"metric": "expected_peer_paid", "value": expected_peer_paid, "formula": "actual allowed × matched-peer median paid-to-allowed rate"},
-                {"metric": "potential_underpayment", "value": potential_underpayment, "formula": "max(0, expected peer paid − actual paid)"},
-                {"metric": "expected_peer_adjustment", "value": expected_peer_adjustment, "formula": "actual charge × matched-peer median adjustment rate"},
-                {"metric": "excessive_adjustment", "value": excessive_adjustment, "formula": "max(0, actual adjustment − expected peer adjustment)"},
+                {"metric": "potential_underpayment", "value": underpayment if synthetic_active else historical_underpayment, "formula": "max(0, contract expected payment − actual paid − recovered amount)" if synthetic_active else "historical comparison only; not a validated recovery amount"},
+                {"metric": "expected_contract_adjustment", "value": expected_contract_adjustment, "formula": "max(0, actual charge − synthetic contract allowed)"},
+                {"metric": "excessive_adjustment", "value": excessive_adjustment if synthetic_active else historical_excessive_adjustment, "formula": "max(0, actual adjustment − expected contract adjustment)" if synthetic_active else "historical comparison only; not a validated recovery amount"},
             ],
             "peer_match_level": recovery.get("match_level", "insufficient evidence"),
             "sample_size": recovery.get("sample_size", 0),
             "minimum_sample_size": recovery.get("minimum_sample_size", DEFAULT_MIN_PEERS),
             "limitations": current_limitations,
             "correctable_denial_value": correctable_denial_value,
+            "recovered_amount": recovered_amount,
             "patient_balance_opportunity_available": patient_balance_available,
             "patient_balance_reason": patient_balance_reason,
+            "data_source": "synthetic" if synthetic_active else "original",
         },
         "future_exposure": future_exposure,
         "avoidable_spend": avoidable_spend,
+        "avoidable_repeat_spend": avoidable_spend,
         "best_action": best_action,
-        "historical_comparison": historical_comparison,
+        "historical_comparison": current_performance,
         "recurrence_evidence": repeat_basis,
         "forecast_reconciliation_difference": {
             "value": reconciliation.get("reconciliation_difference"),
             "label": "Forecast reconciliation difference",
             "is_savings": False,
         },
-        "data_required_for_stronger_estimate": data_required,
+        "data_availability": data_availability,
+        "data_required_for_stronger_estimate": missing_data,
+        "data_provenance": data_provenance,
         "confidence": forecast.get("confidence", {}),
     }
 
@@ -1310,6 +1713,7 @@ def build_provider_prediction_payload(scenario):
     confidence = scenario.get("confidenceDetail", {})
     features = scenario.get("features", {})
     avoidable_available = bool(scenario.get("avoidableSpendSupported"))
+    avoidable_basis_reason = scenario.get("avoidableSpendBasis", {}).get("reason")
     if scenario.get("peerClaimCount", 0) < DEFAULT_MIN_PEERS:
         unavailable_reason = "The episode does not meet the minimum peer threshold."
     elif scenario.get("longitudinalBasis", {}).get("repeat", {}).get("90", {}).get("member_trials", 0) < 3:
@@ -1391,8 +1795,9 @@ def build_provider_prediction_payload(scenario):
         "potentially_avoidable_spend": {
             "value": scenario.get("avoidableSpend") if avoidable_available else None,
             "available": avoidable_available,
-            "reason": None if avoidable_available else unavailable_reason,
+            "reason": None if avoidable_available else (avoidable_basis_reason or unavailable_reason),
             "savings_phase": scenario.get("bestSavingsPhase") if avoidable_available else None,
+            "synthetic_demo": bool(scenario.get("avoidableSpendBasis", {}).get("synthetic_demo")),
         },
         "confidence": {
             "score": confidence.get("score", 0),
@@ -1458,11 +1863,13 @@ def build_provider_prediction_payload(scenario):
     reconciliation = _build_reconciliation(actual_facts, forecast)
     backtest = _build_backtest(actual_facts, forecast)
     actions = _rank_provider_actions(scenario, actual_facts, forecast, provider_financials, reconciliation)
-    scenario_map = _provider_scenario_map(scenario, actual_facts, forecast, provider_financials, reconciliation, actions)
-    savings_opportunity = _build_savings_opportunity(scenario, actual_facts, forecast, provider_financials, reconciliation, scenario_map)
+    savings_opportunity = _build_savings_opportunity(scenario, actual_facts, forecast, provider_financials, reconciliation, None)
+    provider_financials["synthetic_demo_opportunity"] = savings_opportunity["synthetic_demo_opportunity"].get("amount")
+    provider_financials["validated_recovery_opportunity"] = savings_opportunity["validated_real_savings"].get("amount")
+    scenario_map = _provider_scenario_map(scenario, actual_facts, forecast, provider_financials, reconciliation, savings_opportunity)
     supported_actions = actions or [{
         "rank": 1, "code": "insufficient_evidence", "title": "No supported financial intervention", "priority": 0,
-        "expected_financial_impact": None, "reason": "Not enough evidence to estimate reliably.",
+        "expected_financial_impact": None, "reason": "No evidence-supported recovery action is available; continue routine monitoring and future pre-submission validation.",
         "affected_claim_ids": [selected.get("claimId")], "operational_owner": "Provider operations", "urgency": "Routine", "supporting_evidence": [selected.get("claimId")],
     }]
     exact_model_output = {
@@ -1524,9 +1931,12 @@ def build_provider_prediction_payload(scenario):
         "forecast": forecast,
         "provider_financial_opportunity_summary": {
             "expected_provider_payment": provider_financials["provider_expected_reimbursement"],
-            "potential_revenue_at_risk": provider_financials["potential_revenue_at_risk"],
-            "provider_opportunity_amount": savings_opportunity["current_claim_opportunity"]["amount"],
-            "opportunity_available": savings_opportunity["current_claim_opportunity"]["status"] == "validated",
+            "expected_contractual_adjustment": provider_financials["expected_contractual_adjustment"],
+            "expected_denial_revenue_exposure": provider_financials["expected_denial_exposure"],
+            "expected_repeat_provider_payment_exposure": provider_financials["expected_repeat_provider_payment_exposure"],
+            "validated_real_savings": savings_opportunity["validated_real_savings"],
+            "synthetic_demo_opportunity": savings_opportunity["synthetic_demo_opportunity"],
+            "potentially_avoidable_spend": savings_opportunity["avoidable_spend"],
             "opportunity_reason": savings_opportunity["best_action"]["reason"],
             "best_savings_phase": savings_opportunity["best_action"]["stage"],
             "supporting_reason": savings_opportunity["best_action"]["reason"],
@@ -1536,6 +1946,7 @@ def build_provider_prediction_payload(scenario):
         },
         "provider_financial_metrics": provider_financials,
         "where_provider_money_can_be_saved": savings_opportunity,
+        "data_provenance": savings_opportunity["data_provenance"],
         "financial_reconciliation": reconciliation,
         "backtest_against_actual": backtest,
         "provider_money_scenario_map": scenario_map,
@@ -1547,7 +1958,7 @@ def build_provider_prediction_payload(scenario):
             "This is provider administrative decision support and does not determine medical necessity.",
             "The next-related-claim forecast uses the selected claim's submitted charge as its standardized financial basis and does not use the selected claim's adjudication outcomes.",
             "Only claims earlier than the selected claim are used as member history; later claims are excluded to prevent temporal leakage.",
-            "Payer authorization and referral requirements are not present in the claims dataset and must be verified separately.",
+            savings_opportunity["data_provenance"].get("synthetic_warning") or "Payer authorization and referral requirements must be verified from authoritative payer sources.",
         ],
         "exact_model_output": exact_model_output,
     }

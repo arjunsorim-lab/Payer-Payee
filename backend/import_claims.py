@@ -21,9 +21,11 @@ def read_claims(path):
     source_hash = sha256(path.read_bytes()).hexdigest()
     with path.open(newline="", encoding="utf-8-sig") as csv_file:
         rows = csv.DictReader(csv_file)
+        source_columns = list(rows.fieldnames or [])
         claims = [claim for claim in (normalize_claim(row) for row in rows) if claim.get("claimId") and claim.get("memberId")]
     for claim in claims:
         claim["sourceCsvHash"] = source_hash
+        claim["sourceCsvColumns"] = source_columns
     return claims
 
 

@@ -14,12 +14,14 @@ try:
     from .llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
     from .prediction_service import build_prediction_scenarios, summarize_scenarios
     from .provider_prediction import build_provider_prediction_payload, find_case
+    from .workbook_enrichment import read_savings_workbook
 except ImportError:
     from db import connect_mongo, get_mongo_config
     from import_claims import read_claims
     from llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
     from prediction_service import build_prediction_scenarios, summarize_scenarios
     from provider_prediction import build_provider_prediction_payload, find_case
+    from workbook_enrichment import read_savings_workbook
 
 FRONTEND_DIST_DIR = Path(__file__).resolve().parent.parent / "dist"
 
@@ -321,11 +323,17 @@ def get_prediction_scenarios():
 
 def build_provider_case(db, claim_number):
     """Build one exact provider case from the current database records."""
+    workbook_path = Path(os.getenv("SAVINGS_WORKBOOK_PATH", "")).expanduser()
     csv_path = Path(os.getenv("CSV_PATH", "")).expanduser()
-    if csv_path.is_file():
+    if workbook_path.is_file():
+        all_claims, workbook_report = read_savings_workbook(workbook_path)
+        selected_claim = next((claim for claim in all_claims if claim_number in {claim.get("number"), claim.get("claimId")}), None)
+    elif csv_path.is_file():
         all_claims = read_claims(csv_path)
+        workbook_report = None
         selected_claim = next((claim for claim in all_claims if claim_number in {claim.get("number"), claim.get("claimId")}), None)
     else:
+        workbook_report = None
         selected_claim = db.claims.find_one({"$or": [{"number": claim_number}, {"claimId": claim_number}]})
         all_claims = list(db.claims.find({}).sort([("dos", 1), ("claimId", 1)]))
     if not selected_claim:
@@ -355,12 +363,10 @@ def build_provider_case(db, claim_number):
         "riskReasons": scenario["riskDrivers"],
         "savingsActions": scenario["recommendedActions"],
         "anchor": anchor,
-        "selectedClaim": next(
-            claim for claim in scenario["claims"]
-            if claim_number in {claim.get("claimId"), claim.get("number")}
-        ),
+        "selectedClaim": selected_claim,
         "validation": report["validation"],
         "quality": report["quality"],
+        "workbookValidation": workbook_report,
     })
     return scenario, None
 
@@ -383,8 +389,9 @@ def get_provider_case_prediction(claim_number):
             "peerCount": scenario["peerCount"],
             "confidence": scenario["confidence"],
             "priorityScore": scenario["priorityScore"],
+            "workbookValidation": scenario.get("workbookValidation"),
         },
-        "item": scenario,
+        "item": {**scenario, "selectedClaim": scenario.get("anchor")},
         "model": {
             "name": "Explainable provider case forecast v1",
             "backend": "Python",
@@ -415,6 +422,7 @@ def get_provider_case_llm_analysis(claim_number):
                 "confidence": scenario["confidence"],
                 "peerCount": scenario["peerCount"],
                 "priorityScore": scenario["priorityScore"],
+                "workbookValidation": scenario.get("workbookValidation"),
             },
         })
     except RuntimeError as exc:

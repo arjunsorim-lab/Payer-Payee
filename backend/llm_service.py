@@ -20,7 +20,7 @@ except ImportError:
 
 
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
-PROMPT_VERSION = "provider-groq-money-v3.1"
+PROMPT_VERSION = "provider-groq-money-v3.3"
 _ANALYSIS_CACHE = {}
 _CHAT_CACHE = {}
 logger = logging.getLogger(__name__)
@@ -147,6 +147,95 @@ def _remove_numeric_forecast_sentences(text, replacement):
 def build_llm_input(scenario):
     selected = scenario.get("selectedClaim") or scenario.get("anchor") or {}
     structured = build_provider_prediction_payload(scenario)
+    forecast = structured["forecast"]
+    savings = structured["where_provider_money_can_be_saved"]
+    basis = structured["prediction_basis"]
+
+    def compact_recurrence(source):
+        return {
+            horizon: {
+                key: (source.get(horizon) or {}).get(key)
+                for key in (
+                    "local_numerator", "local_denominator", "local_rate", "external_numerator",
+                    "external_denominator", "external_rate", "blend_weights", "final_blended_rate",
+                    "prediction_cutoff_date", "exact_filtering_rule",
+                )
+            }
+            for horizon in ("30", "60", "90")
+        }
+
+    repeat_risk = forecast.get("repeat_service_risk", {})
+    compact_forecast = {
+        "forecast_context": forecast.get("forecast_context"),
+        "forecast_label": forecast.get("forecast_label"),
+        "charge_basis": forecast.get("charge_basis"),
+        "predicted_claim_outcome": forecast.get("predicted_claim_outcome"),
+        "denial_risk": {
+            **{key: forecast.get("denial_risk", {}).get(key) for key in ("probability", "percentage", "level")},
+            "basis": {
+                key: forecast.get("denial_risk", {}).get("basis", {}).get(key)
+                for key in ("external_peer_denial_rate", "member_historical_denial_rate", "member_same_cpt_denial_rate", "payer_denial_rate", "provider_denial_rate", "cpt_diagnosis_denial_rate", "external_sample_size", "member_sample_size", "blend_weights")
+            },
+        },
+        "repeat_service_risk": {
+            **{key: repeat_risk.get(key) for key in ("probability_30d", "probability_60d", "probability_90d", "level")},
+        },
+        "predicted_allowed": forecast.get("predicted_allowed"),
+        "predicted_paid": forecast.get("predicted_paid"),
+        "predicted_patient_responsibility": forecast.get("predicted_patient_responsibility"),
+        "predicted_adjustment": forecast.get("predicted_adjustment"),
+        "potentially_avoidable_spend": forecast.get("potentially_avoidable_spend"),
+        "confidence": {
+            key: forecast.get("confidence", {}).get(key)
+            for key in ("score", "percentage", "level", "explanation", "drivers", "penalties", "peer_sample_size", "peer_episode_count", "prediction_method", "model_version")
+        },
+    }
+    compact_savings = {
+        "forecast_reference": savings.get("forecast_reference"),
+        "validated_real_savings": savings.get("validated_real_savings"),
+        "synthetic_demo_opportunity": savings.get("synthetic_demo_opportunity"),
+        "current_claim_performance": {
+            **{
+                key: savings.get("current_claim_performance", {}).get(key)
+                for key in ("available", "adjudicated", "matched_claim_count", "match_level", "prediction_cutoff_date", "conclusion")
+            },
+            "metrics": {
+                metric: {key: value.get(key) for key in ("label", "actual_rate", "historical_median_rate", "rate_variance_percentage_points", "related_dollar_variance", "variance_status")}
+                for metric, value in savings.get("current_claim_performance", {}).get("metrics", {}).items()
+            },
+        },
+        "current_claim_opportunity": {
+            **{
+                key: savings.get("current_claim_opportunity", {}).get(key)
+                for key in ("status", "total_demo_opportunity", "type", "amount", "calculation_basis", "peer_match_level", "sample_size", "minimum_sample_size", "limitations", "correctable_denial_value", "recovered_amount", "patient_balance_opportunity_available")
+            },
+            "opportunities": [
+                {key: item.get(key) for key in ("type", "stage", "amount", "owner", "confidence", "reason", "calculation", "recovered_amount")}
+                for item in savings.get("current_claim_opportunity", {}).get("opportunities", [])
+            ],
+        },
+        "future_exposure": savings.get("future_exposure"),
+        "avoidable_repeat_spend": savings.get("avoidable_repeat_spend"),
+        "best_action": savings.get("best_action"),
+        "recurrence_evidence": compact_recurrence(savings.get("recurrence_evidence", {})),
+        "forecast_reconciliation_difference": savings.get("forecast_reconciliation_difference"),
+        "data_availability": [item for item in savings.get("data_availability", []) if item.get("display") is not False],
+        "data_provenance": {
+            key: savings.get("data_provenance", {}).get(key)
+            for key in ("data_mode", "source_workbook", "synthetic_warning", "synthetic_fields_used")
+        },
+    }
+    compact_basis = {
+        key: basis.get(key) for key in (
+            "peer_claims_used", "peer_episodes_used", "matching_level", "fallback_level",
+            "fallback_explanation", "prediction_cutoff_date", "model_version", "calculation_version",
+            "source_dataset_hash", "source_csv_hash", "metric_basis", "historical_peer_denial_rate",
+            "member_prior_claims_used", "member_prior_denials", "member_prior_related_claims",
+            "member_prior_same_cpt_claims", "member_financial_claims_used", "member_financial_match_level",
+            "median_allowed_rate", "median_paid_to_allowed_rate", "median_patient_to_allowed_rate",
+            "median_adjustment_rate",
+        )
+    }
     return {
         "episode_id": scenario.get("episodeId"),
         "member_reference": scenario.get("memberReference"),
@@ -156,13 +245,12 @@ def build_llm_input(scenario):
             "payer_id": selected.get("payerId"),
         },
         "actual_claim_facts": structured["actual_claim_facts"],
-        "deterministic_forecast": structured["forecast"],
+        "deterministic_forecast": compact_forecast,
         "provider_financial_metrics": structured["provider_financial_metrics"],
-        "where_provider_money_can_be_saved": structured["where_provider_money_can_be_saved"],
+        "where_provider_money_can_be_saved": compact_savings,
         "financial_reconciliation": structured["financial_reconciliation"],
         "backtest_against_actual": structured["backtest_against_actual"],
-        "provider_money_scenario_map": structured["provider_money_scenario_map"],
-        "prediction_basis": structured["prediction_basis"],
+        "prediction_basis": compact_basis,
         "deterministic_risk_drivers": structured["risk_drivers"],
         "allowed_provider_actions": structured["recommended_actions"],
         "evidence_trace": structured["evidence_used"],
@@ -350,6 +438,7 @@ def generate_provider_llm_analysis(scenario):
 
 
 CHAT_SUGGESTIONS = [
+    "How much can be saved?",
     "How was the predicted allowed amount calculated?",
     "Why is the predicted paid amount lower than the charge?",
     "How much provider revenue is at risk?",
@@ -372,14 +461,15 @@ def _chat_schema():
         "additionalProperties": False,
         "properties": {
             "answer": {"type": "string"},
+            "financial_explanation": {"type": "object"},
             "facts_used": string_array,
             "prediction_fields_used": string_array,
-            "financial_fields_used": string_array,
+            "synthetic_fields_used": string_array,
             "evidence_claim_ids": string_array,
             "limitations": string_array,
             "suggested_questions": string_array,
         },
-        "required": ["answer", "facts_used", "prediction_fields_used", "financial_fields_used", "evidence_claim_ids", "limitations", "suggested_questions"],
+        "required": ["answer", "financial_explanation", "facts_used", "prediction_fields_used", "synthetic_fields_used", "evidence_claim_ids", "limitations", "suggested_questions"],
     }
 
 
@@ -390,35 +480,70 @@ def _parse_chat_json(text):
     if not isinstance(payload, dict) or set(payload) != required or not str(payload.get("answer") or "").strip():
         raise ValueError("Unexpected chat fields")
     payload["answer"] = str(payload["answer"]).strip()
-    for field in required - {"answer"}:
+    if not isinstance(payload["financial_explanation"], dict):
+        raise ValueError("financial_explanation must be an object")
+    for field in required - {"answer", "financial_explanation"}:
         if not isinstance(payload[field], list):
             raise ValueError(f"{field} must be an array")
         payload[field] = [str(item).strip() for item in payload[field] if str(item).strip()][:8]
     return payload
 
 
+def _chat_financial_explanation(case_input):
+    savings = case_input.get("where_provider_money_can_be_saved", {})
+    future = savings.get("future_exposure", {})
+    opportunity = savings.get("current_claim_opportunity", {})
+    provenance = savings.get("data_provenance", {})
+    evidence_ids = [item.get("claim_id") for item in case_input.get("evidence_trace", []) if item.get("claim_id")]
+    return {
+        "validated_real_savings": savings.get("validated_real_savings") or {"amount": None, "available": False, "breakdown": []},
+        "synthetic_demo_opportunity": savings.get("synthetic_demo_opportunity") or {"amount": None, "available": False, "breakdown": [], "warning": None},
+        "future_financial_exposure": {
+            "denial_exposure": future.get("expected_denial_revenue_exposure", future.get("denial_revenue_exposure")),
+            "repeat_allowed_exposure": future.get("expected_repeat_allowed_exposure", future.get("repeat_allowed_exposure")),
+            "repeat_provider_payment_exposure": future.get("expected_repeat_provider_payment_exposure", future.get("repeat_provider_payment_exposure")),
+            "label": future.get("label") or "Forecast exposure — not confirmed savings",
+        },
+        "potentially_avoidable_spend": savings.get("avoidable_repeat_spend") or {"amount": None, "available": False, "reason": "Evidence threshold not met."},
+        "best_action": savings.get("best_action") or {},
+        "calculation_basis": opportunity.get("calculation_basis") or [],
+        "evidence_claim_ids": evidence_ids,
+        "confidence": savings.get("confidence") or case_input.get("deterministic_forecast", {}).get("confidence", {}),
+        "data_source": provenance.get("data_mode") or "original_only",
+        "limitations": list(opportunity.get("limitations") or []) + list(case_input.get("limitations") or [])[:4],
+    }
+
+
 def _chat_fallback(case_input, question, reason=None):
     forecast = case_input.get("deterministic_forecast", {})
     savings = case_input.get("where_provider_money_can_be_saved", {})
+    financials = case_input.get("provider_financial_metrics", {})
     basis = case_input.get("prediction_basis", {})
     reconciliation = case_input.get("financial_reconciliation", {})
     normalized = question.lower()
+    financial_explanation = _chat_financial_explanation(case_input)
     if "allowed" in normalized:
         item = forecast.get("predicted_allowed", {})
         answer = f"The backend predicted allowed amount is ${item.get('value', 0):,.2f}, with a range of ${item.get('low', 0):,.2f} to ${item.get('high', 0):,.2f}. It uses the selected claim charge, {basis.get('member_financial_claims_used', 0)} earlier member financial claims and the metric-specific external sample shown in Prediction Basis."
         fields = ["predicted_allowed", "charge_basis"]
     elif "sav" in normalized or "opportunity" in normalized or "avoid" in normalized:
-        opportunity = savings.get("current_claim_opportunity", {})
+        validated = savings.get("validated_real_savings", {})
+        synthetic_demo = savings.get("synthetic_demo_opportunity", {})
         action = savings.get("best_action", {})
-        if opportunity.get("status") == "validated" and opportunity.get("amount") is not None:
-            answer = f"The backend validates a current-claim {opportunity.get('type', 'financial')} opportunity of ${opportunity['amount']:,.2f}. The evidence-supported next stage is {action.get('stage', 'review')}. {action.get('reason', '')}"
+        if validated.get("available") and validated.get("amount") is not None:
+            answer = f"Validated real savings supported by the original claim data are ${validated['amount']:,.2f}. The recommended provider stage is {action.get('stage', 'review')}. Future exposure remains separate and is not guaranteed savings."
+        elif synthetic_demo.get("available") and synthetic_demo.get("amount") is not None:
+            answer = f"The original claim data does not identify a verified recovery amount. Synthetic demonstration opportunity: ${synthetic_demo['amount']:,.2f}. The recommended demo stage is {action.get('stage', 'review')}; future exposure is separate and is not guaranteed savings."
         else:
-            answer = f"The backend identified no validated current-claim savings opportunity. The next stage is {action.get('stage', 'no immediate validated savings action')}; forecast exposures remain separate and are not confirmed savings."
-        fields = ["current_claim_opportunity", "future_exposure", "avoidable_spend", "best_action"]
+            performance = savings.get("current_claim_performance", {})
+            answer = f"The original claim data does not identify a verified recovery amount. {performance.get('conclusion', '')} The preventive next stage is {action.get('stage', 'pre-submission validation')}; forecast exposure remains separate and is not confirmed savings."
+        fields = ["validated_real_savings", "synthetic_demo_opportunity", "future_exposure", "avoidable_spend", "best_action"]
     elif "revenue" in normalized or "risk" in normalized:
         denial_exposure = savings.get("future_exposure", {}).get("expected_denial_revenue_exposure")
-        answer = f"Expected denial revenue exposure is ${denial_exposure or 0:,.2f}. It is calculated from the shared denial probability and predicted provider payment, and is forecast exposure rather than confirmed savings."
-        fields = ["expected_denial_revenue_exposure", "denial_probability", "predicted_paid"]
+        repeat_exposure = savings.get("future_exposure", {}).get("expected_repeat_provider_payment_exposure")
+        contractual_adjustment = financials.get("expected_contractual_adjustment")
+        answer = f"The backend keeps the amounts separate: expected contractual adjustment is ${contractual_adjustment or 0:,.2f}, expected denial revenue exposure is ${denial_exposure or 0:,.2f}, and expected repeat provider-payment exposure is ${repeat_exposure or 0:,.2f}. These are forecast values, not a combined recoverable-revenue total."
+        fields = ["expected_contractual_adjustment", "expected_denial_revenue_exposure", "expected_repeat_provider_payment_exposure", "denial_probability", "repeat_probability_90d", "predicted_paid"]
     elif "reconcil" in normalized:
         answer = " ".join(reconciliation.get("warnings") or [f"The predicted component reconciliation difference is ${reconciliation.get('reconciliation_difference', 0):,.2f}, within the configured materiality checks."])
         fields = ["reconciliation_difference", "adjustment_difference"]
@@ -430,9 +555,10 @@ def _chat_fallback(case_input, question, reason=None):
         fields = []
     return {
         "answer": answer,
+        "financial_explanation": financial_explanation,
         "facts_used": ["Actual claim facts", "Prediction cutoff"],
         "prediction_fields_used": fields,
-        "financial_fields_used": fields,
+        "synthetic_fields_used": list(savings.get("data_provenance", {}).get("synthetic_fields_used") or []),
         "evidence_claim_ids": [item.get("claim_id") for item in case_input.get("evidence_trace", []) if item.get("claim_id")],
         "limitations": list(case_input.get("limitations", []))[:4] + ([reason] if reason else []),
         "suggested_questions": CHAT_SUGGESTIONS,

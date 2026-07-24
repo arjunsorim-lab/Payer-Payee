@@ -75,6 +75,7 @@ test('prediction chat is integrated into the full-screen analysis workspace', ()
   const styles = readFileSync(new URL('./App.css', import.meta.url), 'utf8')
   assert.match(styles, /\.provider-llm-modal\s*\{[^}]*inset:\s*0;[^}]*width:\s*100vw;[^}]*height:\s*100vh;/s)
   assert.match(styles, /\.provider-chat-prompt\s*\{[^}]*height:\s*100%;/s)
+  assert.match(styles, /\.provider-chat-prompt:hover,\s*\.provider-chat-prompt:focus-within\s*\{[^}]*transform:\s*none;/s)
 })
 
 test('Prediction Snapshot is removed from the active provider modal', () => {

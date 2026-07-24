@@ -42,7 +42,6 @@ import {
   X,
 } from 'lucide-react'
 import './App.css'
-import { predictClaim } from '../../shared/predictionEngine'
 
 const navSections = [
   {
@@ -92,7 +91,7 @@ const CONFIGURED_API_BASE_URL = (
 ).replace(/\/$/, '')
 const LOCAL_API_BASE_URL = 'http://127.0.0.1:4000'
 const RENDER_API_BASE_URL = 'https://payer-payee.onrender.com'
-const CLAIMS_CACHE_KEY = 'payerpayee.claims.v1'
+const CLAIMS_CACHE_PREFIX = 'payerpayee.claims.workbook.'
 const EMPTY_DATE_RANGE = { from: '', to: '' }
 const CLICKABLE_NAV_LABELS = new Set(['Patient 360', 'Predictions', 'Claims'])
 const VALID_VIEWS = new Set(['home', 'member', 'predictions', 'claims'])
@@ -127,7 +126,7 @@ async function fetchJson(path, options = {}) {
     import.meta.env.DEV ? LOCAL_API_BASE_URL : '',
     import.meta.env.DEV ? '' : RENDER_API_BASE_URL,
   ].filter(Boolean))]
-  let lastError = new Error('Backend API is unavailable')
+  let lastError = new Error('Backend API could not be reached')
 
   for (const baseUrl of candidates) {
     try {
@@ -154,27 +153,24 @@ async function fetchJson(path, options = {}) {
   throw lastError
 }
 
-function readClaimsCache() {
+function writeClaimsCache(items, source) {
   try {
-    const cached = JSON.parse(window.localStorage.getItem(CLAIMS_CACHE_KEY) || 'null')
-    return Array.isArray(cached?.items) ? cached.items : []
+    const workbookHash = source?.workbook_hash
+    if (!workbookHash) return
+    Object.keys(window.localStorage)
+      .filter((key) => key === `${'payerpayee.claims'}.v1` || (key.startsWith(CLAIMS_CACHE_PREFIX) && key !== `${CLAIMS_CACHE_PREFIX}${workbookHash}`))
+      .forEach((key) => window.localStorage.removeItem(key))
+    Object.keys(window.localStorage)
+      .filter((key) => key.startsWith('payerpayee.provider-chat.') && !key.includes(workbookHash))
+      .forEach((key) => window.localStorage.removeItem(key))
+    window.localStorage.setItem(`${CLAIMS_CACHE_PREFIX}${workbookHash}`, JSON.stringify({
+      items,
+      workbookHash,
+      savedAt: Date.now(),
+    }))
   } catch {
-    return []
+    // Browser storage is optional; the backend workbook remains authoritative.
   }
-}
-
-function writeClaimsCache(items) {
-  try {
-    window.localStorage.setItem(CLAIMS_CACHE_KEY, JSON.stringify({ items, savedAt: Date.now() }))
-  } catch {
-    // Browsers may disable storage; the bundled snapshot remains available.
-  }
-}
-
-async function loadBundledClaims() {
-  const response = await fetch('/data/claims-fallback.json', { headers: { Accept: 'application/json' } })
-  if (!response.ok) throw new Error(`Bundled data request failed: ${response.status}`)
-  return response.json()
 }
 
 function findClaimByNumber(claimsData, claimNumber) {
@@ -335,6 +331,12 @@ function buildMembers(rows) {
         totalPatientResp: sum(claims, 'patientResp'),
         totalAdjustment: sum(claims, 'adjustment'),
         deniedCount,
+        supportedMoneySummary: latestClaim.memberSupportedMoneySummary || {
+          recoverable_now: 0,
+          potentially_avoidable_spend_supported: 0,
+          future_denial_exposure: 0,
+          future_repeat_payment_exposure: 0,
+        },
       }
     })
     .sort((a, b) => b.latestClaim.dos.localeCompare(a.latestClaim.dos))
@@ -342,9 +344,14 @@ function buildMembers(rows) {
 
 function buildMemberStats(member) {
   const claimCount = member.claims.length
+  const money = member.supportedMoneySummary
   return [
     { label: 'Total Allowed', value: formatCurrency(member.totalAllowed), note: `Across ${claimCount.toLocaleString()} claims` },
     { label: 'Total Paid', value: formatCurrency(member.totalPaid), note: 'Payer payments in the database' },
+    { label: 'Recoverable Now', value: formatCurrency(money.recoverable_now), note: 'Sum of canonical claim-level opportunities' },
+    { label: 'Supported Avoidable Spend', value: formatCurrency(money.potentially_avoidable_spend_supported), note: 'Deduplicated by episode' },
+    { label: 'Future Denial Exposure', value: formatCurrency(money.future_denial_exposure), note: 'Forecast kept separate' },
+    { label: 'Future Repeat Exposure', value: formatCurrency(money.future_repeat_payment_exposure), note: 'Forecast kept separate' },
     { label: 'Total Claims', value: claimCount.toLocaleString(), note: `${claimCount - member.deniedCount} non-denied, ${member.deniedCount} denied` },
     { label: 'Last Encounter', value: formatDate(member.latestClaim.dos), note: member.latestClaim.placeOfService },
   ]
@@ -436,12 +443,12 @@ function App() {
   const [selectedClaim, setSelectedClaim] = useState(null)
   const [selectedPredictionClaim, setSelectedPredictionClaim] = useState(null)
   const [searchQuery, setSearchQuery] = useState('')
-  const [claimsData, setClaimsData] = useState(() => readClaimsCache())
+  const [claimsData, setClaimsData] = useState([])
+  const [workbookSource, setWorkbookSource] = useState(null)
   const [dataLoading, setDataLoading] = useState(true)
   const [dataError, setDataError] = useState('')
-  const dataModel = useMemo(() => buildDataModel(claimsData), [claimsData])
+  const dataModel = useMemo(() => ({ ...buildDataModel(claimsData), workbookSource }), [claimsData, workbookSource])
   const routeInitializedRef = useRef(false)
-  const initialClaimsRef = useRef(claimsData)
 
   const setRouteState = (route, historyMode = 'push') => {
     const nextRoute = {
@@ -473,35 +480,21 @@ function App() {
   useEffect(() => {
     let active = true
 
-    const bundledClaims = initialClaimsRef.current.length
-      ? Promise.resolve(initialClaimsRef.current)
-      : loadBundledClaims().then((items) => {
-          if (active) {
-            setClaimsData(items)
-            writeClaimsCache(items)
-            setDataError('')
-            setDataLoading(false)
-          }
-          return items
-        })
-
     fetchJson('/api/claims?limit=2000')
       .then((payload) => {
         if (!active) return
         const items = payload.items || []
+        const source = payload.source || null
         setClaimsData(items)
-        writeClaimsCache(items)
+        setWorkbookSource(source)
+        writeClaimsCache(items, source)
         setDataError('')
       })
-      .catch(async (apiError) => {
+      .catch((apiError) => {
         if (!active) return
-        try {
-          const items = await bundledClaims
-          if (!active) return
-          if (items.length) setDataError('')
-        } catch {
-          if (active && !initialClaimsRef.current.length) setDataError(apiError.message)
-        }
+        setClaimsData([])
+        setWorkbookSource(null)
+        setDataError(apiError.message)
       })
       .finally(() => {
         if (active) setDataLoading(false)
@@ -622,7 +615,7 @@ function App() {
             <>
               <TopBar />
               <section className="patient-page">
-                <Card className="state-card">Loading MongoDB claim data...</Card>
+                <Card className="state-card">Loading the configured workbook database...</Card>
               </section>
             </>
           ) : dataError ? (
@@ -861,11 +854,12 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
   const { claimsData, payerOptions } = useAppData()
   const [scenarios, setScenarios] = useState([])
   const [scenarioMeta, setScenarioMeta] = useState(null)
+  const [scenarioSummary, setScenarioSummary] = useState(null)
   const [scenarioLoading, setScenarioLoading] = useState(true)
   const [scenarioError, setScenarioError] = useState('')
   const [riskFilter, setRiskFilter] = useState('All Scenarios')
   const [payerFilter, setPayerFilter] = useState('All Payers')
-  const [sortBy, setSortBy] = useState('Highest Repeat Risk')
+  const [sortBy, setSortBy] = useState('Highest Confidence')
   const [currentPage, setCurrentPage] = useState(1)
   const pageSize = 10
   const normalizedQuery = searchQuery.trim().toLowerCase()
@@ -878,12 +872,13 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
         if (cancelled) return
         setScenarios(Array.isArray(payload.items) ? payload.items : [])
         setScenarioMeta({ ...payload.model, totalClaims: payload.totalClaims })
+        setScenarioSummary(payload.summary || null)
         setScenarioError('')
       })
       .catch(() => {
         if (cancelled) return
         setScenarios([])
-        setScenarioError('The Python prediction service is unavailable. Start the Flask backend and refresh this page.')
+        setScenarioError('The Python prediction service could not be reached. Start the Flask backend and refresh this page.')
       })
       .finally(() => {
         if (!cancelled) setScenarioLoading(false)
@@ -894,33 +889,26 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
   const filteredScenarios = useMemo(() => scenarios
     .filter((scenario) => {
       const matchesSearch = !normalizedQuery || [
-        scenario.anchor.number,
-        scenario.patient,
-        scenario.memberId,
-        scenario.payer,
-        scenario.provider,
-        scenario.condition,
-        scenario.diagnosisCode,
+        scenario.claim_id,
+        scenario.member_id,
+        scenario.actual_claim_facts?.payer,
+        scenario.actual_claim_facts?.provider,
+        scenario.actual_claim_facts?.diagnosis_description,
+        scenario.actual_claim_facts?.diagnosis_code,
       ].some((value) => value?.toString().toLowerCase().includes(normalizedQuery))
-      const matchesPayer = payerFilter === 'All Payers' || scenario.payer === payerFilter
-      const matchesRisk = riskFilter === 'All Scenarios' || scenario.risk.level === riskFilter
+      const matchesPayer = payerFilter === 'All Payers' || scenario.actual_claim_facts?.payer === payerFilter
+      const matchesRisk = riskFilter === 'All Scenarios' || scenario.confidence?.level === riskFilter
 
       return matchesSearch && matchesPayer && matchesRisk
     })
     .sort((a, b) => {
-      if (sortBy === 'Avoidable Spend') return b.avoidableSpend - a.avoidableSpend
-      if (sortBy === 'Predicted Paid') return b.forecast.paid - a.forecast.paid
-      if (sortBy === 'Most Visits') return b.totalVisitCount - a.totalVisitCount
-      if (sortBy === 'Newest Episode') return b.episodeEnd.localeCompare(a.episodeEnd)
-      return b.risk.score - a.risk.score
+      if (sortBy === 'Recoverable Now') return b.supported_money_summary.recoverable_now - a.supported_money_summary.recoverable_now
+      if (sortBy === 'Supported Avoidable Spend') return b.supported_money_summary.potentially_avoidable_spend_supported - a.supported_money_summary.potentially_avoidable_spend_supported
+      if (sortBy === 'Predicted Paid') return b.prediction.predicted_paid - a.prediction.predicted_paid
+      if (sortBy === 'Newest Claim') return b.actual_claim_facts.service_date.localeCompare(a.actual_claim_facts.service_date)
+      return b.confidence.score - a.confidence.score
     }), [scenarios, normalizedQuery, payerFilter, riskFilter, sortBy])
 
-  const summary = useMemo(() => ({
-    totalScenarios: filteredScenarios.length,
-    highRiskCount: filteredScenarios.filter((scenario) => scenario.risk.level === 'High').length,
-    predictedPaid: filteredScenarios.reduce((total, scenario) => total + scenario.forecast.paid, 0),
-    avoidableSpend: filteredScenarios.reduce((total, scenario) => total + scenario.avoidableSpend, 0),
-  }), [filteredScenarios])
   const pageCount = Math.max(1, Math.ceil(filteredScenarios.length / pageSize))
   const safePage = Math.min(currentPage, pageCount)
   const displayedScenarios = useMemo(
@@ -950,9 +938,7 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
                   <span>Risk</span>
                   <select value={riskFilter} onChange={(event) => setRiskFilter(event.target.value)}>
                     <option>All Scenarios</option>
-                    <option>High</option>
-                    <option>Medium</option>
-                    <option>Low</option>
+                    <option>High</option><option>Medium</option><option>Low</option>
                   </select>
                   <ChevronDown size={16} />
                 </label>
@@ -968,11 +954,11 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
                 <label className="prediction-select">
                   <span>Sort</span>
                   <select value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
-                    <option>Highest Repeat Risk</option>
-                    <option>Avoidable Spend</option>
+                    <option>Highest Confidence</option>
+                    <option>Recoverable Now</option>
+                    <option>Supported Avoidable Spend</option>
                     <option>Predicted Paid</option>
-                    <option>Most Visits</option>
-                    <option>Newest Episode</option>
+                    <option>Newest Claim</option>
                   </select>
                   <ChevronDown size={16} />
                 </label>
@@ -983,11 +969,11 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
             {scenarioError ? <Card className="scenario-service-state error"><Info size={22} /> {scenarioError}</Card> : null}
             {!scenarioLoading && !scenarioError ? (
               <>
-                <PredictionSummary summary={summary} />
+                <PredictionSummary summary={scenarioSummary} />
                 <PredictionScenarioDirectory
                   scenarios={displayedScenarios}
                   totalCount={filteredScenarios.length}
-                  onOpenScenario={(scenario) => onOpenPrediction(scenario.anchor)}
+                  onOpenScenario={(scenario) => onOpenPrediction(claimsData.find((claim) => claim.claimId === scenario.claim_id))}
                   emptyMessage="No patient episodes match the current scenario filters."
                   footer={(
                     <ClaimsTableFooter
@@ -1017,9 +1003,9 @@ function PredictionDetailPage({ claim, onBackToPredictions }) {
     let cancelled = false
     setScenario(null)
     setCaseError('')
-    fetchJson(`/api/predictions/provider-case/${encodeURIComponent(claim.number || claim.claimId)}`)
+    fetchJson(`/api/predictions/provider-case/${encodeURIComponent(claim.claimId || claim.number)}`)
       .then((payload) => {
-        if (!cancelled) setScenario(payload.item || null)
+        if (!cancelled) setScenario(payload || null)
       })
       .catch(() => {
         if (!cancelled) setCaseError('Unable to build this provider case prediction from the current claim data.')
@@ -1048,7 +1034,7 @@ function PredictionDetailPage({ claim, onBackToPredictions }) {
           Back to Predictions
         </button>
         <div className="data-stamp">
-          {scenario.totalVisitCount} related claims · {scenario.peerCount.toLocaleString()} financial peers · {scenario.confidence} confidence
+          {scenario.historical_comparison.sample_size.toLocaleString()} historical peers · {formatProbability(scenario.confidence.score)} confidence
           <RefreshCw size={15} />
         </div>
       </div>
@@ -1074,39 +1060,39 @@ function PredictionScenarioDirectory({ scenarios, totalCount, onOpenScenario, em
       {scenarios.length ? (
         <div className="scenario-card-grid">
           {scenarios.map((scenario) => (
-            <article className={`scenario-card scenario-${scenario.category}`} key={scenario.id}>
+            <article className="scenario-card scenario-workbook" key={scenario.claim_id}>
               <header className="scenario-card-header">
                 <div className="scenario-condition-icon"><ShieldCheck size={24} /></div>
                 <div>
-                  <span>{scenario.pathway.label} · {scenario.diagnosisCode}</span>
-                  <h3>{scenario.condition}</h3>
-                  <p>{scenario.patient} · {scenario.memberId}</p>
+                  <span>{scenario.episode_id} · {scenario.actual_claim_facts.diagnosis_code}</span>
+                  <h3>{scenario.actual_claim_facts.diagnosis_description}</h3>
+                  <p>{scenario.claim_id} · {scenario.member_id}</p>
                 </div>
-                <RiskBadge level={scenario.risk.level} score={scenario.risk.score} />
+                <span className="risk-badge medium">{scenario.financial_prediction_snapshot.confidence.level} · {formatProbability(scenario.financial_prediction_snapshot.confidence.score)}</span>
               </header>
 
               <div className="scenario-card-views">
                 <div>
                   <span><Hospital size={15} /> Provider</span>
-                  <strong>{scenario.provider}</strong>
-                  <small>{scenario.payer}</small>
+                  <strong>{scenario.actual_claim_facts.provider}</strong>
+                  <small>{scenario.actual_claim_facts.payer}</small>
                 </div>
                 <div>
                   <span><Banknote size={15} /> Financial forecast</span>
-                  <strong>{formatCurrency(scenario.forecast.paid)} predicted paid</strong>
-                  <small>{formatCurrency(scenario.forecast.adjustment)} predicted adjustment</small>
+                  <strong>{formatOptionalCurrency(scenario.financial_prediction_snapshot.predicted_provider_payment.value)} predicted paid</strong>
+                  <small>{formatOptionalCurrency(scenario.financial_prediction_snapshot.predicted_allowed.value)} predicted allowed</small>
                 </div>
                 <div>
                   <span><Target size={15} /> Provider opportunity</span>
-                  <strong>{scenario.risk.level} · {scenario.risk.score}% repeat risk</strong>
-                  <small>{scenario.bestSavingsPhase}</small>
+                  <strong>{formatOptionalCurrency(scenario.supported_money_summary.recoverable_now)} recoverable now</strong>
+                  <small>{scenario.supported_money_summary.best_action.stage}</small>
                 </div>
               </div>
 
               <div className="scenario-card-footer">
                 <div>
-                  <span>Likely outcome</span>
-                  <strong>{scenario.likelyOutcome}</strong>
+                  <span>Supported avoidable spend</span>
+                  <strong>{formatOptionalCurrency(scenario.supported_money_summary.potentially_avoidable_spend_supported)}</strong>
                 </div>
                 <button type="button" onClick={() => onOpenScenario?.(scenario)}>
                   Open scenario <ArrowRight size={16} />
@@ -1123,24 +1109,26 @@ function PredictionScenarioDirectory({ scenarios, totalCount, onOpenScenario, em
 }
 
 function PredictionScenarioMap({ scenario }) {
-  const selectedClaim = scenario.selectedClaim || scenario.anchor
+  const facts = scenario.actual_claim_facts
+  const summary = scenario.supported_money_summary
+  const snapshot = scenario.financial_prediction_snapshot
   const topMetrics = [
-    ['Repeat risk', `${scenario.repeatRisk.score}%`, scenario.repeatRisk.level],
-    ['Denial risk', `${scenario.denialRisk.score}%`, scenario.denialRisk.level],
-    ['Expected payment', formatCurrency(scenario.forecast.paid), `${formatCurrency(scenario.forecast.paidRange.low)}–${formatCurrency(scenario.forecast.paidRange.high)}`],
-    ['Potentially avoidable spend', formatCurrency(scenario.avoidableSpend), scenario.avoidableSpendSupported ? 'Evidence supported' : 'Insufficient evidence'],
-    ['Model confidence', `${scenario.confidenceScore}%`, `${scenario.confidence} · ${scenario.peerCount} peer episodes`],
+    ['Recoverable now', formatOptionalCurrency(summary.recoverable_now), summary.best_action.stage],
+    ['Supported avoidable spend', formatOptionalCurrency(summary.potentially_avoidable_spend_supported), 'Current evidence'],
+    ['Predicted paid', formatOptionalCurrency(snapshot.predicted_provider_payment.value), `${snapshot.peer_sample_size} historical peers`],
+    ['Future denial exposure', formatOptionalCurrency(summary.future_denial_exposure), 'Forecast kept separate'],
+    ['Model confidence', formatProbability(snapshot.confidence.score), snapshot.confidence.level],
   ]
 
   return (
     <Card className="provider-forecast-detail">
       <header className="provider-forecast-heading">
         <div>
-          <span>Provider case forecast · {scenario.episodeId}</span>
-          <h1>{scenario.condition}</h1>
-          <p>{scenario.provider} · {scenario.payer} · claim {selectedClaim.number || selectedClaim.claimId}</p>
+          <span>Provider case forecast · {scenario.episode_id}</span>
+          <h1>{facts.diagnosis_description}</h1>
+          <p>{facts.provider} · {facts.payer} · claim {scenario.claim_id}</p>
         </div>
-        <span className="priority-chip">Priority {scenario.priorityScore}/100</span>
+        <span className="priority-chip">{summary.best_action.stage}</span>
       </header>
 
       <div className="provider-forecast-metrics">
@@ -1149,36 +1137,8 @@ function PredictionScenarioMap({ scenario }) {
         ))}
       </div>
 
-      <div className="provider-forecast-sections">
-        <section>
-          <h2>Episode timeline</h2>
-          <p>{formatDate(scenario.episodeStart)}–{formatDate(scenario.episodeEnd)} · {scenario.totalVisitCount} claims · diagnosis family {scenario.diagnosisFamily}</p>
-          <div className="episode-claim-list">
-            {scenario.claims.map((claim) => (
-              <div className={claim.claimId === selectedClaim.claimId ? 'selected' : ''} key={claim.claimId}>
-                <strong>{claim.number || claim.claimId}</strong><span>{formatDate(claim.dos)}</span><span>{claim.cptCode} · {claim.cptDescription}</span><span>{claim.status}</span>
-              </div>
-            ))}
-          </div>
-        </section>
-        <section>
-          <h2>Financial forecast</h2>
-          <p>Allowed {formatCurrency(scenario.forecast.allowedRange.low)}–{formatCurrency(scenario.forecast.allowedRange.high)} · patient responsibility {formatCurrency(scenario.forecast.patientResp)} · adjustment {formatCurrency(scenario.forecast.adjustment)}</p>
-          <small>{scenario.forecast.peerHierarchy}; only earlier adjudicated peer episodes are used.</small>
-        </section>
-        <section>
-          <h2>Risk and evidence</h2>
-          <ul>{scenario.riskDrivers.map((reason) => <li key={reason}>{reason}</li>)}</ul>
-          <small>Repeat probability: 30 days {Math.round(scenario.repeatRisk.probabilities['30'] * 100)}%, 60 days {Math.round(scenario.repeatRisk.probabilities['60'] * 100)}%, 90 days {Math.round(scenario.repeatRisk.probabilities['90'] * 100)}%.</small>
-        </section>
-        <section>
-          <h2>Recommended provider actions</h2>
-          <ol>{scenario.recommendedActions.map((action) => <li key={action}>{action}</li>)}</ol>
-          <small>Recommended phase: {scenario.bestSavingsPhase}. Priority indicates administrative review order, not clinical acuity.</small>
-        </section>
-      </div>
-
-      <footer className="provider-forecast-note">{scenario.method} · Decision support only. No determination of medical necessity.</footer>
+      <div className="scenario-pathway">{scenario.scenario_map.sections.map((section) => <ScenarioMapSection key={section.step} section={section} />)}</div>
+      <footer className="provider-forecast-note">{scenario.versions.prediction_version} · Workbook-only decision support.</footer>
     </Card>
   )
 }
@@ -1225,17 +1185,52 @@ function ClaimsTableFooter({ currentPage, pageCount, pageSize, totalCount, onPag
 }
 
 function ClaimDetailPage({ claim }) {
-  const { claimsData } = useAppData()
-  const prediction = predictClaim(claim, claimsData)
-
   return (
     <>
       <div className="claim-detail-layout">
         <SelectedClaimDetail claim={claim} />
-        <PaymentForecastCard claim={claim} prediction={prediction} />
+        <WorkbookFinancialPredictionCard claim={claim} />
         <ClaimReasonCard claim={claim} />
       </div>
     </>
+  )
+}
+
+function WorkbookFinancialPredictionCard({ claim }) {
+  const [result, setResult] = useState(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let active = true
+    setResult(null)
+    setError('')
+    fetchJson(`/api/predictions/provider-case/${encodeURIComponent(claim.claimId || claim.number)}`)
+      .then((payload) => { if (active) setResult(payload) })
+      .catch((requestError) => { if (active) setError(requestError.message) })
+    return () => { active = false }
+  }, [claim.claimId, claim.number])
+
+  if (error) return <Card className="state-card">{error}</Card>
+  if (!result) return <Card className="state-card"><RefreshCw className="spin" size={18} /> Loading workbook financial prediction…</Card>
+  const prediction = result.financial_prediction_snapshot
+  const summary = result.supported_money_summary
+  return (
+    <Card className="payment-forecast-card workbook-financial-prediction">
+      <div className="forecast-header">
+        <div>
+          <span>Workbook prediction · {prediction.model_version}</span>
+          <h2>Payment Forecast & Supported Money</h2>
+          <p>{prediction.confidence.reason}</p>
+        </div>
+        <div className="workbook-confidence"><strong>{formatProbability(prediction.confidence.score)}</strong><span>{prediction.confidence.level} confidence</span></div>
+      </div>
+      <div className="forecast-money-grid">
+        <div className="forecast-money-card"><span>Predicted allowed</span><strong>{formatOptionalCurrency(prediction.predicted_allowed.value)}</strong><small>{prediction.matching_level}</small></div>
+        <div className="forecast-money-card"><span>Predicted paid</span><strong>{formatOptionalCurrency(prediction.predicted_provider_payment.value)}</strong><small>{prediction.peer_sample_size} historical references</small></div>
+        <div className="forecast-money-card"><span>Recoverable now</span><strong>{formatOptionalCurrency(summary.recoverable_now)}</strong><small>{summary.best_action.stage}</small></div>
+        <div className="forecast-money-card"><span>Supported avoidable spend</span><strong>{formatOptionalCurrency(summary.potentially_avoidable_spend_supported)}</strong><small>Future exposure excluded</small></div>
+      </div>
+    </Card>
   )
 }
 
@@ -1685,87 +1680,6 @@ function SelectedClaimDetail({ claim }) {
   )
 }
 
-function PaymentForecastCard({ prediction }) {
-  const moneyCards = [
-    { label: 'Expected Allowed', value: formatCurrency(prediction.money.predictedAllowed), note: `${prediction.money.allowedRate}% allowed rate` },
-    { label: 'Expected Paid', value: formatCurrency(prediction.money.predictedPaid), note: `Range ${formatRange(prediction.money.paidRange)}` },
-    { label: 'Patient Balance', value: formatCurrency(prediction.money.predictedPatientResp), note: `${prediction.money.patientToAllowedRate}% of allowed` },
-    { label: 'Expected Adjustment', value: formatCurrency(prediction.money.predictedAdjustment), note: `${prediction.money.adjustmentRate}% write-off` },
-  ]
-  const riskRows = [
-    ['Denial Risk', prediction.risks.denial],
-    ['Adjustment Risk', prediction.risks.adjustment],
-    ['Collection Risk', prediction.risks.collection],
-    ['COB / Forwarded Risk', prediction.risks.cob],
-    ['Repeat Claim Risk', prediction.risks.repeat],
-    ['Provider Risk', prediction.risks.provider],
-  ]
-
-  return (
-    <Card className="payment-forecast-card">
-      <div className="forecast-header">
-        <div>
-          <span>Prediction MVP</span>
-          <h2>Payment Forecast & Claim Risk</h2>
-          <p>{prediction.outcome.explanation} Confidence: {prediction.confidence}.</p>
-        </div>
-        <RiskBadge level={prediction.risks.overall.level} score={prediction.risks.overall.score} />
-      </div>
-
-      <div className="forecast-money-grid">
-        {moneyCards.map((item) => (
-          <div className="forecast-money-card" key={item.label}>
-            <span>{item.label}</span>
-            <strong>{item.value}</strong>
-            <small>{item.note}</small>
-          </div>
-        ))}
-      </div>
-
-      <div className="forecast-detail-grid">
-        <div className="forecast-risk-panel">
-          <h3>Risk Signals</h3>
-          <div className="forecast-risk-list">
-            {riskRows.map(([label, risk]) => (
-              <div key={label}>
-                <span>{label}</span>
-                <RiskBadge level={risk.level} score={risk.score} />
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="forecast-risk-panel">
-          <h3>Likely Outcome</h3>
-          <strong>{prediction.outcome.likely}</strong>
-          <p>{prediction.risks.denial.reason}</p>
-          {prediction.resubmissionSuccess ? (
-            <p>Resubmission success estimate: {prediction.resubmissionSuccess.score}%.</p>
-          ) : null}
-        </div>
-
-        <div className="forecast-risk-panel">
-          <h3>Fix Before Submit</h3>
-          <ul>
-            {prediction.fixes.map((fix) => (
-              <li key={fix}>{fix}</li>
-            ))}
-          </ul>
-        </div>
-      </div>
-
-      <div className="forecast-reasons-block">
-        <h3>Why This Prediction</h3>
-        <ul>
-          {prediction.reasons.map((reason) => (
-            <li key={reason}>{reason}</li>
-          ))}
-        </ul>
-      </div>
-    </Card>
-  )
-}
-
 function ClaimInfoPanel({ title, rows }) {
   return (
     <Card className="claim-info-panel">
@@ -2015,18 +1929,18 @@ function ProviderLlmPanel({ claim, onCasePrediction }) {
     setModalOpen(false)
   }, [claim.number, claim.claimId])
 
-  const runAnalysis = async () => {
+  const generatePrediction = async () => {
     setLoading(true)
     setError('')
     setModalOpen(true)
     try {
       const payload = await fetchJson(
-        `/api/predictions/provider-case/${encodeURIComponent(claim.number || claim.claimId)}/llm`,
+        `/api/predictions/provider-case/${encodeURIComponent(claim.claimId || claim.number)}/llm`,
         { method: 'POST' },
       )
       setResult(payload)
     } catch (requestError) {
-      setError(requestError.message || 'Provider LLM analysis is unavailable.')
+      setError(requestError.message || 'Provider financial prediction could not be loaded.')
     } finally {
       setLoading(false)
     }
@@ -2037,14 +1951,14 @@ function ProviderLlmPanel({ claim, onCasePrediction }) {
       <div className="provider-llm-header">
         <div>
           <span className="provider-llm-kicker"><Sparkles size={14} /> Groq provider assistant</span>
-          <h2>Provider LLM Analysis</h2>
-          <p>Analyses de-identified provider, payer, procedure, utilisation and payment facts for this claim episode.</p>
+          <h2>Provider Financial Prediction</h2>
+          <p>Predicts provider payment outcomes from de-identified workbook history and explains the supporting evidence.</p>
         </div>
         <div className="provider-llm-actions">
           <button className="llm-secondary-button" type="button" onClick={onCasePrediction}>View {claim.number || claim.claimId} forecast</button>
-          <button className="llm-primary-button" type="button" onClick={runAnalysis} disabled={loading}>
+          <button className="llm-primary-button" type="button" onClick={generatePrediction} disabled={loading}>
             {loading ? <RefreshCw className="spin" size={16} /> : <Sparkles size={16} />}
-            {loading ? 'Analysing…' : 'Run LLM analysis'}
+            {loading ? 'Generating…' : 'Generate Prediction'}
           </button>
         </div>
       </div>
@@ -2053,15 +1967,9 @@ function ProviderLlmPanel({ claim, onCasePrediction }) {
         <div className="llm-intro">Run a concise provider-side explanation for this exact claim. Successful results are cached for faster repeat viewing.</div>
       ) : null}
       {error ? <div className="llm-config-note error">{error}</div> : null}
-      {result && !result.configured ? (
-        <div className="llm-config-note">
-          <strong>LLM setup required</strong>
-          <span>{result.message}</span>
-        </div>
-      ) : null}
-      {result?.forecast ? <div className="llm-intro">Analysis ready for {result.claim_id}. Open the financial decision-support view to review predictions, backtest and evidence.</div> : null}
-      {result?.forecast ? <button className="llm-secondary-button" type="button" onClick={() => setModalOpen(true)}>Open Provider LLM Analysis</button> : null}
-      {modalOpen ? <ProviderLlmModal claim={claim} result={result} loading={loading} error={error} onClose={() => setModalOpen(false)} onRetry={runAnalysis} /> : null}
+      {result?.supported_money_summary ? <div className="llm-intro">Prediction ready for {result.claim_id}. Open it to review the canonical forecast, supported opportunity, pathway and workbook evidence.</div> : null}
+      {result?.supported_money_summary ? <button className="llm-secondary-button" type="button" onClick={() => setModalOpen(true)}>Open Provider Financial Prediction</button> : null}
+      {modalOpen ? <ProviderLlmModal claim={claim} result={result} loading={loading} error={error} onClose={() => setModalOpen(false)} onRetry={generatePrediction} /> : null}
     </Card>
   )
 }
@@ -2084,15 +1992,15 @@ function ProviderLlmModal({ claim, result, loading, error, onClose, onRetry }) {
         <header className="provider-llm-modal-header">
           <div>
             <span className="provider-llm-kicker"><Sparkles size={14} /> Groq provider assistant</span>
-            <h2 id="provider-llm-modal-title">Provider LLM Analysis</h2>
+            <h2 id="provider-llm-modal-title">Provider Financial Prediction</h2>
             <p>{claim.number || claim.claimId} · Provider financial decision support</p>
           </div>
-          <button className="provider-llm-close" type="button" aria-label="Close Provider LLM Analysis" onClick={onClose}><X size={20} /></button>
+          <button className="provider-llm-close" type="button" aria-label="Close Provider Financial Prediction" onClick={onClose}><X size={20} /></button>
         </header>
         <div className="provider-llm-modal-body">
           {loading ? <div className="llm-modal-state"><RefreshCw className="spin" size={22} /> Calculating provider forecast and grounded explanation…</div> : null}
-          {!loading && error ? <div className="llm-config-note error"><span>{error}</span><button className="llm-primary-button" type="button" onClick={onRetry}>Retry analysis</button></div> : null}
-          {!loading && result?.forecast ? <ProviderMoneyLlmResult result={result} /> : null}
+          {!loading && error ? <div className="llm-config-note error"><span>{error}</span><button className="llm-primary-button" type="button" onClick={onRetry}>Retry prediction</button></div> : null}
+          {!loading && result?.supported_money_summary ? <ProviderMoneyLlmResult result={result} /> : null}
         </div>
       </div>
     </div>,
@@ -2100,204 +2008,240 @@ function ProviderLlmModal({ claim, result, loading, error, onClose, onRetry }) {
   )
 }
 
-function ScenarioMapData({ content }) {
-  if (Array.isArray(content)) return <ul>{content.map((item, index) => <li key={`${index}-${typeof item === 'object' ? JSON.stringify(item) : String(item)}`}>{item && typeof item === 'object' ? <ScenarioMapData content={item} /> : String(item)}</li>)}</ul>
-  return <dl>{Object.entries(content || {}).map(([key, value]) => {
-    const label = key.replaceAll('_', ' ')
-    if (value && typeof value === 'object' && !Array.isArray(value)) return <div className="scenario-map-nested" key={key}><dt>{label}</dt><dd><ScenarioMapData content={value} /></dd></div>
-    const currency = typeof value === 'number' && /payment|paid|allowed|responsibility|adjustment|exposure|risk|spend|amount|charge|opportunity/.test(key) && !/rate|probability/.test(key)
-    const probability = typeof value === 'number' && /probability|rate/.test(key)
-    return <div key={key}><dt>{label}</dt><dd>{currency ? formatOptionalCurrency(value) : probability ? formatProbability(value) : Array.isArray(value) ? <ScenarioMapData content={value} /> : value === null ? 'Not enough evidence to estimate reliably.' : typeof value === 'boolean' ? (value ? 'Yes' : 'No') : String(value)}</dd></div>
-  })}</dl>
+const CATEGORY_LABELS = {
+  underpayment: 'Payment underpayment',
+  correctable_denial: 'Correctable denial',
+  excessive_adjustment: 'Excessive adjustment',
+  patient_balance: 'Patient balance',
+  authorization: 'Authorization',
+  referral: 'Referral',
+  duplicate_or_correction: 'Duplicate or correction',
+  potentially_avoidable_episode_spend: 'Potentially avoidable episode spend',
 }
 
-function ProviderSavingsScenario({ content }) {
-  const action = content?.best_next_provider_action || {}
-  const validated = content?.validated_real_opportunity || {}
-  const synthetic = content?.synthetic_demonstration_opportunity || {}
-  const exposure = content?.future_financial_exposure || {}
-  const avoidable = content?.potentially_avoidable_spend || {}
+const MONEY_ITEM_KEYS = new Set([
+  'charge', 'allowed', 'paid', 'patient_responsibility', 'adjustment',
+  'expected_reimbursement', 'contract_allowed', 'patient_payment_received',
+  'predicted_allowed', 'predicted_paid', 'recoverable_now',
+  'predicted_provider_payment', 'predicted_patient_responsibility',
+  'predicted_contractual_adjustment', 'actual_paid', 'recovered_amount',
+  'outstanding_patient_balance',
+  'supported_avoidable_spend', 'future_denial_exposure', 'future_repeat_payment_exposure',
+  'amount_addressed',
+])
+const PROBABILITY_ITEM_KEYS = new Set(['denial_probability', 'repeat_probability_30d', 'repeat_probability_60d', 'repeat_probability_90d'])
 
-  return (
-    <div className="scenario-savings-content">
-      <div className="scenario-action-hero">
-        <span>Recommended next step</span>
-        <strong>{action.stage || 'Routine monitoring'}</strong>
-        <p>{action.action || action.reason}</p>
-        <div>
-          <small>Owner: {action.owner || 'Provider operations'}</small>
-          <small>Confidence: {formatProbability(action.confidence)}</small>
-        </div>
-      </div>
-      <div className="scenario-savings-metrics">
-        <div className="validated">
-          <span>Validated recovery</span>
-          <strong>{validated.available ? formatOptionalCurrency(validated.amount) : 'None identified'}</strong>
-          <small>Original claims evidence</small>
-        </div>
-        <div className="synthetic">
-          <span>Synthetic demo opportunity</span>
-          <strong>{synthetic.available ? formatOptionalCurrency(synthetic.amount) : 'None identified'}</strong>
-          <small>Demonstration only</small>
-        </div>
-        <div className="forecast">
-          <span>Denial exposure</span>
-          <strong>{formatOptionalCurrency(exposure.denial_revenue_exposure ?? exposure.expected_denial_revenue_exposure)}</strong>
-          <small>Forecast — not savings</small>
-        </div>
-        <div className="forecast">
-          <span>Repeat-payment exposure</span>
-          <strong>{formatOptionalCurrency(exposure.repeat_provider_payment_exposure ?? exposure.expected_repeat_provider_payment_exposure)}</strong>
-          <small>Forecast — not savings</small>
-        </div>
-        <div className="avoidable">
-          <span>Avoidable repeat spend</span>
-          <strong>{avoidable.available ? formatOptionalCurrency(avoidable.amount) : 'Not supported'}</strong>
-          <small>{avoidable.available ? 'Evidence threshold met' : 'More related episode evidence required'}</small>
-        </div>
-      </div>
-    </div>
-  )
+function readableLabel(value) {
+  return String(value || '').replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
-function CostLeakageRiskList({ risks }) {
-  if (!Array.isArray(risks) || risks.length === 0) return <p className="scenario-empty-state">No supported cost-leakage risks were identified.</p>
-
+function ScenarioMapSection({ section }) {
+  const items = section.items || {}
+  if (section.step === 6) {
+    return (
+      <article className="scenario-path-step calculation-step">
+        <header><b>{section.step}</b><strong>{section.title}</strong></header>
+        <div className="scenario-calculations">
+          {items.map((item) => (
+            <div key={item.type || item.category}>
+              <span>{item.label || CATEGORY_LABELS[item.category] || readableLabel(item.category)}</span>
+              <strong>{formatOptionalCurrency(item.amount)}</strong>
+              <code>{item.formula}</code>
+              <small>{item.reason}</small>
+            </div>
+          ))}
+        </div>
+      </article>
+    )
+  }
+  if (section.step === 7) {
+    return (
+      <article className="scenario-path-step action-step">
+        <header><b>{section.step}</b><strong>{section.title}</strong></header>
+        <div className="scenario-action-card">
+          <span>{items.stage}</span>
+          <strong>{items.action}</strong>
+          <p>{items.reason}</p>
+          <small>Owner: {items.owner} · Amount addressed: {formatOptionalCurrency(items.amount_addressed)} · Confidence: {formatProbability(items.confidence)}</small>
+          <small>Evidence: {(items.evidence_claim_ids || []).join(', ')}</small>
+        </div>
+      </article>
+    )
+  }
+  if (section.step === 8) {
+    return (
+      <article className="scenario-path-step trace-step">
+        <header><b>{section.step}</b><strong>{section.title}</strong></header>
+        <dl className="scenario-purpose-grid">
+          <div><dt>Workbook location</dt><dd>{items.workbook_sheet} · row {items.workbook_row}</dd></div>
+          <div><dt>Claim evidence</dt><dd>{(items.claim_ids || []).join(', ')}</dd></div>
+          <div><dt>Reason codes</dt><dd>{(items.reason_codes || []).join(', ')}</dd></div>
+          <div><dt>Fields used</dt><dd>{(items.fields_used || []).join(', ')}</dd></div>
+          <div><dt>Workbook hash</dt><dd><code>{items.workbook_hash}</code></dd></div>
+        </dl>
+      </article>
+    )
+  }
   return (
-    <div className="cost-leakage-list">
-      {risks.map((risk, index) => (
-        <div className={`cost-leakage-item ${risk.data_source === 'synthetic' ? 'synthetic' : 'forecast'}`} key={`${risk.code || risk.title}-${index}`}>
-          <div>
-            <strong>{risk.title}</strong>
-            <span>{risk.data_source === 'synthetic' ? 'Synthetic demo' : 'Model forecast'}</span>
+    <article className={`scenario-path-step step-${section.step}`}>
+      <header><b>{section.step}</b><strong>{section.title}</strong></header>
+      <dl className="scenario-purpose-grid">
+        {Object.entries(items).map(([key, value]) => (
+          <div key={key}>
+            <dt>{readableLabel(key)}</dt>
+            <dd>{MONEY_ITEM_KEYS.has(key) ? formatOptionalCurrency(value) : PROBABILITY_ITEM_KEYS.has(key) ? formatProbability(value) : String(value ?? '')}</dd>
           </div>
-          <p>{risk.evidence}</p>
-        </div>
-      ))}
-    </div>
+        ))}
+      </dl>
+    </article>
   )
 }
 
-function ProviderMoneyLlmResult({ result }) {
-  const forecast = result.forecast || {}
-  const opportunity = result.provider_financial_opportunity_summary || {}
-  const scenario = result.provider_money_scenario_map || {}
-  const basis = result.prediction_basis || {}
-  const confidence = forecast.confidence || {}
-  const evidence = Array.isArray(result.evidence_used) ? result.evidence_used : []
-  const savings = result.where_provider_money_can_be_saved || {}
-  const currentPerformance = savings.current_claim_performance || savings.historical_comparison || {}
-  const performanceMetrics = currentPerformance.metrics || {}
-  const validatedReal = savings.validated_real_savings || {}
-  const syntheticOpportunity = savings.synthetic_demo_opportunity || {}
-  const futureExposure = savings.future_exposure || {}
-  const avoidableSpend = savings.avoidable_spend || {}
-  const bestAction = savings.best_action || {}
-  const provenance = savings.data_provenance || result.data_provenance || {}
-  const syntheticDemo = provenance.data_mode === 'synthetic_demo'
-  const patientBalanceDemo = (syntheticOpportunity.breakdown || []).find((item) => item.type === 'patient_balance')
-  const signedCurrency = (value) => Number.isFinite(value) ? `${value > 0 ? '+' : value < 0 ? '−' : ''}${formatOptionalCurrency(Math.abs(value))}` : 'Unavailable'
+function NonActionableEvidence({ items }) {
+  return (
+    <details className="non-actionable-evidence">
+      <summary>Why Other Actions Were Not Selected <span>{items.length}</span></summary>
+      <div className="non-actionable-list">
+        {items.map((item) => (
+          <article key={item.type}>
+            <header><strong>{item.label}</strong><small>{item.reason_code}</small></header>
+            <p>{item.reason}</p>
+            <dl>
+              {(item.evidence || []).map((evidence) => (
+                <div key={evidence.field}><dt>{readableLabel(evidence.field)}</dt><dd>{evidence.display_value}</dd></div>
+              ))}
+              <div><dt>Action selected</dt><dd>No</dd></div>
+            </dl>
+            {item.formula ? <code>{item.formula}</code> : null}
+          </article>
+        ))}
+      </div>
+    </details>
+  )
+}
+
+export function ProviderMoneyLlmResult({ result }) {
+  const summary = result.supported_money_summary || {}
+  const action = summary.best_action || {}
+  const snapshot = result.financial_prediction_snapshot || {}
+  const actual = result.actual_claim_facts || {}
+  const supported = result.supported_financial_opportunities || []
+  const primaryOpportunity = supported[0]
+  const nonActionable = result.non_actionable_evidence || []
+  const basis = result.historical_prediction_basis || {}
+  const sections = result.scenario_map?.sections || []
+  const rag = result.rag || {}
+  const explanation = result.prediction_explanation || result.explanation || {}
   return (
     <div className="provider-llm-workspace">
       <main className="provider-analysis-scroll">
         <div className="provider-llm-result provider-money-result">
-          {syntheticDemo ? <div className="synthetic-data-banner" role="note"><strong>Synthetic enrichment data is active.</strong><span>Savings and recovery recommendations are for demonstration only and must not be used for real billing decisions.</span><small>Original claim values remain authoritative · Source: {provenance.source_workbook}</small></div> : null}
-          <section className="llm-wide-section financial-opportunity-summary">
-        <div className="llm-section-heading"><span>Provider Financial Opportunity Summary</span><small>{opportunity.best_savings_phase || 'insufficient evidence'}</small></div>
-        <div className="financial-opportunity-grid">
-          <article><span>Expected provider payment</span><strong>{formatOptionalCurrency(opportunity.expected_provider_payment)}</strong></article>
-          <article><span>Expected contractual adjustment</span><strong>{formatOptionalCurrency(opportunity.expected_contractual_adjustment)}</strong><small>Not automatically recoverable</small></article>
-          <article><span>Expected denial revenue exposure</span><strong>{formatOptionalCurrency(opportunity.expected_denial_revenue_exposure)}</strong></article>
-          <article><span>Expected repeat payment exposure</span><strong>{formatOptionalCurrency(opportunity.expected_repeat_provider_payment_exposure)}</strong></article>
-          <article><span>Validated real savings</span><strong>{validatedReal.available ? formatOptionalCurrency(validatedReal.amount) : 'Not identified'}</strong></article>
-          <article className="synthetic"><span>Synthetic demo opportunity</span><strong>{syntheticOpportunity.available ? formatOptionalCurrency(syntheticOpportunity.amount) : 'Not identified'}</strong><small>Dummy_Enrichment only</small></article>
-          <article><span>Best next provider action</span><strong>{bestAction.stage || 'Routine monitoring'}</strong></article>
-        </div>
-        <p>{bestAction.reason || opportunity.supporting_reason}</p><small>Owner: {bestAction.owner || opportunity.responsible_operational_team} · Evidence: {(bestAction.affected_claim_ids || opportunity.affected_claim_ids || []).join(', ')}</small>
+          <section className="llm-wide-section financial-prediction-snapshot">
+            <div className="llm-section-heading"><span>Financial Prediction Snapshot</span><small>{snapshot.model_version}</small></div>
+            <div className="prediction-primary-grid">
+              <article><span>Predicted provider payment</span><strong>{formatOptionalCurrency(snapshot.predicted_provider_payment?.value)}</strong><small>{formatPredictionRange(snapshot.predicted_provider_payment)}</small></article>
+              <article><span>Predicted contractual adjustment</span><strong>{formatOptionalCurrency(snapshot.predicted_contractual_adjustment?.value)}</strong><small>{formatPredictionRange(snapshot.predicted_contractual_adjustment)}</small></article>
+              <article><span>Predicted denial exposure</span><strong>{formatOptionalCurrency(snapshot.predicted_denial_revenue_exposure)}</strong><small>{formatProbability(snapshot.denial_probability)} probability</small></article>
+              <article><span>Predicted repeat-payment exposure</span><strong>{formatOptionalCurrency(snapshot.predicted_repeat_payment_exposure)}</strong><small>{formatProbability(snapshot.repeat_probability_90d)} at 90 days</small></article>
+            </div>
+            <dl className="prediction-detail-grid">
+              <div><dt>Predicted allowed</dt><dd>{formatOptionalCurrency(snapshot.predicted_allowed?.value)}</dd><small>{formatPredictionRange(snapshot.predicted_allowed)}</small></div>
+              <div><dt>Predicted patient responsibility</dt><dd>{formatOptionalCurrency(snapshot.predicted_patient_responsibility?.value)}</dd><small>{formatPredictionRange(snapshot.predicted_patient_responsibility)}</small></div>
+              <div><dt>30-day repeat probability</dt><dd>{formatProbability(snapshot.repeat_probability_30d)}</dd></div>
+              <div><dt>60-day repeat probability</dt><dd>{formatProbability(snapshot.repeat_probability_60d)}</dd></div>
+              <div><dt>90-day repeat probability</dt><dd>{formatProbability(snapshot.repeat_probability_90d)}</dd></div>
+              <div><dt>Model confidence</dt><dd>{formatProbability(snapshot.confidence?.score)} · {snapshot.confidence?.level}</dd></div>
+              <div><dt>Prediction method</dt><dd>{snapshot.prediction_method}</dd></div>
+              <div><dt>Calculation version</dt><dd>{snapshot.calculation_version}</dd></div>
+            </dl>
           </section>
 
           <section className="llm-wide-section provider-savings-section">
-        <div className="llm-section-heading"><span>Where Provider Money Can Be Saved</span><small>Recommended action, opportunity and forecast exposure</small></div>
+            <div className="llm-section-heading"><span>Supported Financial Opportunity</span><small>{supported.length} positive opportunity category</small></div>
+            {primaryOpportunity ? (
+              <article className="supported-opportunity-hero">
+                <span>{primaryOpportunity.label}</span>
+                <strong>{formatOptionalCurrency(primaryOpportunity.amount)}</strong>
+                <dl>
+                  {(primaryOpportunity.evidence || []).map((item) => (
+                    <div key={item.field}><dt>{readableLabel(item.field)}</dt><dd>{item.display_value}</dd></div>
+                  ))}
+                </dl>
+                <p>{primaryOpportunity.reason}</p>
+                <code>{primaryOpportunity.formula}</code>
+                <small>{primaryOpportunity.reason_code} · Evidence: {(primaryOpportunity.evidence_fields || []).join(', ')}</small>
+              </article>
+            ) : (
+              <p className="supported-opportunity-zero">Workbook evidence selected no positive financial action for this claim.</p>
+            )}
+            {supported.length > 1 ? (
+              <div className="additional-supported-opportunities">
+                {supported.slice(1).map((item) => <div key={item.type}><span>{item.label}</span><strong>{formatOptionalCurrency(item.amount)}</strong><small>{item.reason}</small></div>)}
+              </div>
+            ) : null}
+            <div className="best-action-card">
+              <span>Best Provider Action</span><strong>{action.stage}</strong><p>{action.action}</p><p>{action.reason}</p>
+              <div className="savings-action-meta"><small>Owner: {action.owner}</small><small>Amount addressed: {formatOptionalCurrency(action.amount_addressed)}</small><small>Confidence: {formatProbability(action.confidence)}</small></div>
+            </div>
+            <NonActionableEvidence items={nonActionable} />
+          </section>
 
-        <div className="savings-action-callout primary-action">
-          <span>Best Next Provider Action</span>
-          <strong>{bestAction.stage || 'Pre-submission validation'}</strong>
-          <p>{bestAction.action}</p>
-          <p>{bestAction.reason}</p>
-          <div className="savings-action-meta">
-            <small>Owner: {bestAction.owner || 'Provider operations'}</small>
-            <small>Confidence: {formatProbability(bestAction.confidence)}</small>
-            <small>Claims: {(bestAction.affected_claim_ids || []).join(', ') || 'Current claim'}</small>
-          </div>
-        </div>
+          <section className="llm-wide-section actual-predicted-section">
+            <div className="llm-section-heading"><span>Actual vs Predicted</span><small>Workbook result and model forecast remain separate</small></div>
+            <div className="actual-predicted-columns">
+              <article><h3>Actual Claim Result</h3><dl><div><dt>Claim status</dt><dd>{actual.claim_status}</dd></div><div><dt>Charge</dt><dd>{formatOptionalCurrency(actual.charge)}</dd></div><div><dt>Allowed</dt><dd>{formatOptionalCurrency(actual.allowed)}</dd></div><div><dt>Paid</dt><dd>{formatOptionalCurrency(actual.paid)}</dd></div><div><dt>Patient responsibility</dt><dd>{formatOptionalCurrency(actual.patient_responsibility)}</dd></div><div><dt>Adjustment</dt><dd>{formatOptionalCurrency(actual.adjustment)}</dd></div></dl></article>
+              <article><h3>Financial Prediction</h3><dl><div><dt>Predicted allowed</dt><dd>{formatOptionalCurrency(snapshot.predicted_allowed?.value)}</dd></div><div><dt>Predicted provider payment</dt><dd>{formatOptionalCurrency(snapshot.predicted_provider_payment?.value)}</dd></div><div><dt>Predicted patient responsibility</dt><dd>{formatOptionalCurrency(snapshot.predicted_patient_responsibility?.value)}</dd></div><div><dt>Predicted adjustment</dt><dd>{formatOptionalCurrency(snapshot.predicted_contractual_adjustment?.value)}</dd></div><div><dt>Denial probability</dt><dd>{formatProbability(snapshot.denial_probability)}</dd></div><div><dt>90-day repeat probability</dt><dd>{formatProbability(snapshot.repeat_probability_90d)}</dd></div></dl></article>
+            </div>
+          </section>
 
-        <div className="savings-subheading"><strong>Opportunity status</strong><small>Validated, synthetic and potential values are kept separate</small></div>
-        <div className="savings-category-grid">
-          <article><span>Actual current-claim recovery</span><strong>{validatedReal.available ? formatOptionalCurrency(validatedReal.amount) : 'Not identified'}</strong><small>Source: Claims_Original</small><p>{validatedReal.reason}</p></article>
-          <article className="synthetic"><span>Synthetic demo opportunity</span><strong>{syntheticOpportunity.available ? formatOptionalCurrency(syntheticOpportunity.amount) : 'Not identified'}</strong><small>Source: Dummy_Enrichment</small><p>{syntheticOpportunity.warning}</p>{patientBalanceDemo ? <details className="synthetic-opportunity-details"><summary>View demonstration evidence</summary><dl><div><dt>Outstanding balance</dt><dd>{formatOptionalCurrency(patientBalanceDemo.synthetic_outstanding_balance)}</dd></div><div><dt>Aging bucket</dt><dd>{patientBalanceDemo.synthetic_aging_bucket}</dd></div><div><dt>Collection status</dt><dd>{patientBalanceDemo.synthetic_collection_status}</dd></div></dl></details> : null}</article>
-          <article><span>Potentially avoidable spend</span><strong>{avoidableSpend.available ? formatOptionalCurrency(avoidableSpend.amount) : 'Not calculated'}</strong><small>{avoidableSpend.reason}</small></article>
-        </div>
-
-        <article className="savings-exposure-card">
-          <header><strong>Future Financial Exposure</strong><small>{futureExposure.label}</small></header>
-          <div className="future-exposure-grid">
-            <div title="Denial probability multiplied by predicted provider payment."><span>Denial revenue exposure</span><strong>{formatOptionalCurrency(futureExposure.denial_revenue_exposure ?? futureExposure.expected_denial_revenue_exposure)}</strong><small>{formatProbability(futureExposure.denial_probability)} × predicted paid</small></div>
-            <div title="Shared 90-day repeat probability multiplied by predicted allowed."><span>Repeat allowed exposure</span><strong>{formatOptionalCurrency(futureExposure.repeat_allowed_exposure ?? futureExposure.expected_repeat_allowed_exposure)}</strong><small>{formatProbability(futureExposure.repeat_probability_90d)} × predicted allowed</small></div>
-            <div title="Shared 90-day repeat probability multiplied by predicted provider payment."><span>Repeat provider-payment exposure</span><strong>{formatOptionalCurrency(futureExposure.repeat_provider_payment_exposure ?? futureExposure.expected_repeat_provider_payment_exposure)}</strong><small>{formatProbability(futureExposure.repeat_probability_90d)} × predicted paid</small></div>
-          </div>
-        </article>
-
-        <article className="savings-performance-card">
-          <header><strong>Current Claim Performance vs Historical Claims</strong><small>{currentPerformance.matched_claim_count || 0} matched claim(s) · {currentPerformance.match_level || 'Insufficient matched history'}</small></header>
-          <div className="performance-variance-grid">
-            {Object.entries(performanceMetrics).map(([key, metric]) => <div key={key} className={metric.variance_status || 'unavailable'}><span>{metric.label}</span><strong>{signedCurrency(metric.related_dollar_variance)}</strong><small>{metric.variance_label}</small><small>{formatProbability(metric.actual_rate)} actual · {formatProbability(metric.historical_median_rate)} historical</small></div>)}
-          </div>
-          <p>{currentPerformance.conclusion}</p>
-        </article>
+          <section className="llm-wide-section historical-prediction-basis">
+            <div className="llm-section-heading"><span>Historical Prediction Basis</span><small>Cutoff {basis.cutoff_date}</small></div>
+            <dl className="llm-facts-grid"><div><dt>Match level</dt><dd>{basis.match_level}</dd></div><div><dt>Peer sample</dt><dd>{basis.sample_size}</dd></div><div><dt>Earlier member claims</dt><dd>{basis.earlier_same_member_claims}</dd></div><div><dt>Earlier same-CPT claims</dt><dd>{basis.earlier_same_cpt_claims}</dd></div><div><dt>Previous denials</dt><dd>{basis.previous_denials}</dd></div><div><dt>Consistency check</dt><dd>{result.consistency_check?.passed ? 'Passed' : ''}</dd></div></dl>
           </section>
 
           <section className="llm-wide-section scenario-map-section">
-        <div className="llm-section-heading"><span>Provider Money Scenario Map</span><small>Generated from this claim and earlier history</small></div>
-        <div className="provider-money-map">
-          {scenario.provider_claim_payment_prediction ? <article className="provider-payment-panel"><strong>Provider Claim and Payment Prediction</strong><ScenarioMapData content={scenario.provider_claim_payment_prediction} /></article> : null}
-          {scenario.where_provider_money_may_be_saved ? <article className="provider-savings-panel"><strong>Where Provider Money Can Be Saved</strong><ProviderSavingsScenario content={scenario.where_provider_money_may_be_saved} /></article> : null}
-          {scenario.cost_leakage_risks?.length ? <article className="cost-leakage-panel"><strong>Cost-Leakage Risks</strong><small className="panel-subtitle">Supported prediction and synthetic signals</small><CostLeakageRiskList risks={scenario.cost_leakage_risks} /></article> : null}
-        </div>
+            <div className="llm-section-heading"><span>Provider Money Scenario Map</span><small>History → actual payment → prediction → supported action</small></div>
+            <div className="scenario-pathway">{sections.map((section) => <ScenarioMapSection key={section.step} section={section} />)}</div>
           </section>
 
           <section className="llm-wide-section prediction-basis-section">
-        <div className="llm-section-heading"><span>Prediction Basis and Peer Evidence</span><small>Cutoff {basis.prediction_cutoff_date}</small></div>
-        <dl className="llm-facts-grid"><div><dt>Earlier member claims</dt><dd>{basis.member_prior_claims_used || 0}</dd></div><div><dt>Earlier same-CPT claims</dt><dd>{basis.member_prior_same_cpt_claims || 0}</dd></div><div><dt>External financial peers</dt><dd>{basis.peer_claims_used || 0}</dd></div><div><dt>Peer episodes</dt><dd>{basis.peer_episodes_used || 0}</dd></div><div><dt>Matching level</dt><dd>{basis.matching_level}</dd></div><div><dt>Fallback level</dt><dd>{basis.fallback_level}</dd></div><div><dt>Model version</dt><dd>{basis.model_version}</dd></div><div><dt>Confidence</dt><dd>{formatProbability(confidence.score)} · {confidence.level}</dd></div></dl>
-        <p className="confidence-explanation"><strong>Confidence drivers:</strong> {(confidence.drivers || []).join(', ') || 'None recorded'}. <strong>Penalties:</strong> {(confidence.penalties || []).join(', ') || 'None recorded'}.</p>
-        <div className="llm-evidence-list">{evidence.map((item) => <article key={item.claim_id}><strong>Claim {item.claim_id}</strong><small>{formatDate(item.service_date)} · CPT {item.cpt_code} · {item.claim_status}</small><small>Actual allowed {formatOptionalCurrency(item.actual_allowed)} · Actual paid {formatOptionalCurrency(item.actual_paid)}</small></article>)}</div>
+            <div className="llm-section-heading"><span>Prediction Explanation</span><small>RAG index {rag.index_version}</small></div>
+            {explanation.sections?.length ? (
+              <div className="layman-explanation">
+                {explanation.sections.map((section, index) => (
+                  <article key={section.title}>
+                    <span>{index + 1}</span>
+                    <div><strong>{section.title}</strong><p>{section.body}</p></div>
+                  </article>
+                ))}
+              </div>
+            ) : <p>{explanation.summary}</p>}
+            <div className="llm-evidence-list">{(rag.retrieved_chunks || []).map((chunk, index) => <article key={`${chunk.source_sheet}-${chunk.source_row}-${index}`}><strong>{chunk.source_sheet} · row {chunk.source_row}</strong><small>Claim {chunk.claim_id || 'supporting reference'} · {chunk.reason_code || 'workbook context'}</small><small>Similarity {Number(chunk.similarity || 0).toFixed(3)} · Fields: {(chunk.fields_used || []).join(', ')}</small></article>)}</div>
           </section>
         </div>
       </main>
-      <ProviderPredictionChat key={`${basis.source_csv_hash || 'source'}.${basis.model_version || 'model'}.${basis.calculation_version || 'calculation'}`} result={result} />
+      <ProviderPredictionChat key={`${result.source?.workbook_hash}.${result.financial_result_hash}`} result={result} />
     </div>
   )
 }
 
 function ChatFinancialExplanation({ explanation }) {
   if (!explanation) return null
-  const validated = explanation.validated_real_savings || {}
-  const synthetic = explanation.synthetic_demo_opportunity || {}
-  const future = explanation.future_financial_exposure || {}
-  const avoidable = explanation.potentially_avoidable_spend || {}
   const action = explanation.best_action || {}
   return (
     <section className="chat-financial-explanation">
-      <strong>Savings and Financial Explanation</strong>
+      <strong>Prediction and Money Breakdown</strong>
       <div className="chat-financial-grid">
-        <article><span>Validated real savings</span><b>{validated.available ? formatOptionalCurrency(validated.amount) : 'Not identified'}</b><small>Claims_Original</small></article>
-        {synthetic.available ? <article className="synthetic"><span>Synthetic demo opportunity</span><b>{formatOptionalCurrency(synthetic.amount)}</b><small>{synthetic.warning}</small></article> : null}
-        <article><span>Expected denial exposure</span><b>{formatOptionalCurrency(future.denial_exposure)}</b><small>Denial probability × predicted paid</small></article>
-        <article><span>Expected repeat-service exposure</span><b>{formatOptionalCurrency(future.repeat_provider_payment_exposure)}</b><small>90-day repeat probability × predicted paid</small></article>
-        <article><span>Potentially avoidable spend</span><b>{avoidable.available ? formatOptionalCurrency(avoidable.amount) : 'Not identified'}</b><small>{avoidable.reason}</small></article>
-        <article><span>Best savings stage</span><b>{action.stage || 'Routine monitoring'}</b><small>{action.action}</small></article>
+        <article><span>Recoverable now</span><b>{formatOptionalCurrency(explanation.recoverable_now)}</b></article>
+        <article><span>Supported avoidable spend</span><b>{formatOptionalCurrency(explanation.potentially_avoidable_spend_supported)}</b></article>
+        <article><span>Predicted provider payment</span><b>{formatOptionalCurrency(explanation.predicted_provider_payment?.value)}</b><small>{formatPredictionRange(explanation.predicted_provider_payment)}</small></article>
+        <article><span>Predicted contractual adjustment</span><b>{formatOptionalCurrency(explanation.predicted_contractual_adjustment?.value)}</b><small>{formatPredictionRange(explanation.predicted_contractual_adjustment)}</small></article>
+        <article><span>Future denial exposure</span><b>{formatOptionalCurrency(explanation.future_denial_exposure)}</b><small>Forecast only</small></article>
+        <article><span>Future repeat-payment exposure</span><b>{formatOptionalCurrency(explanation.future_repeat_payment_exposure)}</b><small>Forecast only</small></article>
+        <article><span>Best action</span><b>{action.stage}</b><small>{action.action}</small></article>
       </div>
-      {explanation.calculation_basis?.length ? <details><summary>Calculation formula, claims and samples used</summary>{explanation.calculation_basis.map((item) => <p key={item.metric}><b>{item.metric?.replaceAll('_', ' ')}</b>: {item.formula} {Number.isFinite(item.value) ? `= ${formatOptionalCurrency(item.value)}` : ''}</p>)}<p>Evidence claims: {(explanation.evidence_claim_ids || []).join(', ') || 'None'}</p></details> : null}
-      <footer>Confidence: {formatProbability(explanation.confidence?.score)} · Data source: {explanation.data_source || 'original_only'}{explanation.limitations?.length ? ` · ${explanation.limitations[0]}` : ''}</footer>
+      {explanation.formula_trace?.length ? <details><summary>Formula and workbook evidence</summary>{explanation.formula_trace.map((item) => <p key={item.category}><b>{readableLabel(item.category)}</b>: {item.formula} = {formatOptionalCurrency(item.amount)} · {item.reason_code}</p>)}<p>Evidence claims: {(explanation.evidence_claim_ids || []).join(', ')}</p><p>Evidence fields: {(explanation.evidence_fields || []).join(', ')}</p></details> : null}
+      <footer>Confidence: {formatProbability(explanation.confidence?.score)}{explanation.limitations?.length ? ` · ${explanation.limitations[0]}` : ''}</footer>
     </section>
   )
 }
@@ -2305,7 +2249,7 @@ function ChatFinancialExplanation({ explanation }) {
 function ProviderPredictionChat({ result }) {
   const claimId = result.claim_id
   const episodeId = result.episode_id
-  const predictionIdentity = [result.prediction_basis?.source_csv_hash, result.prediction_basis?.model_version, result.prediction_basis?.calculation_version].filter(Boolean).join('.') || 'current'
+  const predictionIdentity = [result.source?.workbook_hash, result.financial_result_hash, result.source?.calculation_version, result.source?.rag_index_version, result.source?.groq_prompt_version].filter(Boolean).join('.') || 'current'
   const storageKey = `payerpayee.provider-chat.${claimId}.${episodeId}.${predictionIdentity}`
   const conversationId = useMemo(() => `${claimId}-${episodeId}-${Date.now().toString(36)}`, [claimId, episodeId])
   const [messages, setMessages] = useState(() => {
@@ -2342,7 +2286,7 @@ function ProviderPredictionChat({ result }) {
         if (resultsRef.current) resultsRef.current.scrollTop = resultsRef.current.scrollHeight
       })
     } catch (requestError) {
-      setError(requestError.message || 'Chat response is unavailable.')
+      setError(requestError.message || 'Chat response could not be loaded.')
     } finally { setLoading(false) }
   }
   const clear = () => { setMessages([]); setError('') }
@@ -2352,7 +2296,7 @@ function ProviderPredictionChat({ result }) {
       <header className="provider-chat-header">
         <div className="provider-chat-heading">
           <span className="provider-chat-icon"><Sparkles size={18} /></span>
-          <div><strong>Provider assistant</strong><small>Ask about this claim analysis</small></div>
+          <div><strong>Provider assistant</strong><small>Ask about this claim prediction</small></div>
         </div>
         {messages.length ? <button className="provider-chat-clear" type="button" onClick={clear}>Clear chat</button> : null}
       </header>
@@ -2360,7 +2304,7 @@ function ProviderPredictionChat({ result }) {
         {!messages.length && !loading ? (
           <div className="provider-chat-empty">
             <span><Sparkles size={20} /></span>
-            <strong>Explore the analysis</strong>
+            <strong>Explore the prediction</strong>
             <p>Ask about predicted payments, savings opportunities, risk exposure, or the evidence behind this result.</p>
           </div>
         ) : null}
@@ -2373,130 +2317,6 @@ function ProviderPredictionChat({ result }) {
         <small>Enter to send · Shift+Enter for a new line</small>
       </footer>
     </aside>
-  )
-}
-
-export function ProviderLlmResult({ result }) {
-  const forecast = result.forecast || {}
-  const facts = result.actual_claim_facts || {}
-  const analysis = result.llm_analysis || result.analysis || {}
-  const outcome = forecast.predicted_claim_outcome || {}
-  const denial = forecast.denial_risk || {}
-  const repeat = forecast.repeat_service_risk || {}
-  const confidence = forecast.confidence || {}
-  const avoidable = forecast.potentially_avoidable_spend || {}
-  const basis = result.prediction_basis || {}
-  const riskDrivers = Array.isArray(result.risk_drivers) ? result.risk_drivers : []
-  const actions = Array.isArray(result.recommended_actions) ? result.recommended_actions : []
-  const evidence = Array.isArray(result.evidence_used) ? result.evidence_used : []
-  const limitations = Array.isArray(result.limitations) ? result.limitations : []
-  const snapshotCards = [
-    { label: 'Predicted claim outcome', value: outcome.display_value || 'Unavailable', note: `Probability: ${formatProbability(outcome.probability)}`, lines: [`Peer sample: ${confidence.peer_sample_size || 0}`] },
-    { label: 'Denial risk', value: formatProbability(denial.probability), note: `${denial.level || 'unknown'} risk`, lines: [`Peer sample: ${confidence.peer_sample_size || 0}`] },
-    { label: 'Repeat-service forecast', value: `90 days: ${formatProbability(repeat.probability_90d)}`, lines: [`30 days: ${formatProbability(repeat.probability_30d)}`, `60 days: ${formatProbability(repeat.probability_60d)}`, `Risk level: ${repeat.level || 'unknown'}`, `Peer sample: ${confidence.peer_sample_size || 0}`] },
-    { label: 'Predicted allowed', value: formatOptionalCurrency(forecast.predicted_allowed?.value), note: formatPredictionRange(forecast.predicted_allowed), lines: [`Peer sample: ${confidence.peer_sample_size || 0}`] },
-    { label: 'Predicted paid', value: formatOptionalCurrency(forecast.predicted_paid?.value), note: formatPredictionRange(forecast.predicted_paid), lines: [`Peer sample: ${confidence.peer_sample_size || 0}`] },
-    { label: 'Predicted patient responsibility', value: formatOptionalCurrency(forecast.predicted_patient_responsibility?.value), note: formatPredictionRange(forecast.predicted_patient_responsibility), lines: [`Peer sample: ${confidence.peer_sample_size || 0}`] },
-    { label: 'Predicted adjustment', value: formatOptionalCurrency(forecast.predicted_adjustment?.value), note: formatPredictionRange(forecast.predicted_adjustment), lines: [`Peer sample: ${confidence.peer_sample_size || 0}`] },
-    { label: 'Potentially avoidable spend', value: avoidable.available ? formatOptionalCurrency(avoidable.value) : 'Not enough evidence', note: avoidable.available ? avoidable.savings_phase : (avoidable.reason || 'Estimate unavailable'), lines: [`Peer sample: ${confidence.peer_sample_size || 0}`] },
-    { label: 'Model confidence', value: Number.isFinite(confidence.score) ? formatProbability(confidence.score) : 'Unavailable', note: confidence.level || 'unknown', lines: [`Peer sample: ${confidence.peer_sample_size || 0}`] },
-    { label: 'Peer sample size', value: Number.isFinite(confidence.peer_sample_size) ? confidence.peer_sample_size.toLocaleString() : 'Unavailable', note: `${confidence.peer_episode_count || 0} peer episodes` },
-    { label: 'Prediction method', value: (confidence.prediction_method || 'Unavailable').replaceAll('_', ' '), note: confidence.model_version || '' },
-  ]
-
-  const factRows = [
-    ['Claim ID', facts.claim_id], ['Actual claim status', facts.claim_status], ['CPT', [facts.cpt_code, facts.cpt_description].filter(Boolean).join(' — ')],
-    ['ICD-10 diagnosis family', [facts.diagnosis_family, facts.diagnosis_description].filter(Boolean).join(' — ')],
-    ['Place of service', [facts.place_of_service_code, facts.place_of_service_description].filter(Boolean).join(' — ')],
-    ['Actual charge', formatOptionalCurrency(facts.charge_amount)], ['Actual allowed', formatOptionalCurrency(facts.allowed_amount)],
-    ['Actual paid', formatOptionalCurrency(facts.paid_amount)], ['Actual patient responsibility', formatOptionalCurrency(facts.patient_responsibility)],
-    ['Actual adjustment', formatOptionalCurrency(facts.adjustment_amount)], ['Actual denial reason', facts.denial_reason || 'None recorded'],
-    ['Prior authorization', facts.has_prior_auth ? 'Present' : 'Missing — requirement unknown'], ['Referral', facts.has_referral ? 'Present' : 'Missing — requirement unknown'],
-  ]
-
-  const forecastRows = [
-    ['Predicted allowed', forecast.predicted_allowed], ['Predicted paid', forecast.predicted_paid],
-    ['Predicted patient responsibility', forecast.predicted_patient_responsibility], ['Predicted adjustment', forecast.predicted_adjustment],
-  ]
-
-  return (
-    <div className="provider-llm-result">
-      <section className="llm-wide-section prediction-snapshot">
-        <div className="llm-section-heading"><span>Prediction snapshot</span><small>All values below are model estimates</small></div>
-        <div className="llm-snapshot-grid">
-          {snapshotCards.map((card) => (
-            <article className="llm-snapshot-card" key={card.label}>
-              <span>{card.label}</span><strong>{card.value}</strong>
-              {card.note ? <small>{card.note}</small> : null}
-              {card.lines?.map((line) => <small key={line}>{line}</small>)}
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="llm-wide-section actual-facts-section">
-        <div className="llm-section-heading"><span>Actual claim facts</span><small>{facts.adjudicated ? 'Actual adjudicated result' : 'Historical claim record'}</small></div>
-        <dl className="llm-facts-grid">{factRows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || 'Unavailable'}</dd></div>)}</dl>
-      </section>
-
-      <section className="llm-wide-section forecast-detail-section">
-        <div className="llm-section-heading"><span>{forecast.forecast_label || 'Forecast'}</span><small>Predictions are separate from actual adjudication</small></div>
-        <div className="llm-financial-grid">
-          {forecastRows.map(([label, item]) => (
-            <article key={label}><span>{label}</span><strong>{formatOptionalCurrency(item?.value)}</strong><small>Low {formatOptionalCurrency(item?.low)} · High {formatOptionalCurrency(item?.high)}</small><em>{confidence.peer_sample_size || 0} peer claims</em></article>
-          ))}
-        </div>
-      </section>
-
-      <section className="llm-wide-section">
-        <div className="llm-section-heading"><span>Provider summary</span></div>
-        <p>{analysis.provider_summary || 'A provider explanation is unavailable; the deterministic prediction snapshot remains available above.'}</p>
-      </section>
-
-      <section className="llm-wide-section prediction-basis-section">
-        <div className="llm-section-heading"><span>Prediction basis</span></div>
-        <dl className="llm-facts-grid">
-          <div><dt>Peer claims used</dt><dd>{basis.peer_claims_used?.toLocaleString?.() || 0}</dd></div>
-          <div><dt>Earlier member claims used</dt><dd>{basis.member_prior_claims_used?.toLocaleString?.() || 0}</dd></div>
-          <div><dt>Earlier same-CPT claims</dt><dd>{basis.member_prior_same_cpt_claims?.toLocaleString?.() || 0}</dd></div>
-          <div><dt>Member financial claims used</dt><dd>{basis.member_financial_claims_used?.toLocaleString?.() || 0}</dd></div>
-          <div><dt>Matching level</dt><dd>{basis.matching_level || 'Unavailable'}</dd></div>
-          <div><dt>Member financial match</dt><dd>{basis.member_financial_match_level || 'No matching history'}</dd></div>
-          <div><dt>Fallback</dt><dd>{basis.fallback_explanation || 'Unavailable'}</dd></div>
-          <div><dt>Historical peer denial rate</dt><dd>{formatProbability(basis.historical_peer_denial_rate)}</dd></div>
-          <div><dt>Median allowed rate</dt><dd>{formatProbability(basis.median_allowed_rate)}</dd></div>
-          <div><dt>Median paid-to-allowed rate</dt><dd>{formatProbability(basis.median_paid_to_allowed_rate)}</dd></div>
-        </dl>
-        <p className="confidence-explanation"><strong>{confidence.level || 'Unknown'} confidence.</strong> {confidence.explanation || 'Confidence explanation unavailable.'}</p>
-      </section>
-
-      <section className="llm-wide-section">
-        <div className="llm-section-heading"><span>Risk drivers</span></div>
-        <div className="llm-driver-list">{riskDrivers.length ? riskDrivers.map((driver) => <article key={driver.title}><header><strong>{driver.title}</strong><b>{driver.value}</b></header><p>{driver.reason}</p><small>{driver.source_type?.replaceAll('_', ' ')} · {driver.risk_direction} · Evidence: {(driver.evidence_ids || []).join(', ')}</small></article>) : <p>No risk drivers are available.</p>}</div>
-      </section>
-
-      <section className="llm-wide-section">
-        <div className="llm-section-heading"><span>Recommended provider actions</span></div>
-        <div className="llm-action-list">{actions.length ? actions.map((action) => <article key={action.code}><strong>{action.title}</strong><p>{action.reason}</p></article>) : <p>No claim-specific administrative action is supported.</p>}</div>
-      </section>
-
-      <section className="llm-wide-section">
-        <div className="llm-section-heading"><span>Evidence used</span></div>
-        <div className="llm-evidence-list">{evidence.map((item) => <article key={item.claim_id}><strong>Claim {item.claim_id}</strong><dl><div><dt>Service date</dt><dd>{formatDate(item.service_date)}</dd></div><div><dt>CPT</dt><dd>{item.cpt_code} — {item.cpt_description}</dd></div><div><dt>Diagnosis family</dt><dd>{item.diagnosis_family} — {item.diagnosis_description}</dd></div><div><dt>Place of service</dt><dd>{item.place_of_service_code} — {item.place_of_service_description}</dd></div><div><dt>Status</dt><dd>{item.claim_status}</dd></div><div><dt>Actual allowed</dt><dd>{formatOptionalCurrency(item.actual_allowed)}</dd></div><div><dt>Actual paid</dt><dd>{formatOptionalCurrency(item.actual_paid)}</dd></div><div><dt>Actual patient responsibility</dt><dd>{formatOptionalCurrency(item.actual_patient_responsibility)}</dd></div><div><dt>Actual adjustment</dt><dd>{formatOptionalCurrency(item.actual_adjustment)}</dd></div></dl><small>Prediction fields used: {(item.prediction_fields_used || []).join(', ')}</small></article>)}</div>
-      </section>
-
-      <section className="llm-wide-section">
-        <div className="llm-section-heading"><span>Limitations</span></div>
-        <ul>{limitations.map((item) => <li key={item}>{item}</li>)}</ul>
-      </section>
-
-      <details className="llm-exact-output">
-        <summary>Exact model output</summary>
-        <pre>{JSON.stringify(result.exact_model_output || {}, null, 2)}</pre>
-      </details>
-
-      <small className="llm-result-meta">Model: {result.model} · {result.promptVersion}{result.cached ? ' · cached' : ` · ${result.latencyMs || 0} ms`}{result.fallback ? ' · deterministic fallback' : ''}. Decision support only.</small>
-    </div>
   )
 }
 
@@ -2656,11 +2476,13 @@ function DashboardMetric({ label, value, note, icon: Icon, tone }) {
 }
 
 function PredictionSummary({ summary }) {
+  if (!summary) return null
   const cards = [
-    { label: 'Provider Cases', value: summary.totalScenarios.toLocaleString(), note: 'claim episodes available for provider review', tone: 'blue' },
-    { label: 'High Repeat Risk', value: summary.highRiskCount.toLocaleString(), note: 'episodes needing pathway review', tone: 'violet' },
-    { label: 'Predicted Paid', value: formatCurrency(summary.predictedPaid), note: 'episode forecast from financial peers', tone: 'green' },
-    { label: 'Avoidable Spend', value: formatCurrency(summary.avoidableSpend), note: 'modeled opportunity after the first visit', tone: 'orange' },
+    { label: 'Selectable Claims', value: summary.totalClaims.toLocaleString(), note: 'current workbook claims', tone: 'blue' },
+    { label: 'Recoverable Now', value: formatCurrency(summary.recoverableNow), note: 'canonical claim opportunities', tone: 'green' },
+    { label: 'Supported Avoidable Spend', value: formatCurrency(summary.supportedAvoidableSpend), note: 'episode-deduplicated', tone: 'orange' },
+    { label: 'Future Denial Exposure', value: formatCurrency(summary.futureDenialExposure), note: 'forecast kept separate', tone: 'violet' },
+    { label: 'Future Repeat Exposure', value: formatCurrency(summary.futureRepeatPaymentExposure), note: 'forecast kept separate', tone: 'orange' },
   ]
 
   return (

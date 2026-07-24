@@ -1,211 +1,305 @@
-import os
 import json
+import os
+import re
 import unittest
-from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
-from backend.llm_service import build_llm_input, generate_provider_chat_answer
-from backend.provider_prediction import build_provider_prediction_payload, find_case
-from backend.workbook_enrichment import SYNTHETIC_WARNING, join_claim_enrichment, read_savings_workbook
+
+WORKBOOK = Path(
+    os.getenv(
+        "SAVINGS_WORKBOOK_PATH",
+        "/Users/user/Downloads/EDI_834_837_20_members_ENRICHED (2).xlsx",
+    )
+)
+os.environ["SAVINGS_WORKBOOK_PATH"] = str(WORKBOOK)
+os.environ.setdefault("CLAIMS_WORKSHEET_NAME", "837_Claims")
+os.environ.setdefault("ELIGIBILITY_WORKSHEET_NAME", "834_Eligibility")
+os.environ.setdefault("REASON_LEGEND_WORKSHEET_NAME", "Reason_Code_Legend")
+os.environ.setdefault("FIELD_DICTIONARY_WORKSHEET_NAME", "New_Fields_Dictionary")
+os.environ.setdefault("DATA_NOTES_WORKSHEET_NAME", "Data_Notes_READ_ME")
+
+from backend.app import app
+from backend.financial_engine import build_financial_result
+from backend.workbook_enrichment import REQUIRED_SHEETS, load_workbook_database
+from backend.workbook_enrichment import _notify_hash_change
+from backend.workbook_llm import (
+    _groq_exact_answer,
+    generate_workbook_chat_answer,
+    generate_workbook_llm_analysis,
+)
+from backend.workbook_rag import build_index, retrieve_evidence
 
 
-WORKBOOK = Path(os.getenv("SAVINGS_WORKBOOK_PATH", Path.home() / "Downloads" / "claims_with_dummy_savings_fields.xlsx"))
-
-
-def original_row(claim_id="C1", member_id="M1", **overrides):
-    row = {
-        "Claim_ID": claim_id, "Member_ID": member_id, "Service_Date_From": "20260101",
-        "Claim_Status_Description": "Processed as Primary", "CPT_Code": "99214",
-        "ICD10_Diagnosis_Code": "I10", "Payer_ID": "P1", "Billing_Provider_NPI": "B1",
-        "Place_of_Service_Code": "11", "Units": 1, "Charge_Amount": 100,
-        "Allowed_Amount": 80, "Paid_Amount": 60, "Patient_Responsibility": 20,
-        "Adjustment_Amount": 20,
-    }
-    row.update(overrides)
-    return row
-
-
-def enrichment_row(claim_id="C1", member_id="M1", **overrides):
-    row = {
-        "Claim_ID": claim_id, "Member_ID": member_id, "Dummy_Data_Flag": "YES",
-        "Expected_Reimbursement": 90, "Contract_Allowed_Amount": 95, "Payment_Tolerance": 5,
-        "Recovered_Amount": 0, "Outstanding_Patient_Balance": 0, "Balance_Status": "Outstanding",
-        "Aging_Bucket": "0-30", "Collection_Status": "Not in Collections",
-        "Prior_Auth_Required": "No", "Prior_Auth_Status": "Not Required",
-        "Referral_Required": "No", "Referral_Status": "Not Required",
-        "Duplicate_Claim_Flag": "No", "Claim_Frequency_Code": "1", "Corrected_Claim_Indicator": "No",
-        "Episode_ID": "EP1", "Related_Claim_Flag": "No", "Condition_Resolved": "Unknown",
-        "Treatment_Outcome": "Unknown", "Follow_Up_Completed": "Not Documented",
-        "Repeat_Visit_Reason": "Not Applicable", "Denial_Correctable_Flag": "Not Applicable",
-        "Appeal_Status": "Not Applicable", "Resubmission_Status": "Not Applicable",
-    }
-    row.update(overrides)
-    return row
-
-
-class WorkbookJoinTests(unittest.TestCase):
-    def test_join_requires_matching_claim_and_member(self):
-        claims, report = join_claim_enrichment(
-            [original_row("C1", "M1"), original_row("C2", "M2")],
-            [enrichment_row("C1", "WRONG"), enrichment_row("C2", "M2")],
-            "hash-1",
-        )
-        by_id = {claim["claimId"]: claim for claim in claims}
-        self.assertIsNone(by_id["C1"]["syntheticEnrichment"])
-        self.assertIsNotNone(by_id["C2"]["syntheticEnrichment"])
-        self.assertEqual(report["member_mismatch_count"], 1)
-        self.assertEqual(report["matched_enrichment_count"], 1)
-
-    def test_original_financial_values_are_never_overwritten(self):
-        enriched = enrichment_row(Expected_Reimbursement=9999, Contract_Allowed_Amount=8888)
-        claims, _ = join_claim_enrichment([original_row(Paid_Amount=60, Allowed_Amount=80)], [enriched], "hash-2")
-        self.assertEqual(claims[0]["paid"], 60)
-        self.assertEqual(claims[0]["allowed"], 80)
-        self.assertEqual(claims[0]["syntheticEnrichment"]["Expected_Reimbursement"], 9999)
-
-    def test_duplicate_enrichment_is_rejected(self):
-        claims, report = join_claim_enrichment([original_row()], [enrichment_row(), enrichment_row()], "hash-3")
-        self.assertIsNone(claims[0]["syntheticEnrichment"])
-        self.assertEqual(report["duplicate_enrichment_count"], 1)
-
-
-@unittest.skipUnless(WORKBOOK.is_file(), "Uploaded savings workbook is unavailable")
-class WorkbookSavingsIntegrationTests(unittest.TestCase):
+@unittest.skipUnless(WORKBOOK.is_file(), "Integrated workbook attachment is required")
+class IntegratedWorkbookTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.claims, cls.report = read_savings_workbook(WORKBOOK)
+        cls.database = load_workbook_database(WORKBOOK, force=True)
+        cls.client = app.test_client()
 
-    def test_complete_workbook_join_and_original_source_values(self):
-        self.assertEqual(self.report["source_claim_count"], 1502)
-        self.assertEqual(self.report["matched_enrichment_count"], self.report["valid_source_claim_count"])
-        self.assertEqual(self.report["unmatched_claim_count"], 0)
-        self.assertEqual(self.report["duplicate_enrichment_count"], 0)
-        sample = next(claim for claim in self.claims if claim["claimId"] == "CLM00000143")
-        self.assertEqual((sample["totalCharge"], sample["allowed"], sample["paid"], sample["patientResp"], sample["adjustment"]), (791.96, 668.38, 549.53, 134.22, 123.58))
+    def test_only_integrated_sheets_are_required_and_all_claim_columns_are_preserved(self):
+        self.assertEqual(
+            REQUIRED_SHEETS,
+            {
+                "837_Claims",
+                "834_Eligibility",
+                "Reason_Code_Legend",
+                "New_Fields_Dictionary",
+                "Data_Notes_READ_ME",
+            },
+        )
+        self.assertEqual(self.database.report["total_claim_count"], 2317)
+        self.assertEqual(self.database.report["claim_column_count"], 145)
+        self.assertEqual(len(self.database.selectable_claims), 1502)
+        self.assertEqual(len(self.database.historical_claims), 815)
+        self.assertIn("Authorization_Valid_From", self.database.selectable_claims[0]["workbookFields"])
+        self.assertIn("Remit_835_Received_Date", self.database.selectable_claims[0]["workbookFields"])
 
-    def test_prediction_and_savings_use_the_same_forecast_and_label_synthetic_data(self):
-        case, _ = find_case(self.claims, "CLM00000143", min_peers=5)
-        case["selectedClaim"] = next(claim for claim in self.claims if claim["claimId"] == "CLM00000143")
-        payload = build_provider_prediction_payload(case)
-        savings = payload["where_provider_money_can_be_saved"]
-        self.assertEqual(savings["forecast_reference"]["repeat_probability_90d"], payload["forecast"]["repeat_service_risk"]["probability_90d"])
-        self.assertEqual(savings["future_exposure"]["repeat_allowed_exposure"], round(payload["forecast"]["repeat_service_risk"]["probability_90d"] * payload["forecast"]["predicted_allowed"]["value"], 2))
-        self.assertEqual(savings["data_provenance"]["data_mode"], "synthetic_demo")
-        self.assertEqual(savings["data_provenance"]["synthetic_warning"], SYNTHETIC_WARNING)
+    def test_historical_reference_rows_are_not_selectable_or_visible(self):
+        historical = self.database.historical_claims[0]
+        self.assertIsNone(self.database.find_claim(historical["claimId"], selectable_only=True))
+        response = self.client.get(
+            f"/api/members/{historical['memberId']}/claims"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(all(not item["isHistoricalReference"] for item in response.get_json()["items"]))
 
-    def test_patient_balance_authorization_and_referral_rules_are_conditional(self):
-        case, _ = find_case(self.claims, "CLM00000143", min_peers=5)
-        selected = next(claim for claim in self.claims if claim["claimId"] == "CLM00000143")
-        case["selectedClaim"] = selected
-        opportunity_types = {item["type"] for item in build_provider_prediction_payload(case)["where_provider_money_can_be_saved"]["current_claim_opportunity"]["opportunities"]}
-        enrichment = selected["syntheticEnrichment"]
-        self.assertEqual("patient_balance" in opportunity_types, bool(enrichment["Outstanding_Patient_Balance"] > 0 and enrichment["Balance_Status"] == "Outstanding" and (enrichment["Collection_Status"] == "In Collections" or enrichment["Aging_Bucket"] in {"61-90", "91+"})))
-        self.assertEqual("authorization" in opportunity_types, enrichment["Prior_Auth_Required"] == "Yes" and enrichment["Prior_Auth_Status"] in {"Missing", "Expired", "Denied", "Insufficient Units"})
-        self.assertEqual("referral" in opportunity_types, enrichment["Referral_Required"] == "Yes" and enrichment["Referral_Status"] in {"Missing", "Invalid", "Expired"})
+    def test_display_claim_id_alias_resolves_to_canonical_selectable_claim(self):
+        claim = self.database.find_claim("CLM-000143", selectable_only=True)
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim["claimId"], "CLM00000143")
+        response = self.client.post("/api/predictions/provider-case/CLM-000143/llm")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["claim_id"], "CLM00000143")
 
-    def test_underpayment_tolerance_recovery_and_denial_rules(self):
-        case, _ = find_case(self.claims, "CLM00000143", min_peers=5)
-        selected = deepcopy(next(claim for claim in self.claims if claim["claimId"] == "CLM00000143"))
-        selected["syntheticEnrichment"].update({
-            "Expected_Reimbursement": selected["paid"] + 150,
-            "Contract_Allowed_Amount": selected["allowed"],
-            "Payment_Tolerance": 10,
-            "Recovered_Amount": 50,
-            "Outstanding_Patient_Balance": 0,
-            "Aging_Bucket": "0-30",
-            "Collection_Status": "Not in Collections",
-            "Prior_Auth_Required": "No",
-            "Prior_Auth_Status": "Not Required",
-            "Referral_Required": "No",
-            "Referral_Status": "Not Required",
-            "Duplicate_Claim_Flag": "No",
-            "Claim_Frequency_Code": "1",
-            "Corrected_Claim_Indicator": "No",
-        })
-        case["selectedClaim"] = selected
-        opportunities = build_provider_prediction_payload(case)["where_provider_money_can_be_saved"]["current_claim_opportunity"]["opportunities"]
-        underpayment = next(item for item in opportunities if item["type"] == "underpayment")
-        self.assertEqual(underpayment["amount"], 100)
-        self.assertFalse(any(item["type"] == "patient_balance" for item in opportunities))
+    def test_clm_1092_financial_categories_and_best_action(self):
+        result = build_financial_result(self.database, "CLM00001092")
+        summary = result["supported_money_summary"]
+        self.assertEqual(result["financial_opportunities"]["underpayment"]["amount"], 0.0)
+        self.assertEqual(result["financial_opportunities"]["underpayment"]["status"], "supported_zero")
+        self.assertEqual(result["financial_opportunities"]["patient_balance"]["amount"], 73.71)
+        self.assertEqual(summary["recoverable_now"], 73.71)
+        self.assertEqual(summary["potentially_avoidable_spend_supported"], 0.0)
+        self.assertEqual(summary["best_action"]["type"], "patient_balance")
+        avoidable = result["financial_opportunities"]["potentially_avoidable_episode_spend"]
+        self.assertEqual(avoidable["reason_code"], "INSUFFICIENT_COMPARABLE_EPISODES")
+        self.assertIn("Only 3 comparable episodes", avoidable["reason"])
+        calculation = result["scenario_map"]["sections"][5]["items"]
+        patient = next(item for item in calculation if item["type"] == "patient_balance")
+        self.assertEqual(patient["formula"], "114.16 - 40.45 = 73.71")
 
-        selected["status"] = "Denied"
-        selected["syntheticEnrichment"].update({
-            "Denial_Correctable_Flag": "Yes", "Appeal_Status": "Appeal Submitted",
-            "Resubmission_Status": "Pending Review", "Expected_Reimbursement": 600,
-            "Recovered_Amount": 100,
-        })
-        case["selectedClaim"] = selected
-        opportunities = build_provider_prediction_payload(case)["where_provider_money_can_be_saved"]["current_claim_opportunity"]["opportunities"]
-        self.assertFalse(any(item["type"] == "underpayment" for item in opportunities))
-        denial = next(item for item in opportunities if item["type"] == "denial")
-        self.assertEqual(denial["amount"], 500)
-        self.assertEqual(denial["recovered_amount"], 100)
+    def test_clm_143_financial_categories_and_best_action(self):
+        result = build_financial_result(self.database, "CLM00000143")
+        summary = result["supported_money_summary"]
+        self.assertEqual(result["actual_claim_facts"]["paid"], 549.53)
+        self.assertEqual(result["financial_opportunities"]["underpayment"]["amount"], 16.42)
+        self.assertEqual(summary["recoverable_now"], 16.42)
+        self.assertEqual(summary["best_action"]["type"], "underpayment")
+        self.assertEqual(result["financial_opportunities"]["patient_balance"]["amount"], 0.0)
+        self.assertEqual(result["financial_opportunities"]["authorization"]["amount"], 0.0)
+        self.assertEqual(result["financial_opportunities"]["referral"]["amount"], 0.0)
 
-    def test_duplicate_action_requires_duplicate_or_correction_evidence(self):
-        case, _ = find_case(self.claims, "CLM00000143", min_peers=5)
-        selected = deepcopy(next(claim for claim in self.claims if claim["claimId"] == "CLM00000143"))
-        selected["syntheticEnrichment"].update({"Duplicate_Claim_Flag": "No", "Claim_Frequency_Code": "1", "Corrected_Claim_Indicator": "No"})
-        case["selectedClaim"] = selected
-        opportunities = build_provider_prediction_payload(case)["where_provider_money_can_be_saved"]["current_claim_opportunity"]["opportunities"]
-        self.assertFalse(any(item["type"] == "duplicate_or_correction" for item in opportunities))
-        selected["syntheticEnrichment"]["Duplicate_Claim_Flag"] = "Yes"
-        opportunities = build_provider_prediction_payload(case)["where_provider_money_can_be_saved"]["current_claim_opportunity"]["opportunities"]
-        self.assertTrue(any(item["type"] == "duplicate_or_correction" for item in opportunities))
+    def test_summary_scenario_llm_and_chat_use_identical_numbers(self):
+        claim_id = "CLM00001092"
+        canonical = build_financial_result(self.database, claim_id)
+        analysis = generate_workbook_llm_analysis(self.database, claim_id)
+        chat = generate_workbook_chat_answer(
+            self.database, claim_id, canonical["episode_id"], "How much can be saved?", "c1"
+        )
+        expected = canonical["supported_money_summary"]
+        scenario_money = canonical["scenario_map"]["sections"][4]["items"]
+        self.assertEqual(analysis["supported_money_summary"], expected)
+        self.assertEqual(scenario_money["recoverable_now"], expected["recoverable_now"])
+        self.assertEqual(
+            chat["financial_explanation"]["recoverable_now"], expected["recoverable_now"]
+        )
+        self.assertEqual(
+            chat["financial_explanation"]["potentially_avoidable_spend_supported"],
+            expected["potentially_avoidable_spend_supported"],
+        )
+        explanation = analysis["prediction_explanation"]
+        self.assertEqual(len(explanation["sections"]), 6)
+        self.assertEqual(
+            [section["title"] for section in explanation["sections"]],
+            [
+                "What this prediction means",
+                "Money that can be acted on now",
+                "How the amount was determined",
+                "What to do next",
+                "What the forecast risk means",
+                "How confident the model is",
+            ],
+        )
+        self.assertIn(
+            f"${expected['recoverable_now']:,.2f}",
+            explanation["sections"][1]["body"],
+        )
 
-    def test_groq_input_contains_derived_provenance_not_raw_enrichment_rows_or_phi(self):
-        case, _ = find_case(self.claims, "CLM00000143", min_peers=5)
-        case["selectedClaim"] = next(claim for claim in self.claims if claim["claimId"] == "CLM00000143")
-        llm_input = build_llm_input(case)
-        serialized = str(llm_input)
-        self.assertIn("synthetic_demo", serialized)
-        self.assertNotIn("syntheticEnrichment", serialized)
-        self.assertNotIn("Patient_First_Name", serialized)
-        self.assertNotIn("Patient_DOB", serialized)
-        self.assertLess(len(json.dumps(llm_input)), 25000)
+    def test_repeated_chat_question_is_numeric_stable_across_conversations(self):
+        result = build_financial_result(self.database, "CLM00000143")
+        first = generate_workbook_chat_answer(
+            self.database, result["claim_id"], result["episode_id"], "How much can be saved?", "first"
+        )
+        second = generate_workbook_chat_answer(
+            self.database, result["claim_id"], result["episode_id"], "  HOW much can be saved? ", "second"
+        )
+        self.assertEqual(first["answer"], second["answer"])
+        self.assertEqual(first["financial_explanation"], second["financial_explanation"])
+        self.assertEqual(second["conversation_id"], "second")
 
-    @patch.dict(os.environ, {"GROQ_API_KEY": ""}, clear=False)
-    def test_chat_explains_backend_values_without_recalculating_them(self):
-        case, _ = find_case(self.claims, "CLM00000143", min_peers=5)
-        case["selectedClaim"] = next(claim for claim in self.claims if claim["claimId"] == "CLM00000143")
-        payload = build_provider_prediction_payload(case)
-        response = generate_provider_chat_answer(case, "How much can be saved?", "workbook-chat-test")
-        expected = payload["where_provider_money_can_be_saved"]["synthetic_demo_opportunity"]["amount"]
-        self.assertIn(f"${expected:,.2f}", response["answer"])
-        self.assertIn("Synthetic demonstration opportunity", response["answer"])
-        explanation = response["financial_explanation"]
-        self.assertEqual(explanation["synthetic_demo_opportunity"]["amount"], expected)
-        self.assertEqual(explanation["future_financial_exposure"]["denial_exposure"], payload["where_provider_money_can_be_saved"]["future_exposure"]["expected_denial_revenue_exposure"])
-        self.assertFalse(explanation["validated_real_savings"]["available"])
+    @patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}, clear=False)
+    @patch("backend.workbook_llm.urlopen")
+    def test_groq_cannot_change_backend_financial_text(self, mocked_urlopen):
+        canonical = build_financial_result(self.database, "CLM00000143")
+        rag = retrieve_evidence(self.database, canonical, "How much can be saved?")
+        mocked_urlopen.return_value.__enter__.return_value.read.return_value = json.dumps({
+            "choices": [{"message": {"content": json.dumps({"answer": "The amount is $999,999.00."})}}]
+        }).encode()
+        answer, source, _ = _groq_exact_answer("The amount is $16.42.", canonical, rag)
+        self.assertEqual(answer, "The amount is $16.42.")
+        self.assertEqual(source, "deterministic_backend")
 
-    def test_synthetic_patient_balance_is_never_presented_as_verified(self):
-        case, _ = find_case(self.claims, "CLM00000143", min_peers=5)
-        case["selectedClaim"] = next(claim for claim in self.claims if claim["claimId"] == "CLM00000143")
-        savings = build_provider_prediction_payload(case)["where_provider_money_can_be_saved"]
-        patient = next(item for item in savings["synthetic_demo_opportunity"]["breakdown"] if item["type"] == "patient_balance")
-        self.assertEqual(patient["stage"], "DEMO PATIENT-BALANCE OPPORTUNITY")
-        self.assertEqual(patient["data_source"], "Dummy_Enrichment")
-        self.assertIn("not a verified billing recommendation", patient["warning"])
-        self.assertFalse(savings["validated_real_savings"]["available"])
+    def test_rag_is_workbook_only_and_excludes_direct_phi(self):
+        bundle = build_index(self.database)
+        self.assertEqual(bundle["metadata"]["document_count"], 2423)
+        self.assertEqual(
+            set(bundle["metadata"]["source_sheets"]),
+            {"837_Claims", "Reason_Code_Legend", "New_Fields_Dictionary", "Data_Notes_READ_ME"},
+        )
+        forbidden_field_fragments = (
+            "Patient_First_Name",
+            "Patient_Last_Name",
+            "Patient_DOB",
+            "Subscriber_Name",
+            "Patient_Account_Number",
+            "Member_ID:",
+        )
+        for document in bundle["documents"]:
+            self.assertFalse(any(fragment in document["text"] for fragment in forbidden_field_fragments))
+            self.assertIsNone(re.search(r"\b(?:MBR|PATMBR)\d+\b", document["text"], re.IGNORECASE))
 
-    def test_overlapping_synthetic_opportunities_are_not_double_counted(self):
-        case, _ = find_case(self.claims, "CLM00000143", min_peers=5)
-        selected = deepcopy(next(claim for claim in self.claims if claim["claimId"] == "CLM00000143"))
-        selected["syntheticEnrichment"].update({
-            "Expected_Reimbursement": selected["paid"] + 100,
-            "Payment_Tolerance": 1,
-            "Recovered_Amount": 0,
-            "Outstanding_Patient_Balance": 75,
-            "Balance_Status": "Outstanding",
-            "Aging_Bucket": "91+",
-            "Collection_Status": "In Collections",
-        })
-        case["selectedClaim"] = selected
-        demo = build_provider_prediction_payload(case)["where_provider_money_can_be_saved"]["synthetic_demo_opportunity"]
-        amounts = [item["amount"] for item in demo["breakdown"] if item.get("amount")]
-        self.assertGreater(len(amounts), 1)
-        self.assertIn(demo["amount"], amounts)
-        self.assertNotEqual(demo["amount"], sum(amounts))
+    def test_rag_filters_claim_episode_and_cutoff(self):
+        canonical = build_financial_result(self.database, "CLM00001092")
+        rag = retrieve_evidence(self.database, canonical, "patient balance")
+        selected = self.database.find_claim(canonical["claim_id"])
+        by_location = {
+            (document["metadata"]["source_sheet"], document["metadata"]["source_row"]): document
+            for document in build_index(self.database)["documents"]
+        }
+        for chunk in rag["retrieved_chunks"]:
+            document = by_location[(chunk["source_sheet"], chunk["source_row"])]
+            metadata = document["metadata"]
+            if metadata["source_sheet"] != "837_Claims" or metadata["claim_id"] == selected["claimId"]:
+                continue
+            self.assertLessEqual(metadata["service_date"], selected["dos"])
+            self.assertTrue(
+                metadata["member_id"] == selected["memberId"]
+                or metadata["episode_id"] == selected["episodeId"]
+                or metadata["is_historical_reference"]
+            )
+
+    def test_workbook_hash_change_clears_financial_rag_llm_and_chat_caches(self):
+        from backend import financial_engine, workbook_llm, workbook_rag
+
+        financial_engine._RESULT_CACHE["test"] = {}
+        workbook_llm._ANALYSIS_CACHE["test"] = {}
+        workbook_llm._CHAT_CACHE["test"] = {}
+        workbook_rag._CACHE["test"] = {}
+        _notify_hash_change("old-workbook-hash", "new-workbook-hash")
+        self.assertFalse(financial_engine._RESULT_CACHE)
+        self.assertFalse(workbook_llm._ANALYSIS_CACHE)
+        self.assertFalse(workbook_llm._CHAT_CACHE)
+        self.assertFalse(workbook_rag._CACHE)
+
+    def test_all_selectable_claims_can_build_a_canonical_result(self):
+        for claim in self.database.selectable_claims:
+            result = build_financial_result(self.database, claim["claimId"])
+            self.assertEqual(result["claim_id"], claim["claimId"])
+            self.assertIn("recoverable_now", result["supported_money_summary"])
+            self.assertTrue(result["consistency_check"]["passed"])
+            self.assertTrue(all(
+                item["status"] == "supported" and item["amount"] > 0
+                for item in result["supported_financial_opportunities"]
+            ))
+            self.assertTrue(all(
+                item["status"] != "supported" or item["amount"] <= 0
+                for item in result["non_actionable_evidence"]
+            ))
+            snapshot = result["financial_prediction_snapshot"]
+            self.assertEqual(
+                snapshot["predicted_denial_revenue_exposure"],
+                round(snapshot["denial_probability"] * snapshot["predicted_provider_payment"]["value"], 2),
+            )
+            self.assertEqual(
+                snapshot["predicted_repeat_payment_exposure"],
+                round(snapshot["repeat_probability_90d"] * snapshot["predicted_provider_payment"]["value"], 2),
+            )
+
+    def test_every_selectable_member_has_a_dynamic_summary(self):
+        for member in self.database.members:
+            response = self.client.get(f"/api/members/{member['memberId']}")
+            self.assertEqual(response.status_code, 200, member["memberId"])
+            payload = response.get_json()
+            self.assertEqual(payload["item"]["memberId"], member["memberId"])
+            self.assertEqual(
+                payload["item"]["supportedMoneySummary"]["claim_count"],
+                len(self.database.member_claims(member["memberId"])),
+            )
+
+    def test_production_prediction_code_has_no_member_or_claim_constants(self):
+        root = Path(__file__).parents[2]
+        production = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (
+                root / "backend" / "financial_engine.py",
+                root / "backend" / "workbook_llm.py",
+                root / "frontend" / "src" / "App.jsx",
+            )
+        )
+        self.assertNotRegex(production, r"\bCLM\d{4,}\b|\bMBR\d{3,}\b")
+
+    def test_affected_endpoints_report_one_workbook_version(self):
+        endpoints = [
+            "/api/claims",
+            "/api/members",
+            "/api/predictions/scenarios",
+            "/api/predictions/provider-case/CLM00000143",
+        ]
+        hashes = set()
+        for endpoint in endpoints:
+            response = self.client.get(endpoint)
+            self.assertEqual(response.status_code, 200, endpoint)
+            payload = response.get_json()
+            source = payload.get("source") or payload.get("meta", {}).get("source")
+            self.assertIsNotNone(source, endpoint)
+            hashes.add(source["workbook_hash"])
+        self.assertEqual(hashes, {self.database.workbook_hash})
+
+    def test_frontend_contains_no_legacy_labels_or_empty_state_phrases(self):
+        frontend_root = Path(__file__).parents[2] / "frontend" / "src"
+        text = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in frontend_root.rglob("*")
+            if path.suffix in {".js", ".jsx", ".css"}
+        )
+        forbidden = [
+            "Not " + "identified",
+            "None " + "identified",
+            "Not " + "calculated",
+            "Not " + "supported",
+            "Un" + "available",
+            "Un" + "known",
+            "Range " + "unavailable",
+            "Claims" + "_Original",
+            "Dummy" + "_Enrichment",
+        ]
+        for phrase in forbidden:
+            self.assertNotIn(phrase, text)
+
+    def test_configured_workbook_failure_is_explicit(self):
+        with self.assertRaisesRegex(FileNotFoundError, "Configured workbook cannot be loaded"):
+            load_workbook_database("/tmp/payer-payee-workbook-does-not-exist.xlsx", force=True)
 
 
 if __name__ == "__main__":

@@ -1,27 +1,52 @@
-"""Read-only loader for the synthetic provider-savings demonstration workbook."""
+"""Integrated-workbook repository for the scoped Member 360 money workflow.
 
-from collections import Counter, defaultdict
-from datetime import date, datetime
+When ``SAVINGS_WORKBOOK_PATH`` is configured this module is the only claims and
+evidence source used by the affected API endpoints. It never falls back to CSV,
+MongoDB, or bundled browser data.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from hashlib import sha256
 from pathlib import Path
+from threading import RLock
 
 from openpyxl import load_workbook
+from dotenv import load_dotenv
 
 try:
-    from .claim_mapper import normalize_claim
+    from .claim_mapper import build_member_documents, normalize_claim
 except ImportError:
-    from claim_mapper import normalize_claim
+    from claim_mapper import build_member_documents, normalize_claim
 
+load_dotenv()
 
-WORKBOOK_NAME = "claims_with_dummy_savings_fields.xlsx"
-ORIGINAL_SHEET = "Claims_Original"
-ENRICHMENT_SHEET = "Dummy_Enrichment"
-REQUIRED_SHEETS = {ORIGINAL_SHEET, ENRICHMENT_SHEET, "Data_Dictionary", "Suggestion_Criteria"}
-SYNTHETIC_WARNING = (
-    "Synthetic enrichment data is active. Savings and recovery recommendations are "
-    "for demonstration only and must not be used for real billing decisions."
-)
-_WORKBOOK_CACHE = {}
+CLAIMS_SHEET = os.getenv("CLAIMS_WORKSHEET_NAME", "837_Claims")
+ELIGIBILITY_SHEET = os.getenv("ELIGIBILITY_WORKSHEET_NAME", "834_Eligibility")
+REASON_LEGEND_SHEET = os.getenv("REASON_LEGEND_WORKSHEET_NAME", "Reason_Code_Legend")
+FIELD_DICTIONARY_SHEET = os.getenv("FIELD_DICTIONARY_WORKSHEET_NAME", "New_Fields_Dictionary")
+DATA_NOTES_SHEET = os.getenv("DATA_NOTES_WORKSHEET_NAME", "Data_Notes_READ_ME")
+REQUIRED_SHEETS = {
+    CLAIMS_SHEET,
+    ELIGIBILITY_SHEET,
+    REASON_LEGEND_SHEET,
+    FIELD_DICTIONARY_SHEET,
+    DATA_NOTES_SHEET,
+}
+
+CALCULATION_VERSION = "workbook-money-v1"
+PREDICTION_VERSION = "workbook-peer-forecast-v1"
+SAVINGS_VERSION = "workbook-opportunity-v1"
+RAG_INDEX_VERSION = "workbook-faiss-hash-v1"
+GROQ_PROMPT_VERSION = "workbook-layman-explanation-v2"
+
+_CACHE: dict[tuple[str, int, int], "WorkbookDatabase"] = {}
+_ACTIVE_HASH = ""
+_LOCK = RLock()
 
 
 def _clean_value(value):
@@ -34,96 +59,273 @@ def _clean_value(value):
 
 def _sheet_records(sheet):
     rows = sheet.iter_rows(values_only=True)
-    headers = [str(value or "").strip() for value in next(rows)]
-    return headers, [
-        {header: _clean_value(value) for header, value in zip(headers, row)}
-        for row in rows
-        if any(value not in (None, "") for value in row)
-    ]
+    try:
+        headers = [str(value or "").strip() for value in next(rows)]
+    except StopIteration:
+        return [], []
+    records = []
+    for source_row, row in enumerate(rows, start=2):
+        if not any(value not in (None, "") for value in row):
+            continue
+        record = {
+            header: _clean_value(value)
+            for header, value in zip(headers, row)
+            if header
+        }
+        record["_source_row"] = source_row
+        records.append(record)
+    return headers, records
 
 
-def join_claim_enrichment(original_rows, enrichment_rows, source_hash, source_name=WORKBOOK_NAME):
-    """Join by Claim_ID and verify Member_ID without changing original values."""
-    claims = [claim for claim in (normalize_claim(row) for row in original_rows) if claim.get("claimId") and claim.get("memberId")]
-    by_claim = defaultdict(list)
-    for row in enrichment_rows:
-        by_claim[str(row.get("Claim_ID") or "").strip()].append(dict(row))
-
-    duplicate_ids = {claim_id for claim_id, rows in by_claim.items() if len(rows) > 1}
-    matched = member_mismatch = ambiguous = 0
-    enrichment_columns = sorted({key for row in enrichment_rows for key in row})
-    original_columns = sorted({key for row in original_rows for key in row})
-    for claim in claims:
-        claim_id = claim["claimId"]
-        member_id = claim["memberId"]
-        candidates = by_claim.get(claim_id, [])
-        member_matches = [row for row in candidates if str(row.get("Member_ID") or "").strip() == member_id]
-        claim["sourceCsvHash"] = source_hash
-        claim["sourceWorkbookHash"] = source_hash
-        claim["sourceWorkbook"] = source_name
-        claim["sourceCsvColumns"] = original_columns
-        claim["sourceOriginalFields"] = original_columns
-        claim["sourceSyntheticFields"] = enrichment_columns
-        claim["dataMode"] = "synthetic_demo"
-        if len(member_matches) == 1 and len(candidates) == 1:
-            enrichment = {
-                key: value for key, value in member_matches[0].items()
-                if key not in {"Claim_ID", "Member_ID"}
-            }
-            claim["syntheticEnrichment"] = enrichment
-            matched += 1
-        else:
-            claim["syntheticEnrichment"] = None
-            if candidates and not member_matches:
-                member_mismatch += 1
-            if len(candidates) > 1:
-                ambiguous += 1
-
-    source_ids = Counter(str(row.get("Claim_ID") or "").strip() for row in original_rows)
-    unmatched = len(claims) - matched
-    report = {
-        "source_claim_count": len(original_rows),
-        "valid_source_claim_count": len(claims),
-        "enrichment_row_count": len(enrichment_rows),
-        "matched_enrichment_count": matched,
-        "unmatched_claim_count": unmatched,
-        "member_mismatch_count": member_mismatch,
-        "duplicate_enrichment_count": sum(len(by_claim[claim_id]) - 1 for claim_id in duplicate_ids),
-        "duplicate_enrichment_claim_count": len(duplicate_ids),
-        "ambiguous_enrichment_count": ambiguous,
-        "duplicate_original_claim_count": sum(count > 1 for count in source_ids.values()),
-        "source_workbook": source_name,
-        "source_workbook_hash": source_hash,
-        "data_mode": "synthetic_demo",
-        "synthetic_warning": SYNTHETIC_WARNING,
-    }
-    return claims, report
+def _canonical_json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
-def read_savings_workbook(path):
-    """Load the original and synthetic sheets with a hash-aware in-process cache."""
+def _is_yes(value):
+    return str(value or "").strip().upper() in {"Y", "YES", "TRUE", "1"}
+
+
+def normalize_claim_id(value):
+    return "".join(character for character in str(value or "").upper() if character.isalnum())
+
+
+@dataclass(frozen=True)
+class WorkbookDatabase:
+    path: Path
+    claims: tuple[dict, ...]
+    selectable_claims: tuple[dict, ...]
+    historical_claims: tuple[dict, ...]
+    eligibility_rows: tuple[dict, ...]
+    reason_legend_rows: tuple[dict, ...]
+    field_dictionary_rows: tuple[dict, ...]
+    data_notes_rows: tuple[dict, ...]
+    report: dict
+
+    def __post_init__(self):
+        object.__setattr__(
+            self,
+            "claims_by_id",
+            {
+                normalize_claim_id(claim.get("claimId")): claim
+                for claim in self.claims
+            },
+        )
+        object.__setattr__(
+            self,
+            "selectable_by_id",
+            {
+                normalize_claim_id(claim.get("claimId")): claim
+                for claim in self.selectable_claims
+            },
+        )
+        grouped = {}
+        for claim in self.selectable_claims:
+            grouped.setdefault(claim.get("memberId"), []).append(claim)
+        object.__setattr__(
+            self,
+            "claims_by_member",
+            {
+                member_id: tuple(sorted(rows, key=lambda item: (item.get("dos", ""), item.get("claimId", "")), reverse=True))
+                for member_id, rows in grouped.items()
+            },
+        )
+        object.__setattr__(
+            self,
+            "members",
+            tuple(sorted(build_member_documents(list(self.selectable_claims)), key=lambda item: (item.get("latestServiceDate", ""), item.get("memberId", "")), reverse=True)),
+        )
+
+    @property
+    def workbook_hash(self):
+        return self.report["workbook_hash"]
+
+    def find_claim(self, claim_id, selectable_only=True):
+        normalized = normalize_claim_id(claim_id)
+        source = self.selectable_by_id if selectable_only else self.claims_by_id
+        claim = source.get(normalized)
+        if claim:
+            return claim
+        prefix = "".join(character for character in normalized if character.isalpha()).upper()
+        digits = "".join(character for character in normalized if character.isdigit())
+        if not prefix or not digits:
+            return None
+        numeric_id = int(digits)
+        return next(
+            (
+                item for item in source.values()
+                if (
+                    "".join(
+                        character
+                        for character in normalize_claim_id(item.get("claimId"))
+                        if character.isalpha()
+                    ).upper()
+                    == prefix
+                    and int(
+                        "".join(
+                            character
+                            for character in normalize_claim_id(item.get("claimId"))
+                            if character.isdigit()
+                        )
+                    )
+                    == numeric_id
+                )
+            ),
+            None,
+        )
+
+    def member_claims(self, member_id):
+        return list(self.claims_by_member.get(str(member_id or "").strip(), ()))
+
+    def source_banner(self):
+        return {
+            "message": f"Workbook demonstration database active: {self.path.name}",
+            "workbook_name": self.path.name,
+            "workbook_hash": self.report["workbook_hash"],
+            "workbook_hash_short": self.report["workbook_hash"][:12],
+            "import_time": self.report["import_time"],
+            "modified_time": self.report["modified_time"],
+            "file_size": self.report["file_size"],
+            "source_row_hash": self.report["source_row_hash"],
+            "selectable_claim_count": self.report["selectable_claim_count"],
+            "historical_reference_count": self.report["historical_reference_count"],
+            "calculation_version": CALCULATION_VERSION,
+            "prediction_version": PREDICTION_VERSION,
+            "savings_version": SAVINGS_VERSION,
+            "rag_index_version": RAG_INDEX_VERSION,
+            "groq_prompt_version": GROQ_PROMPT_VERSION,
+        }
+
+
+def _notify_hash_change(previous_hash, next_hash):
+    if not previous_hash or previous_hash == next_hash:
+        return
+    for module_name, function_name in (
+        ("backend.financial_engine", "clear_financial_cache"),
+        ("backend.workbook_rag", "clear_rag_cache"),
+        ("backend.workbook_llm", "clear_llm_caches"),
+    ):
+        try:
+            module = __import__(module_name, fromlist=[function_name])
+            getattr(module, function_name)()
+        except (ImportError, AttributeError):
+            continue
+
+
+def _load(path):
     workbook_path = Path(path).expanduser().resolve()
-    stat = workbook_path.stat()
-    cache_key = (str(workbook_path), stat.st_mtime_ns, stat.st_size)
-    cached = _WORKBOOK_CACHE.get(cache_key)
-    if cached:
-        return cached
+    if not workbook_path.is_file():
+        raise FileNotFoundError(f"Configured workbook cannot be loaded: {workbook_path}")
 
-    source_hash = sha256(workbook_path.read_bytes()).hexdigest()
+    stat = workbook_path.stat()
+    workbook_hash = sha256(workbook_path.read_bytes()).hexdigest()
     workbook = load_workbook(workbook_path, read_only=True, data_only=True)
     missing = REQUIRED_SHEETS.difference(workbook.sheetnames)
     if missing:
         workbook.close()
-        raise ValueError(f"Workbook is missing required sheet(s): {', '.join(sorted(missing))}")
-    original_columns, original_rows = _sheet_records(workbook[ORIGINAL_SHEET])
-    enrichment_columns, enrichment_rows = _sheet_records(workbook[ENRICHMENT_SHEET])
+        raise ValueError(
+            "Configured workbook is missing required sheet(s): "
+            + ", ".join(sorted(missing))
+        )
+
+    headers, claim_rows = _sheet_records(workbook[CLAIMS_SHEET])
+    _, eligibility_rows = _sheet_records(workbook[ELIGIBILITY_SHEET])
+    _, reason_rows = _sheet_records(workbook[REASON_LEGEND_SHEET])
+    _, dictionary_rows = _sheet_records(workbook[FIELD_DICTIONARY_SHEET])
+    _, notes_rows = _sheet_records(workbook[DATA_NOTES_SHEET])
     workbook.close()
-    claims, report = join_claim_enrichment(original_rows, enrichment_rows, source_hash, workbook_path.name)
-    report.update({
-        "original_columns": original_columns,
-        "enrichment_columns": enrichment_columns,
-    })
-    result = claims, report
-    _WORKBOOK_CACHE.clear()
-    _WORKBOOK_CACHE[cache_key] = result
-    return result
+
+    claims = []
+    for row in claim_rows:
+        raw_fields = {key: value for key, value in row.items() if key != "_source_row"}
+        claim = normalize_claim(raw_fields)
+        if not claim.get("claimId") or not claim.get("memberId"):
+            continue
+        historical = _is_yes(raw_fields.get("Is_Historical_Reference_Record"))
+        claim.update({
+            "workbookFields": raw_fields,
+            "workbookSourceRow": row["_source_row"],
+            "isHistoricalReference": historical,
+            "episodeId": str(raw_fields.get("Episode_ID") or "").strip(),
+            "sourceWorkbook": workbook_path.name,
+            "sourceWorkbookHash": workbook_hash,
+            "sourceRowHash": sha256(_canonical_json(raw_fields).encode("utf-8")).hexdigest(),
+            "calculationVersion": CALCULATION_VERSION,
+            "predictionVersion": PREDICTION_VERSION,
+            "ragIndexVersion": RAG_INDEX_VERSION,
+        })
+        claims.append(claim)
+
+    historical_claims = tuple(claim for claim in claims if claim["isHistoricalReference"])
+    selectable_claims = tuple(claim for claim in claims if not claim["isHistoricalReference"])
+    source_row_hash = sha256(
+        _canonical_json([
+            {"claim_id": claim["claimId"], "row_hash": claim["sourceRowHash"]}
+            for claim in claims
+        ]).encode("utf-8")
+    ).hexdigest()
+    report = {
+        "source_workbook": workbook_path.name,
+        "source_workbook_path": str(workbook_path),
+        "workbook_hash": workbook_hash,
+        "modified_time": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+        "file_size": stat.st_size,
+        "source_row_hash": source_row_hash,
+        "import_time": datetime.now(timezone.utc).isoformat(),
+        "claims_sheet": CLAIMS_SHEET,
+        "claim_columns": headers,
+        "claim_column_count": len(headers),
+        "total_claim_count": len(claims),
+        "selectable_claim_count": len(selectable_claims),
+        "historical_reference_count": len(historical_claims),
+        "calculation_version": CALCULATION_VERSION,
+        "prediction_version": PREDICTION_VERSION,
+        "savings_version": SAVINGS_VERSION,
+        "rag_index_version": RAG_INDEX_VERSION,
+        "groq_prompt_version": GROQ_PROMPT_VERSION,
+    }
+    return WorkbookDatabase(
+        path=workbook_path,
+        claims=tuple(claims),
+        selectable_claims=selectable_claims,
+        historical_claims=historical_claims,
+        eligibility_rows=tuple(eligibility_rows),
+        reason_legend_rows=tuple(reason_rows),
+        field_dictionary_rows=tuple(dictionary_rows),
+        data_notes_rows=tuple(notes_rows),
+        report=report,
+    )
+
+
+def load_workbook_database(path=None, *, force=False):
+    global _ACTIVE_HASH
+    configured = path or os.getenv("SAVINGS_WORKBOOK_PATH", "").strip()
+    if not configured:
+        raise RuntimeError("SAVINGS_WORKBOOK_PATH is required for the workbook demonstration database.")
+    workbook_path = Path(configured).expanduser().resolve()
+    if not workbook_path.is_file():
+        raise FileNotFoundError(f"Configured workbook cannot be loaded: {workbook_path}")
+    stat = workbook_path.stat()
+    key = (str(workbook_path), stat.st_mtime_ns, stat.st_size)
+    with _LOCK:
+        if not force and key in _CACHE:
+            return _CACHE[key]
+        database = _load(workbook_path)
+        previous_hash = _ACTIVE_HASH
+        _ACTIVE_HASH = database.workbook_hash
+        _CACHE.clear()
+        _CACHE[key] = database
+        _notify_hash_change(previous_hash, database.workbook_hash)
+        return database
+
+
+def read_savings_workbook(path):
+    """Compatibility wrapper returning every row plus integrated metadata."""
+    database = load_workbook_database(path)
+    return list(database.claims), dict(database.report)
+
+
+def clear_workbook_cache():
+    global _ACTIVE_HASH
+    with _LOCK:
+        _CACHE.clear()
+        _ACTIVE_HASH = ""

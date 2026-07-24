@@ -12,6 +12,8 @@ node_modules
 __pycache__/
 dist
 dist-ssr
+backend/.rag_index/
+.codex-work/
 *.local
 .env
 .env.*

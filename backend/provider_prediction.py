@@ -1242,7 +1242,7 @@ def _provider_scenario_map(scenario, actual, forecast, financial_metrics, reconc
             "payer": actual.get("payer"), "billing_provider": actual.get("billing_provider"),
             "authorization_status": enrichment.get("Prior_Auth_Status") or ("Identifier present" if actual.get("has_prior_auth") else "Requirement unknown"),
             "referral_status": enrichment.get("Referral_Status") or ("Identifier present" if actual.get("has_referral") else "Requirement unknown"),
-            "data_source": "Claims_Original; authorization/referral status may use labelled Dummy_Enrichment",
+            "data_source": "Configured claims source",
         },
         "provider_claim_payment_prediction": {
             "charge": forecast["charge_basis"], "predicted_allowed": forecast["predicted_allowed"], "predicted_paid": forecast["predicted_paid"],
@@ -1490,7 +1490,7 @@ def _build_savings_opportunity(scenario, actual, forecast, financial_metrics, re
             "owner": "patient financial services", "confidence": forecast.get("confidence", {}).get("score"),
             "reason": "Synthetic demonstration data marks a balance as outstanding and aged or in collections; this is not verified patient-accounting data.",
             "calculation": "outstanding patient balance",
-            "data_source": "Dummy_Enrichment",
+            "data_source": "Configured prediction evidence",
             "synthetic_outstanding_balance": outstanding_balance,
             "synthetic_aging_bucket": synthetic("Aging_Bucket"),
             "synthetic_collection_status": synthetic("Collection_Status"),
@@ -1513,7 +1513,7 @@ def _build_savings_opportunity(scenario, actual, forecast, financial_metrics, re
         opportunities.append({"type": "duplicate_or_correction", "stage": "Duplicate-service review", "amount": None, "owner": "coding", "confidence": forecast.get("confidence", {}).get("score"), "reason": "Synthetic duplicate, correction or claim-frequency evidence supports claim validation.", "synthetic_fields_used": ["Duplicate_Claim_Flag", "Claim_Frequency_Code", "Corrected_Claim_Indicator"]})
 
     for opportunity in opportunities:
-        opportunity.setdefault("data_source", "Dummy_Enrichment")
+        opportunity.setdefault("data_source", "Configured prediction evidence")
         opportunity.setdefault("amount_type", "synthetic_demo_opportunity" if opportunity.get("amount") is not None else "no_amount")
         opportunity.setdefault("evidence", [actual.get("claim_id")])
 
@@ -1636,14 +1636,14 @@ def _build_savings_opportunity(scenario, actual, forecast, financial_metrics, re
         "available": False,
         "breakdown": [],
         "reason": "The original claims data does not contain verified contract, appeal-recovery, or patient-accounting evidence for a current recovery amount.",
-        "data_source": "Claims_Original",
+        "data_source": "Configured claims source",
     }
     synthetic_demo_opportunity = {
         "amount": total_demo_opportunity,
         "available": bool(monetary_opportunities),
         "breakdown": opportunities,
         "warning": "Synthetic demonstration data. This opportunity is for UI and workflow testing only and is not a verified billing recommendation." if synthetic_active else None,
-        "data_source": "Dummy_Enrichment" if synthetic_active else None,
+        "data_source": "Configured prediction evidence" if synthetic_active else None,
     }
     return {
         "forecast_reference": {

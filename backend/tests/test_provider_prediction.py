@@ -351,6 +351,8 @@ class ProviderPredictionTests(unittest.TestCase):
         self.assertNotEqual(savings["best_action"]["stage"], "No immediate validated savings action")
 
     def test_every_valid_csv_claim_can_build_the_shared_savings_forecast(self):
+        if os.getenv("SAVINGS_WORKBOOK_PATH"):
+            self.skipTest("Legacy CSV engine is inactive while the integrated workbook is configured")
         csv_path = Path(os.getenv("CSV_PATH", Path.home() / "Downloads" / "EDI_834_837_20 members(837_Claims).csv"))
         if not csv_path.is_file():
             self.skipTest("Uploaded claims CSV is unavailable")

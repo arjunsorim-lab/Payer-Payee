@@ -6,22 +6,26 @@ from pathlib import Path
 from bson import ObjectId
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
-from werkzeug.exceptions import HTTPException
+from werkzeug.exceptions import HTTPException, ServiceUnavailable
 
 try:
     from .db import connect_mongo, get_mongo_config
+    from .financial_engine import build_financial_result, member_supported_summary
     from .import_claims import read_claims
     from .llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
     from .prediction_service import build_prediction_scenarios, summarize_scenarios
     from .provider_prediction import build_provider_prediction_payload, find_case
-    from .workbook_enrichment import read_savings_workbook
+    from .workbook_enrichment import load_workbook_database, read_savings_workbook
+    from .workbook_llm import generate_workbook_chat_answer, generate_workbook_prediction_explanation
 except ImportError:
     from db import connect_mongo, get_mongo_config
+    from financial_engine import build_financial_result, member_supported_summary
     from import_claims import read_claims
     from llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
     from prediction_service import build_prediction_scenarios, summarize_scenarios
     from provider_prediction import build_provider_prediction_payload, find_case
-    from workbook_enrichment import read_savings_workbook
+    from workbook_enrichment import load_workbook_database, read_savings_workbook
+    from workbook_llm import generate_workbook_chat_answer, generate_workbook_prediction_explanation
 
 FRONTEND_DIST_DIR = Path(__file__).resolve().parent.parent / "dist"
 
@@ -53,6 +57,56 @@ def page_options(args, default_limit=25, max_limit=2000):
     page = max(int(args.get("page", 1) or 1), 1)
     limit = min(max(int(args.get("limit", default_limit) or default_limit), 1), max_limit)
     return page, limit, (page - 1) * limit
+
+
+def configured_workbook_database():
+    """Return the configured workbook repository or None when not configured."""
+    configured = os.getenv("SAVINGS_WORKBOOK_PATH", "").strip()
+    if not configured:
+        return None
+    try:
+        return load_workbook_database(configured)
+    except (FileNotFoundError, OSError, ValueError, RuntimeError) as error:
+        raise ServiceUnavailable(description=str(error)) from error
+
+
+def workbook_claims_for_request(database, args):
+    rows = list(database.selectable_claims)
+    search = str(args.get("search", "") or "").strip().lower()
+    if search:
+        rows = [
+            claim for claim in rows
+            if search in str(claim.get("patient", "")).lower()
+            or search in str(claim.get("memberId", "")).lower()
+            or search in str(claim.get("number", "")).lower()
+            or search in str(claim.get("claimId", "")).lower()
+        ]
+    filters = (
+        ("payer", "payer", "All Payers"),
+        ("plan", "filingIndicator", "All Plans"),
+        ("providerGroup", "billingProvider", "All Groups"),
+    )
+    for argument, field, all_value in filters:
+        value = args.get(argument)
+        if value and value != all_value:
+            rows = [claim for claim in rows if claim.get(field) == value]
+    if args.get("status"):
+        value = str(args.get("status")).lower()
+        rows = [claim for claim in rows if value in str(claim.get("status", "")).lower()]
+    if args.get("from"):
+        rows = [claim for claim in rows if claim.get("dos", "") >= args.get("from")]
+    if args.get("to"):
+        rows = [claim for claim in rows if claim.get("dos", "") <= args.get("to")]
+    return sorted(rows, key=lambda claim: (claim.get("dos", ""), claim.get("claimId", "")), reverse=True)
+
+
+def workbook_claim_for_api(database, claim, include_summary=True):
+    payload = {key: value for key, value in claim.items() if key != "raw"}
+    if include_summary:
+        payload["supportedMoneySummary"] = build_financial_result(
+            database, claim["claimId"]
+        )["supported_money_summary"]
+    return payload
 
 
 def build_claim_query(args):
@@ -197,6 +251,13 @@ def stored_or_basic_prediction(prediction_doc, claim):
 
 @app.get("/health")
 def health():
+    database = configured_workbook_database()
+    if database:
+        return json_response({
+            "ok": True,
+            "dataSource": "integrated-workbook",
+            "workbook": database.source_banner(),
+        })
     db = connect_mongo()
     db.command("ping")
     return json_response({"ok": True, "mongo": get_mongo_config()})
@@ -204,6 +265,27 @@ def health():
 
 @app.get("/api/claims")
 def get_claims():
+    database = configured_workbook_database()
+    if database:
+        rows = workbook_claims_for_request(database, request.args)
+        page, limit, skip = page_options(request.args)
+        member_summaries = {
+            member_id: member_supported_summary(database, member_id)
+            for member_id in {claim["memberId"] for claim in rows}
+        }
+        return json_response({
+            "page": page,
+            "limit": limit,
+            "total": len(rows),
+            "items": [
+                {
+                    **workbook_claim_for_api(database, claim),
+                    "memberSupportedMoneySummary": member_summaries[claim["memberId"]],
+                }
+                for claim in rows[skip: skip + limit]
+            ],
+            "source": database.source_banner(),
+        })
     db = connect_mongo()
     query = build_claim_query(request.args)
     page, limit, skip = page_options(request.args)
@@ -215,6 +297,15 @@ def get_claims():
 
 @app.get("/api/claims/<claim_number>")
 def get_claim(claim_number):
+    database = configured_workbook_database()
+    if database:
+        claim = database.find_claim(claim_number, selectable_only=True)
+        if not claim:
+            return json_response({"message": "Selectable workbook claim not found"}, 404)
+        return json_response({
+            "item": workbook_claim_for_api(database, claim),
+            "source": database.source_banner(),
+        })
     db = connect_mongo()
     claim = db.claims.find_one({"$or": [{"number": claim_number}, {"claimId": claim_number}]})
     if not claim:
@@ -224,6 +315,32 @@ def get_claim(claim_number):
 
 @app.get("/api/members")
 def get_members():
+    database = configured_workbook_database()
+    if database:
+        page, limit, skip = page_options(request.args)
+        search = str(request.args.get("search", "") or "").strip().lower()
+        members = [
+            member for member in database.members
+            if not search
+            or search in str(member.get("patient", "")).lower()
+            or search in str(member.get("memberId", "")).lower()
+        ]
+        items = [
+            {
+                **member,
+                "supportedMoneySummary": member_supported_summary(
+                    database, member["memberId"]
+                ),
+            }
+            for member in members[skip: skip + limit]
+        ]
+        return json_response({
+            "page": page,
+            "limit": limit,
+            "total": len(members),
+            "items": items,
+            "source": database.source_banner(),
+        })
     db = connect_mongo()
     page, limit, skip = page_options(request.args)
     query = {}
@@ -239,6 +356,21 @@ def get_members():
 
 @app.get("/api/members/<member_id>")
 def get_member(member_id):
+    database = configured_workbook_database()
+    if database:
+        member = next(
+            (item for item in database.members if item.get("memberId") == member_id),
+            None,
+        )
+        if not member:
+            return json_response({"message": "Member not found in selectable workbook claims"}, 404)
+        return json_response({
+            "item": {
+                **member,
+                "supportedMoneySummary": member_supported_summary(database, member_id),
+            },
+            "source": database.source_banner(),
+        })
     db = connect_mongo()
     member = db.members.find_one({"memberId": member_id})
     if not member:
@@ -248,6 +380,14 @@ def get_member(member_id):
 
 @app.get("/api/members/<member_id>/claims")
 def get_member_claims(member_id):
+    database = configured_workbook_database()
+    if database:
+        claims = database.member_claims(member_id)
+        return json_response({
+            "total": len(claims),
+            "items": [workbook_claim_for_api(database, claim) for claim in claims],
+            "source": database.source_banner(),
+        })
     db = connect_mongo()
     items = list(db.claims.find({"memberId": member_id}).sort([("dos", -1), ("claimId", 1)]))
     return json_response({"total": len(items), "items": items})
@@ -305,6 +445,33 @@ def get_prediction_dashboard():
 @app.get("/api/predictions/scenarios")
 def get_prediction_scenarios():
     """Build provider-facing episode scenarios from the current database rows."""
+    database = configured_workbook_database()
+    if database:
+        rows = workbook_claims_for_request(database, request.args)
+        results = [build_financial_result(database, claim["claimId"]) for claim in rows]
+        episode_avoidable = {}
+        for item in results:
+            episode_avoidable[item["episode_id"]] = max(
+                episode_avoidable.get(item["episode_id"], 0),
+                item["supported_money_summary"]["potentially_avoidable_spend_supported"],
+            )
+        return json_response({
+            "summary": {
+                "totalClaims": len(results),
+                "recoverableNow": round(sum(item["supported_money_summary"]["recoverable_now"] for item in results), 2),
+                "supportedAvoidableSpend": round(sum(episode_avoidable.values()), 2),
+                "futureDenialExposure": round(sum(item["supported_money_summary"]["future_denial_exposure"] for item in results), 2),
+                "futureRepeatPaymentExposure": round(sum(item["supported_money_summary"]["future_repeat_payment_exposure"] for item in results), 2),
+            },
+            "totalClaims": len(results),
+            "items": results,
+            "source": database.source_banner(),
+            "model": {
+                "name": database.report["prediction_version"],
+                "backend": "Python",
+                "source": "integrated-workbook",
+            },
+        })
     db = connect_mongo()
     query = build_claim_query(request.args)
     claims = list(db.claims.find(query).sort([("dos", 1), ("claimId", 1)]))
@@ -374,6 +541,19 @@ def build_provider_case(db, claim_number):
 @app.get("/api/predictions/provider-case/<claim_number>")
 def get_provider_case_prediction(claim_number):
     """Return the provider-focused episode prediction for one exact claim."""
+    database = configured_workbook_database()
+    if database:
+        try:
+            return json_response(build_financial_result(database, claim_number))
+        except KeyError as error:
+            return json_response({"message": str(error)}, 404)
+        except RuntimeError as error:
+            if str(error) == "PREDICTION_CONSISTENCY_ERROR":
+                return json_response({
+                    "code": "PREDICTION_CONSISTENCY_ERROR",
+                    "message": "The canonical prediction failed its consistency check.",
+                }, 500)
+            raise
     db = connect_mongo()
     scenario, error = build_provider_case(db, claim_number)
     if error:
@@ -402,7 +582,20 @@ def get_provider_case_prediction(claim_number):
 
 @app.post("/api/predictions/provider-case/<claim_number>/llm")
 def get_provider_case_llm_analysis(claim_number):
-    """Generate a de-identified, provider-side LLM analysis for one claim episode."""
+    """Explain one de-identified, provider-side financial prediction."""
+    database = configured_workbook_database()
+    if database:
+        try:
+            return json_response(generate_workbook_prediction_explanation(database, claim_number))
+        except KeyError as error:
+            return json_response({"message": str(error)}, 404)
+        except RuntimeError as error:
+            if str(error) == "PREDICTION_CONSISTENCY_ERROR":
+                return json_response({
+                    "code": "PREDICTION_CONSISTENCY_ERROR",
+                    "message": "The canonical prediction failed its consistency check.",
+                }, 500)
+            return json_response({"message": str(error), "ragAvailable": False}, 503)
     db = connect_mongo()
     scenario, error = build_provider_case(db, claim_number)
     if error:
@@ -441,6 +634,18 @@ def provider_llm_chat():
         return json_response({"message": "claim_id, episode_id, message and conversation_id are required"}, 400)
     if len(message) > 1000 or len(conversation_id) > 120:
         return json_response({"message": "Chat input exceeds the allowed length"}, 400)
+    database = configured_workbook_database()
+    if database:
+        try:
+            return json_response(generate_workbook_chat_answer(
+                database, claim_id, episode_id, message, conversation_id
+            ))
+        except KeyError as error:
+            return json_response({"message": str(error)}, 404)
+        except ValueError as error:
+            return json_response({"message": str(error)}, 409)
+        except RuntimeError as error:
+            return json_response({"message": str(error), "ragAvailable": False}, 503)
     db = connect_mongo()
     scenario, error = build_provider_case(db, claim_id)
     if error:

@@ -56,10 +56,11 @@ test('Run LLM Analysis opens an accessible money-oriented modal', () => {
   assert.match(source, /provider-chat-prompt/)
   assert.match(source, /Close Provider LLM Analysis/)
   assert.match(styles, /\.provider-llm-modal\s*\{[^}]*inset:\s*0;[^}]*width:\s*100vw;[^}]*height:\s*100vh;/s)
-  assert.match(styles, /\.provider-chat-prompt\s*\{[^}]*position:\s*fixed;[^}]*left:\s*50%;/s)
+  assert.match(styles, /\.provider-llm-workspace\s*\{[^}]*grid-template-columns:/s)
+  assert.match(styles, /\.provider-chat-prompt\s*\{[^}]*position:\s*relative;/s)
 })
 
-test('prediction chat keeps results inside a wide floating prompt', () => {
+test('prediction chat is integrated into the full-screen analysis workspace', () => {
   const source = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
   const result = source.slice(source.indexOf('function ProviderMoneyLlmResult'), source.indexOf('function ProviderPredictionChat'))
   const chat = source.slice(source.indexOf('function ProviderPredictionChat'), source.indexOf('export function ProviderLlmResult'))
@@ -72,7 +73,8 @@ test('prediction chat keeps results inside a wide floating prompt', () => {
   assert.match(chat, /const clear = \(\) => \{ setMessages\(\[\]\)/)
   assert.match(chat, /chatgpt-composer/)
   const styles = readFileSync(new URL('./App.css', import.meta.url), 'utf8')
-  assert.match(styles, /.provider-chat-prompt\s*\{[^}]*width:\s*min\(940px,/s)
+  assert.match(styles, /\.provider-llm-modal\s*\{[^}]*inset:\s*0;[^}]*width:\s*100vw;[^}]*height:\s*100vh;/s)
+  assert.match(styles, /\.provider-chat-prompt\s*\{[^}]*height:\s*100%;/s)
 })
 
 test('Prediction Snapshot is removed from the active provider modal', () => {

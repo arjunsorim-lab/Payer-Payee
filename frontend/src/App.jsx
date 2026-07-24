@@ -2198,9 +2198,11 @@ function ProviderMoneyLlmResult({ result }) {
   const patientBalanceDemo = (syntheticOpportunity.breakdown || []).find((item) => item.type === 'patient_balance')
   const signedCurrency = (value) => Number.isFinite(value) ? `${value > 0 ? '+' : value < 0 ? '−' : ''}${formatOptionalCurrency(Math.abs(value))}` : 'Unavailable'
   return (
-    <div className="provider-llm-result provider-money-result">
-      {syntheticDemo ? <div className="synthetic-data-banner" role="note"><strong>Synthetic enrichment data is active.</strong><span>Savings and recovery recommendations are for demonstration only and must not be used for real billing decisions.</span><small>Original claim values remain authoritative · Source: {provenance.source_workbook}</small></div> : null}
-      <section className="llm-wide-section financial-opportunity-summary">
+    <div className="provider-llm-workspace">
+      <main className="provider-analysis-scroll">
+        <div className="provider-llm-result provider-money-result">
+          {syntheticDemo ? <div className="synthetic-data-banner" role="note"><strong>Synthetic enrichment data is active.</strong><span>Savings and recovery recommendations are for demonstration only and must not be used for real billing decisions.</span><small>Original claim values remain authoritative · Source: {provenance.source_workbook}</small></div> : null}
+          <section className="llm-wide-section financial-opportunity-summary">
         <div className="llm-section-heading"><span>Provider Financial Opportunity Summary</span><small>{opportunity.best_savings_phase || 'insufficient evidence'}</small></div>
         <div className="financial-opportunity-grid">
           <article><span>Expected provider payment</span><strong>{formatOptionalCurrency(opportunity.expected_provider_payment)}</strong></article>
@@ -2212,9 +2214,9 @@ function ProviderMoneyLlmResult({ result }) {
           <article><span>Best next provider action</span><strong>{bestAction.stage || 'Routine monitoring'}</strong></article>
         </div>
         <p>{bestAction.reason || opportunity.supporting_reason}</p><small>Owner: {bestAction.owner || opportunity.responsible_operational_team} · Evidence: {(bestAction.affected_claim_ids || opportunity.affected_claim_ids || []).join(', ')}</small>
-      </section>
+          </section>
 
-      <section className="llm-wide-section provider-savings-section">
+          <section className="llm-wide-section provider-savings-section">
         <div className="llm-section-heading"><span>Where Provider Money Can Be Saved</span><small>Recommended action, opportunity and forecast exposure</small></div>
 
         <div className="savings-action-callout primary-action">
@@ -2252,24 +2254,25 @@ function ProviderMoneyLlmResult({ result }) {
           </div>
           <p>{currentPerformance.conclusion}</p>
         </article>
-      </section>
+          </section>
 
-      <section className="llm-wide-section scenario-map-section">
+          <section className="llm-wide-section scenario-map-section">
         <div className="llm-section-heading"><span>Provider Money Scenario Map</span><small>Generated from this claim and earlier history</small></div>
         <div className="provider-money-map">
           {scenario.provider_claim_payment_prediction ? <article className="provider-payment-panel"><strong>Provider Claim and Payment Prediction</strong><ScenarioMapData content={scenario.provider_claim_payment_prediction} /></article> : null}
           {scenario.where_provider_money_may_be_saved ? <article className="provider-savings-panel"><strong>Where Provider Money Can Be Saved</strong><ProviderSavingsScenario content={scenario.where_provider_money_may_be_saved} /></article> : null}
           {scenario.cost_leakage_risks?.length ? <article className="cost-leakage-panel"><strong>Cost-Leakage Risks</strong><small className="panel-subtitle">Supported prediction and synthetic signals</small><CostLeakageRiskList risks={scenario.cost_leakage_risks} /></article> : null}
         </div>
-      </section>
+          </section>
 
-      <section className="llm-wide-section prediction-basis-section">
+          <section className="llm-wide-section prediction-basis-section">
         <div className="llm-section-heading"><span>Prediction Basis and Peer Evidence</span><small>Cutoff {basis.prediction_cutoff_date}</small></div>
         <dl className="llm-facts-grid"><div><dt>Earlier member claims</dt><dd>{basis.member_prior_claims_used || 0}</dd></div><div><dt>Earlier same-CPT claims</dt><dd>{basis.member_prior_same_cpt_claims || 0}</dd></div><div><dt>External financial peers</dt><dd>{basis.peer_claims_used || 0}</dd></div><div><dt>Peer episodes</dt><dd>{basis.peer_episodes_used || 0}</dd></div><div><dt>Matching level</dt><dd>{basis.matching_level}</dd></div><div><dt>Fallback level</dt><dd>{basis.fallback_level}</dd></div><div><dt>Model version</dt><dd>{basis.model_version}</dd></div><div><dt>Confidence</dt><dd>{formatProbability(confidence.score)} · {confidence.level}</dd></div></dl>
         <p className="confidence-explanation"><strong>Confidence drivers:</strong> {(confidence.drivers || []).join(', ') || 'None recorded'}. <strong>Penalties:</strong> {(confidence.penalties || []).join(', ') || 'None recorded'}.</p>
         <div className="llm-evidence-list">{evidence.map((item) => <article key={item.claim_id}><strong>Claim {item.claim_id}</strong><small>{formatDate(item.service_date)} · CPT {item.cpt_code} · {item.claim_status}</small><small>Actual allowed {formatOptionalCurrency(item.actual_allowed)} · Actual paid {formatOptionalCurrency(item.actual_paid)}</small></article>)}</div>
-      </section>
-
+          </section>
+        </div>
+      </main>
       <ProviderPredictionChat key={`${basis.source_csv_hash || 'source'}.${basis.model_version || 'model'}.${basis.calculation_version || 'calculation'}`} result={result} />
     </div>
   )
@@ -2346,12 +2349,29 @@ function ProviderPredictionChat({ result }) {
 
   return (
     <aside className="provider-chat-prompt" aria-label="Ask About This Prediction">
-      <div className="provider-chat-prompt-title"><span><Sparkles size={17} />Ask Groq about this prediction</span><button type="button" onClick={clear}>Clear chat</button></div>
-      <div className="chat-results-list" ref={resultsRef} aria-live="polite">{messages.map((message, index) => <div className={`chat-message-block ${message.role}`} key={`${message.role}-${index}`}><article className={`chat-result-card ${message.role}`}><strong>{message.role === 'user' ? 'Your question' : 'Grok provider assistant'}</strong><p>{message.text}</p>{message.meta?.evidence_claim_ids?.length ? <small>Evidence: {message.meta.evidence_claim_ids.join(', ')}</small> : null}</article>{message.role === 'assistant' ? <ChatFinancialExplanation explanation={message.meta?.financial_explanation} /> : null}</div>)}{loading ? <article className="chat-result-card assistant loading"><RefreshCw className="spin" size={16} /> Reviewing the structured prediction…</article> : null}</div>
-      <div className="chat-suggestions">{suggested.slice(0, 5).map((question) => <button type="button" key={question} onClick={() => submit(question)}>{question}</button>)}</div>
-      {error ? <div className="chat-error">{error}<button type="button" onClick={() => submit(lastQuestion)}>Retry</button></div> : null}
-      <div className="chatgpt-composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit() } }} placeholder="Ask about this claim prediction…" rows="1" /><button type="button" aria-label="Send chat question" onClick={() => submit()} disabled={loading || !draft.trim()}><Send size={18} /></button></div>
-      <small>Enter to send · Shift+Enter for a new line</small>
+      <header className="provider-chat-header">
+        <div className="provider-chat-heading">
+          <span className="provider-chat-icon"><Sparkles size={18} /></span>
+          <div><strong>Provider assistant</strong><small>Ask about this claim analysis</small></div>
+        </div>
+        {messages.length ? <button className="provider-chat-clear" type="button" onClick={clear}>Clear chat</button> : null}
+      </header>
+      <div className="provider-chat-body">
+        {!messages.length && !loading ? (
+          <div className="provider-chat-empty">
+            <span><Sparkles size={20} /></span>
+            <strong>Explore the analysis</strong>
+            <p>Ask about predicted payments, savings opportunities, risk exposure, or the evidence behind this result.</p>
+          </div>
+        ) : null}
+        <div className="chat-results-list" ref={resultsRef} aria-live="polite">{messages.map((message, index) => <div className={`chat-message-block ${message.role}`} key={`${message.role}-${index}`}><article className={`chat-result-card ${message.role}`}><strong>{message.role === 'user' ? 'Your question' : 'Groq provider assistant'}</strong><p>{message.text}</p>{message.meta?.evidence_claim_ids?.length ? <small>Evidence: {message.meta.evidence_claim_ids.join(', ')}</small> : null}</article>{message.role === 'assistant' ? <ChatFinancialExplanation explanation={message.meta?.financial_explanation} /> : null}</div>)}{loading ? <article className="chat-result-card assistant loading"><RefreshCw className="spin" size={16} /> Reviewing the structured prediction…</article> : null}</div>
+        <div className="chat-suggestions" aria-label="Suggested questions">{suggested.slice(0, 4).map((question) => <button type="button" key={question} onClick={() => submit(question)}>{question}</button>)}</div>
+        {error ? <div className="chat-error">{error}<button type="button" onClick={() => submit(lastQuestion)}>Retry</button></div> : null}
+      </div>
+      <footer className="provider-chat-composer-area">
+        <div className="chatgpt-composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit() } }} placeholder="Ask about this claim prediction…" rows="2" /><button type="button" aria-label="Send chat question" onClick={() => submit()} disabled={loading || !draft.trim()}><Send size={18} /></button></div>
+        <small>Enter to send · Shift+Enter for a new line</small>
+      </footer>
     </aside>
   )
 }

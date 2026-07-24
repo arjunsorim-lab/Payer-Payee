@@ -1,6 +1,7 @@
 import os
 import logging
 import time
+import json
 
 from dotenv import load_dotenv
 from pymongo import MongoClient
@@ -42,6 +43,24 @@ def connect_mongo():
         _client.admin.command("ping")
         _db = _client[MONGODB_DB]
         _data_source = "mongodb"
+        if _db.claims.count_documents({}) == 0:
+            try:
+                from .fallback_db import FALLBACK_CLAIMS_PATH
+                from .claim_mapper import build_member_documents
+            except ImportError:
+                from fallback_db import FALLBACK_CLAIMS_PATH
+                from claim_mapper import build_member_documents
+            if FALLBACK_CLAIMS_PATH.is_file():
+                with FALLBACK_CLAIMS_PATH.open(encoding="utf-8") as file:
+                    claims = json.load(file)
+                if claims:
+                    members = build_member_documents(claims)
+                    _db.claims.create_index("claimId", unique=True)
+                    _db.claims.create_index([("memberId", 1), ("diagnosisCode", 1), ("dos", -1)])
+                    _db.members.create_index("memberId", unique=True)
+                    _db.claims.insert_many(claims)
+                    _db.members.insert_many(members)
+                    logger.info("Automatically seeded %d claims into empty MongoDB", len(claims))
     except (PyMongoError, ValueError) as error:
         if _client is not None:
             _client.close()

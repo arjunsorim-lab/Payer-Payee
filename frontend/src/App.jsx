@@ -480,7 +480,10 @@ function App() {
   useEffect(() => {
     let active = true
 
-    fetchJson('/api/claims?limit=2000')
+    // Load the complete workbook list without running the expensive per-claim
+    // prediction engine. Detailed financial calculations remain available from
+    // the member, claim, and prediction endpoints when the user opens a record.
+    fetchJson('/api/claims?limit=2000&includeFinancial=false&compact=true')
       .then((payload) => {
         if (!active) return
         const items = payload.items || []
@@ -1922,6 +1925,11 @@ function ProviderLlmPanel({ claim, onCasePrediction }) {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
+  const predictionReady = Boolean(
+    result?.supported_money_summary
+    || result?.forecast
+    || result?.provider_financial_opportunity_summary
+  )
 
   useEffect(() => {
     setResult(null)
@@ -1967,8 +1975,8 @@ function ProviderLlmPanel({ claim, onCasePrediction }) {
         <div className="llm-intro">Run a concise provider-side explanation for this exact claim. Successful results are cached for faster repeat viewing.</div>
       ) : null}
       {error ? <div className="llm-config-note error">{error}</div> : null}
-      {result?.supported_money_summary ? <div className="llm-intro">Prediction ready for {result.claim_id}. Open it to review the canonical forecast, supported opportunity, pathway and workbook evidence.</div> : null}
-      {result?.supported_money_summary ? <button className="llm-secondary-button" type="button" onClick={() => setModalOpen(true)}>Open Provider Financial Prediction</button> : null}
+      {predictionReady ? <div className="llm-intro">Prediction ready for {result.claim_id}. Open it to review the forecast, financial exposure, recommended actions and supporting evidence.</div> : null}
+      {predictionReady ? <button className="llm-secondary-button" type="button" onClick={() => setModalOpen(true)}>Open Provider Financial Prediction</button> : null}
       {modalOpen ? <ProviderLlmModal claim={claim} result={result} loading={loading} error={error} onClose={() => setModalOpen(false)} onRetry={generatePrediction} /> : null}
     </Card>
   )
@@ -2001,10 +2009,101 @@ function ProviderLlmModal({ claim, result, loading, error, onClose, onRetry }) {
           {loading ? <div className="llm-modal-state"><RefreshCw className="spin" size={22} /> Calculating provider forecast and grounded explanation…</div> : null}
           {!loading && error ? <div className="llm-config-note error"><span>{error}</span><button className="llm-primary-button" type="button" onClick={onRetry}>Retry prediction</button></div> : null}
           {!loading && result?.supported_money_summary ? <ProviderMoneyLlmResult result={result} /> : null}
+          {!loading && !error && !result?.supported_money_summary && result?.forecast ? <ProviderRenderPredictionResult result={result} /> : null}
+          {!loading && !error && result && !result?.supported_money_summary && !result?.forecast ? (
+            <div className="llm-modal-state provider-response-error">
+              The prediction service returned an unsupported response. Please retry after the deployment finishes.
+            </div>
+          ) : null}
         </div>
       </div>
     </div>,
     document.body,
+  )
+}
+
+function ProviderRenderPredictionResult({ result }) {
+  const forecast = result.forecast || {}
+  const facts = result.actual_claim_facts || {}
+  const opportunity = result.provider_financial_opportunity_summary || {}
+  const metrics = result.provider_financial_metrics || {}
+  const basis = result.prediction_basis || {}
+  const savings = result.where_provider_money_can_be_saved || {}
+  const action = savings.best_action || {}
+  const confidence = forecast.confidence || opportunity.confidence || {}
+  const recommendations = Array.isArray(result.recommended_actions) ? result.recommended_actions : []
+  const risks = Array.isArray(result.risk_drivers) ? result.risk_drivers : []
+  const limitations = Array.isArray(result.limitations) ? result.limitations : []
+
+  return (
+    <main className="provider-analysis-scroll provider-render-analysis">
+      <div className="provider-llm-result provider-money-result">
+        {result.configured === false && result.message ? (
+          <div className="provider-deployment-note" role="note">
+            <Info size={19} />
+            <div><strong>Deterministic forecast ready</strong><p>{result.message} The calculated forecast below remains available.</p></div>
+          </div>
+        ) : null}
+
+        <section className="llm-wide-section financial-prediction-snapshot">
+          <div className="llm-section-heading"><span>Provider Financial Forecast</span><small>{basis.model_version || confidence.model_version}</small></div>
+          <div className="prediction-primary-grid">
+            <article><span>Predicted provider payment</span><strong>{formatOptionalCurrency(forecast.predicted_paid?.value ?? metrics.provider_expected_reimbursement)}</strong><small>{formatPredictionRange(forecast.predicted_paid)}</small></article>
+            <article><span>Predicted allowed</span><strong>{formatOptionalCurrency(forecast.predicted_allowed?.value)}</strong><small>{formatPredictionRange(forecast.predicted_allowed)}</small></article>
+            <article><span>Contractual adjustment</span><strong>{formatOptionalCurrency(forecast.predicted_adjustment?.value ?? opportunity.expected_contractual_adjustment)}</strong><small>{formatPredictionRange(forecast.predicted_adjustment)}</small></article>
+            <article><span>Patient responsibility</span><strong>{formatOptionalCurrency(forecast.predicted_patient_responsibility?.value ?? metrics.predicted_patient_balance)}</strong><small>{formatPredictionRange(forecast.predicted_patient_responsibility)}</small></article>
+          </div>
+          <dl className="prediction-detail-grid">
+            <div><dt>Denial exposure</dt><dd>{formatOptionalCurrency(opportunity.expected_denial_revenue_exposure ?? metrics.expected_denial_exposure)}</dd></div>
+            <div><dt>Repeat-payment exposure</dt><dd>{formatOptionalCurrency(opportunity.expected_repeat_provider_payment_exposure ?? metrics.expected_repeat_provider_payment_exposure)}</dd></div>
+            <div><dt>Provider payment gap</dt><dd>{formatOptionalCurrency(metrics.provider_payment_gap)}</dd></div>
+            <div><dt>Model confidence</dt><dd>{formatProbability(confidence.score)} · {confidence.level}</dd></div>
+            <div><dt>Historical claims used</dt><dd>{basis.peer_claims_used}</dd></div>
+            <div><dt>Matching level</dt><dd>{basis.matching_level}</dd></div>
+          </dl>
+        </section>
+
+        <section className="llm-wide-section provider-savings-section">
+          <div className="llm-section-heading"><span>Recommended Provider Action</span><small>{opportunity.best_savings_phase || action.stage}</small></div>
+          <div className="best-action-card">
+            <span>{action.stage || opportunity.best_savings_phase}</span>
+            <strong>{action.action || recommendations[0]?.title}</strong>
+            <p>{action.reason || opportunity.supporting_reason || opportunity.opportunity_reason}</p>
+            <div className="savings-action-meta">
+              <small>Owner: {action.owner || opportunity.responsible_operational_team}</small>
+              <small>Confidence: {formatProbability(action.confidence ?? confidence.score)}</small>
+              <small>Evidence: {(action.affected_claim_ids || opportunity.affected_claim_ids || []).join(', ')}</small>
+            </div>
+          </div>
+          {recommendations.length ? (
+            <div className="provider-render-actions">
+              {recommendations.map((item) => (
+                <article key={item.code || item.rank}>
+                  <b>{item.rank}</b>
+                  <div><strong>{item.title}</strong><p>{item.reason}</p><small>{item.operational_owner} · {item.urgency}</small></div>
+                </article>
+              ))}
+            </div>
+          ) : null}
+        </section>
+
+        <section className="llm-wide-section actual-predicted-section">
+          <div className="llm-section-heading"><span>Actual Claim and Risk Evidence</span><small>{result.claim_id}</small></div>
+          <div className="actual-predicted-columns">
+            <article><h3>Actual claim</h3><dl><div><dt>Status</dt><dd>{facts.claim_status}</dd></div><div><dt>Charge</dt><dd>{formatOptionalCurrency(facts.charge)}</dd></div><div><dt>Allowed</dt><dd>{formatOptionalCurrency(facts.allowed)}</dd></div><div><dt>Paid</dt><dd>{formatOptionalCurrency(facts.paid)}</dd></div><div><dt>Patient responsibility</dt><dd>{formatOptionalCurrency(facts.patient_responsibility)}</dd></div></dl></article>
+            <article><h3>Prediction basis</h3><dl><div><dt>Cutoff date</dt><dd>{basis.prediction_cutoff_date}</dd></div><div><dt>Member history</dt><dd>{basis.member_prior_claims_used}</dd></div><div><dt>Same-CPT history</dt><dd>{basis.member_prior_same_cpt_claims_used ?? basis.member_prior_same_cpt_claims}</dd></div><div><dt>Peer episodes</dt><dd>{basis.peer_episodes_used}</dd></div><div><dt>Calculation version</dt><dd>{basis.calculation_version}</dd></div></dl></article>
+          </div>
+          {risks.length ? <div className="provider-render-risks">{risks.map((item) => <article key={item.title}><strong>{item.title}</strong><b>{item.value}</b><p>{item.reason}</p></article>)}</div> : null}
+        </section>
+
+        {limitations.length ? (
+          <section className="llm-wide-section provider-render-limitations">
+            <div className="llm-section-heading"><span>Decision-support limits</span><small>{limitations.length}</small></div>
+            <ul>{limitations.map((item) => <li key={item}>{item}</li>)}</ul>
+          </section>
+        ) : null}
+      </div>
+    </main>
   )
 }
 

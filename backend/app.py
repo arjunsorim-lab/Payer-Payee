@@ -59,6 +59,13 @@ def page_options(args, default_limit=25, max_limit=2000):
     return page, limit, (page - 1) * limit
 
 
+def query_flag(args, name, default=True):
+    value = args.get(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() not in {"0", "false", "no", "off"}
+
+
 def configured_workbook_database():
     """Return the configured workbook repository or None when not configured."""
     configured = os.getenv("SAVINGS_WORKBOOK_PATH", "").strip()
@@ -100,8 +107,20 @@ def workbook_claims_for_request(database, args):
     return sorted(rows, key=lambda claim: (claim.get("dos", ""), claim.get("claimId", "")), reverse=True)
 
 
-def workbook_claim_for_api(database, claim, include_summary=True):
+def workbook_claim_for_api(database, claim, include_summary=True, compact=False):
     payload = {key: value for key, value in claim.items() if key != "raw"}
+    if compact:
+        for key in (
+            "workbookFields",
+            "sourceRowHash",
+            "sourceWorkbookHash",
+            "workbookSourceRow",
+            "calculationVersion",
+            "predictionVersion",
+            "ragIndexVersion",
+            "isHistoricalReference",
+        ):
+            payload.pop(key, None)
     if include_summary:
         payload["supportedMoneySummary"] = build_financial_result(
             database, claim["claimId"]
@@ -269,20 +288,39 @@ def get_claims():
     if database:
         rows = workbook_claims_for_request(database, request.args)
         page, limit, skip = page_options(request.args)
-        member_summaries = {
-            member_id: member_supported_summary(database, member_id)
-            for member_id in {claim["memberId"] for claim in rows}
-        }
+        page_rows = rows[skip: skip + limit]
+        include_financial = query_flag(request.args, "includeFinancial")
+        compact = query_flag(request.args, "compact", default=False)
+        member_summaries = (
+            {
+                member_id: member_supported_summary(database, member_id)
+                for member_id in {claim["memberId"] for claim in page_rows}
+            }
+            if include_financial
+            else {}
+        )
         return json_response({
             "page": page,
             "limit": limit,
             "total": len(rows),
             "items": [
                 {
-                    **workbook_claim_for_api(database, claim),
-                    "memberSupportedMoneySummary": member_summaries[claim["memberId"]],
+                    **workbook_claim_for_api(
+                        database,
+                        claim,
+                        include_summary=include_financial,
+                        compact=compact,
+                    ),
+                    **(
+                        {
+                            "memberSupportedMoneySummary":
+                                member_summaries[claim["memberId"]]
+                        }
+                        if include_financial
+                        else {}
+                    ),
                 }
-                for claim in rows[skip: skip + limit]
+                for claim in page_rows
             ],
             "source": database.source_banner(),
         })

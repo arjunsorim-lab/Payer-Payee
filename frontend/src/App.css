@@ -7125,6 +7125,85 @@ dd {
   margin-top: 16px;
 }
 
+.provider-supported-summary,
+.provider-render-scenario-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.provider-supported-summary article,
+.provider-render-scenario-grid article {
+  padding: 15px;
+  border: 1px solid #dfe7f1;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.provider-supported-summary span,
+.provider-render-scenario-grid span {
+  display: block;
+  margin-bottom: 7px;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.provider-supported-summary strong,
+.provider-render-scenario-grid strong {
+  color: #14213d;
+  font-size: 17px;
+}
+
+.provider-supported-summary p,
+.provider-render-scenario-grid p {
+  margin: 7px 0;
+  color: #64748b;
+  line-height: 1.45;
+}
+
+.provider-render-workflow {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(90px, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.provider-render-workflow article {
+  display: grid;
+  min-height: 72px;
+  place-items: center;
+  padding: 9px;
+  border: 1px solid #dfe7f1;
+  border-radius: 10px;
+  color: #475569;
+  text-align: center;
+  background: #f8fafc;
+}
+
+.provider-render-workflow article.selected {
+  border-color: #60a5fa;
+  color: #1d4ed8;
+  background: #eff6ff;
+}
+
+.provider-render-workflow b {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  background: #64748b;
+}
+
+.provider-render-workflow .selected b {
+  background: #2563eb;
+}
+
 .provider-render-actions article {
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr);
@@ -7180,6 +7259,17 @@ dd {
 .provider-response-error {
   padding: 28px;
   text-align: center;
+}
+
+@media (max-width: 900px) {
+  .provider-supported-summary,
+  .provider-render-scenario-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .provider-render-workflow {
+    grid-template-columns: repeat(4, minmax(90px, 1fr));
+  }
 }
 
 .provider-money-result {

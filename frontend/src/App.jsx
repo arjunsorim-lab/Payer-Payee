@@ -2029,15 +2029,18 @@ function ProviderRenderPredictionResult({ result }) {
   const metrics = result.provider_financial_metrics || {}
   const basis = result.prediction_basis || {}
   const savings = result.where_provider_money_can_be_saved || {}
+  const scenario = result.provider_money_scenario_map || {}
   const action = savings.best_action || {}
+  const validatedOpportunity = opportunity.validated_real_savings || savings.validated_real_savings || {}
   const confidence = forecast.confidence || opportunity.confidence || {}
   const recommendations = Array.isArray(result.recommended_actions) ? result.recommended_actions : []
   const risks = Array.isArray(result.risk_drivers) ? result.risk_drivers : []
   const limitations = Array.isArray(result.limitations) ? result.limitations : []
 
   return (
-    <main className="provider-analysis-scroll provider-render-analysis">
-      <div className="provider-llm-result provider-money-result">
+    <div className="provider-llm-workspace">
+      <main className="provider-analysis-scroll">
+        <div className="provider-llm-result provider-money-result">
         {result.configured === false && result.message ? (
           <div className="provider-deployment-note" role="note">
             <Info size={19} />
@@ -2064,7 +2067,24 @@ function ProviderRenderPredictionResult({ result }) {
         </section>
 
         <section className="llm-wide-section provider-savings-section">
-          <div className="llm-section-heading"><span>Recommended Provider Action</span><small>{opportunity.best_savings_phase || action.stage}</small></div>
+          <div className="llm-section-heading"><span>Supported Financial Opportunity</span><small>{opportunity.best_savings_phase || action.stage}</small></div>
+          <div className="provider-supported-summary">
+            <article>
+              <span>Verified recovery amount</span>
+              <strong>{validatedOpportunity.available ? formatOptionalCurrency(validatedOpportunity.amount) : 'No verified positive amount'}</strong>
+              <p>{validatedOpportunity.reason || opportunity.opportunity_reason}</p>
+            </article>
+            <article>
+              <span>Denial revenue exposure</span>
+              <strong>{formatOptionalCurrency(opportunity.expected_denial_revenue_exposure ?? metrics.expected_denial_exposure)}</strong>
+              <p>Forecast exposure is kept separate from verified recovery.</p>
+            </article>
+            <article>
+              <span>Repeat-payment exposure</span>
+              <strong>{formatOptionalCurrency(opportunity.expected_repeat_provider_payment_exposure ?? metrics.expected_repeat_provider_payment_exposure)}</strong>
+              <p>90-day forecast based on earlier related claims.</p>
+            </article>
+          </div>
           <div className="best-action-card">
             <span>{action.stage || opportunity.best_savings_phase}</span>
             <strong>{action.action || recommendations[0]?.title}</strong>
@@ -2088,12 +2108,54 @@ function ProviderRenderPredictionResult({ result }) {
         </section>
 
         <section className="llm-wide-section actual-predicted-section">
-          <div className="llm-section-heading"><span>Actual Claim and Risk Evidence</span><small>{result.claim_id}</small></div>
+          <div className="llm-section-heading"><span>Actual vs Predicted</span><small>{result.claim_id}</small></div>
           <div className="actual-predicted-columns">
-            <article><h3>Actual claim</h3><dl><div><dt>Status</dt><dd>{facts.claim_status}</dd></div><div><dt>Charge</dt><dd>{formatOptionalCurrency(facts.charge)}</dd></div><div><dt>Allowed</dt><dd>{formatOptionalCurrency(facts.allowed)}</dd></div><div><dt>Paid</dt><dd>{formatOptionalCurrency(facts.paid)}</dd></div><div><dt>Patient responsibility</dt><dd>{formatOptionalCurrency(facts.patient_responsibility)}</dd></div></dl></article>
-            <article><h3>Prediction basis</h3><dl><div><dt>Cutoff date</dt><dd>{basis.prediction_cutoff_date}</dd></div><div><dt>Member history</dt><dd>{basis.member_prior_claims_used}</dd></div><div><dt>Same-CPT history</dt><dd>{basis.member_prior_same_cpt_claims_used ?? basis.member_prior_same_cpt_claims}</dd></div><div><dt>Peer episodes</dt><dd>{basis.peer_episodes_used}</dd></div><div><dt>Calculation version</dt><dd>{basis.calculation_version}</dd></div></dl></article>
+            <article><h3>Actual claim</h3><dl><div><dt>Status</dt><dd>{facts.claim_status}</dd></div><div><dt>Charge</dt><dd>{formatOptionalCurrency(facts.charge ?? facts.charge_amount)}</dd></div><div><dt>Allowed</dt><dd>{formatOptionalCurrency(facts.allowed ?? facts.allowed_amount)}</dd></div><div><dt>Paid</dt><dd>{formatOptionalCurrency(facts.paid ?? facts.paid_amount)}</dd></div><div><dt>Patient responsibility</dt><dd>{formatOptionalCurrency(facts.patient_responsibility)}</dd></div></dl></article>
+            <article><h3>Predicted result</h3><dl><div><dt>Outcome</dt><dd>{forecast.predicted_claim_outcome?.display_value}</dd></div><div><dt>Allowed</dt><dd>{formatOptionalCurrency(forecast.predicted_allowed?.value)}</dd></div><div><dt>Provider payment</dt><dd>{formatOptionalCurrency(forecast.predicted_paid?.value)}</dd></div><div><dt>Patient responsibility</dt><dd>{formatOptionalCurrency(forecast.predicted_patient_responsibility?.value)}</dd></div><div><dt>Adjustment</dt><dd>{formatOptionalCurrency(forecast.predicted_adjustment?.value)}</dd></div></dl></article>
           </div>
           {risks.length ? <div className="provider-render-risks">{risks.map((item) => <article key={item.title}><strong>{item.title}</strong><b>{item.value}</b><p>{item.reason}</p></article>)}</div> : null}
+        </section>
+
+        <section className="llm-wide-section scenario-map-section">
+          <div className="llm-section-heading"><span>Provider Money Scenario Map</span><small>Encounter → prediction → provider action</small></div>
+          <div className="provider-render-workflow">
+            {(scenario.claim_workflow || []).map((item, index) => (
+              <article className={item.selected ? 'selected' : ''} key={item.stage}>
+                <b>{index + 1}</b><span>{item.stage}</span>
+              </article>
+            ))}
+          </div>
+          <div className="provider-render-scenario-grid">
+            <article>
+              <span>Encounter and coding</span>
+              <strong>{scenario.encounter_and_coding?.cpt_code} · {scenario.encounter_and_coding?.cpt_description}</strong>
+              <p>{scenario.encounter_and_coding?.diagnosis} · {scenario.encounter_and_coding?.place_of_service}</p>
+              <small>{scenario.encounter_and_coding?.payer} · {scenario.encounter_and_coding?.billing_provider}</small>
+            </article>
+            <article>
+              <span>Payment prediction</span>
+              <strong>{formatOptionalCurrency(scenario.provider_claim_payment_prediction?.expected_provider_payment)}</strong>
+              <p>Allowed {formatOptionalCurrency(scenario.provider_claim_payment_prediction?.predicted_allowed?.value)} · Denial {formatProbability(scenario.provider_claim_payment_prediction?.denial_probability)}</p>
+              <small>Repeat probability {formatProbability(scenario.provider_claim_payment_prediction?.repeat_probability_90d)} at 90 days</small>
+            </article>
+            <article>
+              <span>Supported action</span>
+              <strong>{scenario.where_provider_money_may_be_saved?.best_next_provider_action?.stage || action.stage}</strong>
+              <p>{scenario.where_provider_money_may_be_saved?.best_next_provider_action?.action || action.action}</p>
+              <small>Owner: {scenario.where_provider_money_may_be_saved?.best_next_provider_action?.owner || action.owner}</small>
+            </article>
+          </div>
+        </section>
+
+        <section className="llm-wide-section prediction-basis-section">
+          <div className="llm-section-heading"><span>Prediction Explanation</span><small>{basis.model_version}</small></div>
+          <div className="layman-explanation">
+            <article><span>1</span><div><strong>What this prediction means</strong><p>The model forecasts a provider payment of {formatOptionalCurrency(forecast.predicted_paid?.value)} from a predicted allowed amount of {formatOptionalCurrency(forecast.predicted_allowed?.value)}.</p></div></article>
+            <article><span>2</span><div><strong>How the forecast was determined</strong><p>It used {basis.peer_claims_used} earlier claims across {basis.peer_episodes_used} peer episodes, with {basis.matching_level} matching.</p></div></article>
+            <article><span>3</span><div><strong>Where the financial risk sits</strong><p>Denial exposure is {formatOptionalCurrency(opportunity.expected_denial_revenue_exposure)} and 90-day repeat-payment exposure is {formatOptionalCurrency(opportunity.expected_repeat_provider_payment_exposure)}.</p></div></article>
+            <article><span>4</span><div><strong>What the provider should do next</strong><p>{action.action || recommendations[0]?.reason}</p></div></article>
+            <article><span>5</span><div><strong>Confidence and limits</strong><p>{confidence.explanation} Prediction cutoff: {basis.prediction_cutoff_date}.</p></div></article>
+          </div>
         </section>
 
         {limitations.length ? (
@@ -2102,8 +2164,10 @@ function ProviderRenderPredictionResult({ result }) {
             <ul>{limitations.map((item) => <li key={item}>{item}</li>)}</ul>
           </section>
         ) : null}
-      </div>
-    </main>
+        </div>
+      </main>
+      <ProviderPredictionChat key={`${basis.model_version}.${basis.calculation_version}.${result.claim_id}`} result={result} />
+    </div>
   )
 }
 
@@ -2327,6 +2391,22 @@ export function ProviderMoneyLlmResult({ result }) {
 function ChatFinancialExplanation({ explanation }) {
   if (!explanation) return null
   const action = explanation.best_action || {}
+  const future = explanation.future_financial_exposure || {}
+  const validated = explanation.validated_real_savings || {}
+  if (explanation.future_financial_exposure || explanation.validated_real_savings) {
+    return (
+      <section className="chat-financial-explanation">
+        <strong>Prediction and Money Breakdown</strong>
+        <div className="chat-financial-grid">
+          <article><span>Verified recovery</span><b>{validated.available ? formatOptionalCurrency(validated.amount) : 'No verified positive amount'}</b></article>
+          <article><span>Denial exposure</span><b>{formatOptionalCurrency(future.denial_exposure)}</b><small>Forecast only</small></article>
+          <article><span>Repeat-payment exposure</span><b>{formatOptionalCurrency(future.repeat_provider_payment_exposure)}</b><small>Forecast only</small></article>
+          <article><span>Best action</span><b>{action.stage}</b><small>{action.action}</small></article>
+        </div>
+        <footer>Confidence: {formatProbability(explanation.confidence?.score)}{explanation.limitations?.length ? ` · ${explanation.limitations[0]}` : ''}</footer>
+      </section>
+    )
+  }
   return (
     <section className="chat-financial-explanation">
       <strong>Prediction and Money Breakdown</strong>
@@ -2348,7 +2428,15 @@ function ChatFinancialExplanation({ explanation }) {
 function ProviderPredictionChat({ result }) {
   const claimId = result.claim_id
   const episodeId = result.episode_id
-  const predictionIdentity = [result.source?.workbook_hash, result.financial_result_hash, result.source?.calculation_version, result.source?.rag_index_version, result.source?.groq_prompt_version].filter(Boolean).join('.') || 'current'
+  const predictionIdentity = [
+    result.source?.workbook_hash,
+    result.financial_result_hash,
+    result.source?.calculation_version,
+    result.source?.rag_index_version,
+    result.source?.groq_prompt_version,
+    result.prediction_basis?.model_version,
+    result.prediction_basis?.calculation_version,
+  ].filter(Boolean).join('.') || 'current'
   const storageKey = `payerpayee.provider-chat.${claimId}.${episodeId}.${predictionIdentity}`
   const conversationId = useMemo(() => `${claimId}-${episodeId}-${Date.now().toString(36)}`, [claimId, episodeId])
   const [messages, setMessages] = useState(() => {

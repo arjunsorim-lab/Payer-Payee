@@ -42,6 +42,20 @@ test('provider prediction consumes one canonical backend result', () => {
   assert.match(app, /encodeURIComponent\(claim\.claimId \|\| claim\.number\)/)
 })
 
+test('Render fallback prediction displays content instead of a blank modal', () => {
+  assert.match(app, /function ProviderRenderPredictionResult/)
+  assert.match(app, /!result\?\.supported_money_summary && result\?\.forecast/)
+  assert.match(app, /Provider Financial Forecast/)
+  assert.match(app, /Supported Financial Opportunity/)
+  assert.match(app, /Actual vs Predicted/)
+  assert.match(app, /Provider Money Scenario Map/)
+  assert.match(app, /Prediction Explanation/)
+  assert.match(app, /<ProviderPredictionChat/)
+  assert.match(app, /Deterministic forecast ready/)
+  assert.match(app, /result\.configured === false/)
+  assert.match(app, /predictionReady/)
+})
+
 test('scenario map is a structured eight-step pathway', () => {
   assert.match(app, /function ScenarioMapSection/)
   assert.match(app, /section\.step === 6/)

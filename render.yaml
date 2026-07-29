@@ -17,5 +17,7 @@ services:
         value: 5000
       - key: MONGODB_RETRY_SECONDS
         value: 60
+      - key: SAVINGS_WORKBOOK_PATH
+        value: data/claims-demo.xlsx
       - key: MONGODB_URI
         sync: false

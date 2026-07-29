@@ -28,6 +28,9 @@ except ImportError:
     from workbook_llm import generate_workbook_chat_answer, generate_workbook_prediction_explanation
 
 FRONTEND_DIST_DIR = Path(__file__).resolve().parent.parent / "dist"
+BUNDLED_WORKBOOK_PATH = (
+    Path(__file__).resolve().parent.parent / "data" / "claims-demo.xlsx"
+)
 
 app = Flask(__name__, static_folder=None)
 CORS(app, origins=os.getenv("CORS_ORIGIN", "*").split(","))
@@ -69,6 +72,8 @@ def query_flag(args, name, default=True):
 def configured_workbook_database():
     """Return the configured workbook repository or None when not configured."""
     configured = os.getenv("SAVINGS_WORKBOOK_PATH", "").strip()
+    if not configured and BUNDLED_WORKBOOK_PATH.is_file():
+        configured = str(BUNDLED_WORKBOOK_PATH)
     if not configured:
         return None
     try:

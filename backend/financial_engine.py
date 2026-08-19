@@ -16,6 +16,17 @@ from threading import RLock
 import numpy as np
 
 try:
+    from .claim_patterns import (
+        historical_patterns,
+        select_peers,
+        short_timeframe_patterns,
+        similar_historical_claims,
+    )
+    from .avoidable_prediction import (
+        MIN_HIERARCHY_PEERS,
+        PRIOR_STRENGTH,
+        build_predicted_avoidable_spend,
+    )
     from .workbook_enrichment import (
         CALCULATION_VERSION,
         GROQ_PROMPT_VERSION,
@@ -24,6 +35,17 @@ try:
         SAVINGS_VERSION,
     )
 except ImportError:
+    from claim_patterns import (
+        historical_patterns,
+        select_peers,
+        short_timeframe_patterns,
+        similar_historical_claims,
+    )
+    from avoidable_prediction import (
+        MIN_HIERARCHY_PEERS,
+        PRIOR_STRENGTH,
+        build_predicted_avoidable_spend,
+    )
     from workbook_enrichment import (
         CALCULATION_VERSION,
         GROQ_PROMPT_VERSION,
@@ -125,34 +147,8 @@ def _insufficient(category, missing):
 
 
 def _historical_peers(database, claim):
-    cutoff = claim.get("dos") or ""
-    fields = claim["workbookFields"]
-    exact = [
-        row for row in database.historical_claims
-        if row.get("dos", "") < cutoff
-        and row.get("cptCode") == claim.get("cptCode")
-        and row.get("payer") == claim.get("payer")
-        and row.get("placeOfServiceCode") == claim.get("placeOfServiceCode")
-    ]
-    same_cpt = [
-        row for row in database.historical_claims
-        if row.get("dos", "") < cutoff and row.get("cptCode") == claim.get("cptCode")
-    ]
-    same_family = [
-        row for row in database.historical_claims
-        if row.get("dos", "") < cutoff
-        and _text(row["workbookFields"].get("ICD10_Family")) == _text(fields.get("ICD10_Family"))
-    ]
-    if len(exact) >= 5:
-        return exact, "same payer + CPT + place of service"
-    if len(same_cpt) >= 5:
-        return same_cpt, "same CPT"
-    if len(same_family) >= 5:
-        return same_family, "same diagnosis family"
-    return [
-        row for row in database.historical_claims
-        if row.get("dos", "") < cutoff
-    ], "all prior historical-reference records"
+    peers, basis = select_peers(database, claim)
+    return peers, basis["peer_label"]
 
 
 def _safe_ratio(numerator, denominator):
@@ -213,8 +209,86 @@ def _repeat_probabilities(database, peers, cutoff):
     }
 
 
+def _denial_prediction(database, claim):
+    cutoff = claim.get("dos") or ""
+    fields = claim["workbookFields"]
+    family = _text(fields.get("ICD10_Family"))
+    source = getattr(database, "claims", database.historical_claims)
+    prior = [row for row in source if row.get("dos", "") < cutoff]
+
+    def denied(row):
+        row_fields = row.get("workbookFields", {})
+        denial_flag = _text(
+            row_fields.get("Denial_Correctable_Flag")
+        ).upper()
+        appeal_status = _lower(row_fields.get("Appeal_Status"))
+        resubmission_status = _lower(
+            row_fields.get("Resubmission_Status")
+        )
+        denial_resolution = _lower(
+            row_fields.get("Denial_Resolution")
+        )
+        return (
+            "denied" in _lower(row.get("status"))
+            or "reject" in _lower(row.get("status"))
+            or denial_flag in {"Y", "N"}
+            or appeal_status not in {"", "n/a", "not applicable"}
+            or resubmission_status
+            not in {"", "n/a", "not applicable"}
+            or denial_resolution not in {"", "n/a", "not applicable"}
+        )
+
+    local = [
+        row
+        for row in prior
+        if row.get("memberId") == claim.get("memberId")
+        and row.get("cptCode") == claim.get("cptCode")
+    ]
+    peers, peer_basis = select_peers(database, claim, MIN_HIERARCHY_PEERS)
+    peer_level = peer_basis["peer_label"]
+    local_denials = sum(denied(row) for row in local)
+    peer_denials = sum(denied(row) for row in peers)
+    peer_rate = _safe_ratio(peer_denials, len(peers))
+    probability = _safe_ratio(
+        local_denials + PRIOR_STRENGTH * peer_rate,
+        len(local) + PRIOR_STRENGTH,
+    )
+    observation_count = len(local) + len(peers)
+    specificity = 1 - (peer_basis["peer_level"] - 1) / 9
+    confidence = min(
+        0.95,
+        max(
+            0.1,
+            0.35
+            + min(observation_count, 100) / 250
+            + specificity * 0.2,
+        ),
+    )
+    return {
+        "probability": round(probability, 6),
+        "local_denials": local_denials,
+        "local_claim_count": len(local),
+        "local_rate": round(_safe_ratio(local_denials, len(local)), 6),
+        "peer_denials": peer_denials,
+        "peer_count": len(peers),
+        "peer_rate": round(peer_rate, 6),
+        "peer_level": peer_level,
+        "peer_hierarchy": peer_basis,
+        "evidence_claims": list(dict.fromkeys(row["claimId"] for row in local + peers)),
+        "local_numerator": local_denials,
+        "local_denominator": len(local),
+        "external_numerator": peer_denials,
+        "external_denominator": len(peers),
+        "external_rate": round(peer_rate, 6),
+        "final_blended_probability": round(probability, 6),
+        "prior_strength": PRIOR_STRENGTH,
+        "confidence": round(confidence, 4),
+    }
+
+
 def _prediction(database, claim):
-    peers, match_level = _historical_peers(database, claim)
+    peers, peer_basis = select_peers(database, claim)
+    match_level = peer_basis["peer_label"]
     charge = _money(claim.get("totalCharge"))
     allowed_rates = [
         _safe_ratio(_money(row.get("allowed")), _money(row.get("totalCharge")))
@@ -228,21 +302,30 @@ def _prediction(database, claim):
         _safe_ratio(_money(row.get("patientResp")), _money(row.get("allowed")))
         for row in peers if _money(row.get("allowed")) > 0
     ]
-    denial_flags = [
-        1.0 if "denied" in _lower(row.get("status")) or "reject" in _lower(row.get("status")) else 0.0
-        for row in peers
-    ]
-    allowed_rate = median(allowed_rates) if allowed_rates else _safe_ratio(_money(claim.get("allowed")), charge)
-    paid_rate = median(paid_rates) if paid_rates else _safe_ratio(_money(claim.get("paid")), _money(claim.get("allowed")))
-    patient_rate = median(patient_rates) if patient_rates else _safe_ratio(_money(claim.get("patientResp")), _money(claim.get("allowed")))
+    # Never use the selected claim's adjudicated result as a prediction feature.
+    allowed_rate = median(allowed_rates) if allowed_rates else 0.0
+    paid_rate = median(paid_rates) if paid_rates else 0.0
+    patient_rate = median(patient_rates) if patient_rates else 0.0
     allowed_candidates = [_money(charge * rate) for rate in allowed_rates]
     paid_candidates = [
-        _money(charge * allowed * paid)
-        for allowed, paid in zip(allowed_rates, paid_rates)
+        _money(
+            charge
+            * _safe_ratio(_money(row.get("allowed")), _money(row.get("totalCharge")))
+            * _safe_ratio(_money(row.get("paid")), _money(row.get("allowed")))
+        )
+        for row in peers
+        if _money(row.get("totalCharge")) > 0
+        and _money(row.get("allowed")) > 0
     ]
     patient_candidates = [
-        _money(charge * allowed * patient)
-        for allowed, patient in zip(allowed_rates, patient_rates)
+        _money(
+            charge
+            * _safe_ratio(_money(row.get("allowed")), _money(row.get("totalCharge")))
+            * _safe_ratio(_money(row.get("patientResp")), _money(row.get("allowed")))
+        )
+        for row in peers
+        if _money(row.get("totalCharge")) > 0
+        and _money(row.get("allowed")) > 0
     ]
     predicted_allowed_range = _prediction_range(allowed_candidates, charge * allowed_rate)
     predicted_paid_range = _prediction_range(
@@ -258,11 +341,33 @@ def _prediction(database, claim):
         adjustment_candidates,
         max(charge - predicted_allowed_range["value"], 0),
     )
+    common_evidence = {
+        "peer_count": len(peers),
+        "peer_level": match_level,
+        "peer_hierarchy_level": peer_basis["peer_level"],
+        "matching_dimensions": peer_basis["matching_dimensions"],
+        "claim_ids_used": peer_basis["claim_ids_used"],
+    }
+    for prediction_range, historical_rate in (
+        (predicted_allowed_range, allowed_rate),
+        (predicted_paid_range, paid_rate),
+        (predicted_patient_range, patient_rate),
+        (predicted_adjustment_range, 1 - allowed_rate),
+    ):
+        prediction_range.update(common_evidence)
+        prediction_range["historical_rate"] = round(historical_rate, 6)
     predicted_allowed = predicted_allowed_range["value"]
     predicted_paid = predicted_paid_range["value"]
     predicted_patient = predicted_patient_range["value"]
-    denial_probability = round(sum(denial_flags) / len(denial_flags), 4) if denial_flags else 0.0
-    repeat = _repeat_probabilities(database, peers, claim.get("dos") or "")
+    denial_prediction = _denial_prediction(database, claim)
+    denial_probability = denial_prediction["probability"]
+    avoidable_prediction = build_predicted_avoidable_spend(
+        database,
+        claim,
+        predicted_allowed,
+        predicted_paid,
+    )
+    repeat = avoidable_prediction["repeat_probability"]
     sample_size = len(peers)
     confidence = min(0.95, round(0.45 + min(sample_size, 100) / 200, 4))
     return {
@@ -275,14 +380,30 @@ def _prediction(database, claim):
         "predicted_patient_responsibility_range": predicted_patient_range,
         "predicted_adjustment_range": predicted_adjustment_range,
         "denial_probability": denial_probability,
-        "repeat_probability_30d": repeat[30],
-        "repeat_probability_60d": repeat[60],
-        "repeat_probability_90d": repeat[90],
+        "denial_prediction_basis": denial_prediction,
+        "repeat_probability_30d": repeat["probability_30d"],
+        "repeat_probability_60d": repeat["probability_60d"],
+        "repeat_probability_90d": repeat["probability_90d"],
+        "predicted_avoidable_spend": avoidable_prediction[
+            "predicted_avoidable_spend"
+        ],
+        "predicted_avoidable_provider_payment": avoidable_prediction[
+            "predicted_avoidable_provider_payment"
+        ],
+        "avoidable_prediction_basis": {
+            "repeat_probability": avoidable_prediction["repeat_probability"],
+            "avoidable_probability": avoidable_prediction[
+                "avoidable_probability"
+            ],
+            "repeat_cost": avoidable_prediction["repeat_cost"],
+        },
+        "avoidable_formula_trace": avoidable_prediction["formula_trace"],
         "peer_sample_size": sample_size,
         "matching_level": match_level,
+        "peer_hierarchy": peer_basis,
         "cutoff_date": claim.get("dos"),
         "version": PREDICTION_VERSION,
-        "method": "Historical-reference peer-rate median with 10th–90th percentile range",
+        "method": "Historical-reference peer-rate median plus Bayesian hierarchical 90-day avoidable-repeat forecast",
         "formula_trace": [
             f"Predicted allowed = charge {_money(charge):.2f} × historical median allowed rate {allowed_rate:.4f} = {predicted_allowed:.2f}.",
             f"Predicted paid = predicted allowed {predicted_allowed:.2f} × historical median paid-to-allowed rate {paid_rate:.4f} = {predicted_paid:.2f}.",
@@ -596,6 +717,10 @@ def _avoidable_spend(database, claim):
             evidence_claim_ids=[row["claimId"] for row in current_episode],
             data_source="historical_reference",
             confidence=0.85,
+            details={
+                "comparable_episode_count": count,
+                "minimum_comparator_count": MIN_COMPARATOR_EPISODES,
+            },
         )
     current_cost = _money(sum(_money(row.get("allowed")) for row in current_episode))
     comparator_median = _money(median(comparator_costs))
@@ -648,18 +773,39 @@ def _financial_prediction_snapshot(prediction):
     repeat_payment_exposure = _money(
         prediction["repeat_probability_90d"] * predicted_paid["value"]
     )
+    denial_basis = prediction["denial_prediction_basis"]
+    future_denial_exposure = {
+        "value": denial_exposure,
+        "denial_probability": prediction["denial_probability"],
+        "denial_prediction_basis": prediction["denial_prediction_basis"],
+        "predicted_paid": predicted_paid["value"],
+        "peer_count": denial_basis["peer_count"],
+        "peer_level": denial_basis["peer_level"],
+        "confidence": denial_basis["confidence"],
+    }
     return {
         "predicted_allowed": predicted_allowed,
         "predicted_provider_payment": predicted_paid,
         "predicted_patient_responsibility": predicted_patient,
         "predicted_contractual_adjustment": predicted_adjustment,
         "denial_probability": prediction["denial_probability"],
+        "denial_prediction_basis": denial_basis,
         "repeat_probability_30d": prediction["repeat_probability_30d"],
         "repeat_probability_60d": prediction["repeat_probability_60d"],
         "repeat_probability_90d": prediction["repeat_probability_90d"],
+        "repeat_probability_evidence": prediction["avoidable_prediction_basis"]["repeat_probability"].get("horizons", {}),
         "predicted_denial_revenue_exposure": denial_exposure,
+        "future_denial_exposure": future_denial_exposure,
         "predicted_repeat_allowed_exposure": repeat_allowed_exposure,
         "predicted_repeat_payment_exposure": repeat_payment_exposure,
+        "predicted_avoidable_spend": prediction["predicted_avoidable_spend"],
+        "predicted_avoidable_provider_payment": prediction[
+            "predicted_avoidable_provider_payment"
+        ],
+        "avoidable_prediction_basis": prediction[
+            "avoidable_prediction_basis"
+        ],
+        "avoidable_formula_trace": prediction["avoidable_formula_trace"],
         "confidence": prediction["confidence"],
         "prediction_method": prediction["method"],
         "model_version": PREDICTION_VERSION,
@@ -739,6 +885,10 @@ def _validate_prediction_consistency(snapshot, categories, summary):
         * snapshot["predicted_provider_payment"]["value"]
     )
     future = categories["future_exposure"]["details"]
+    predicted_avoidable = snapshot["predicted_avoidable_spend"]["value"]
+    predicted_avoidable_paid = snapshot[
+        "predicted_avoidable_provider_payment"
+    ]["value"]
     checks = (
         snapshot["predicted_denial_revenue_exposure"] == expected_denial,
         snapshot["predicted_repeat_payment_exposure"] == expected_repeat_payment,
@@ -746,6 +896,14 @@ def _validate_prediction_consistency(snapshot, categories, summary):
         future["repeat_provider_payment_exposure"] == expected_repeat_payment,
         summary["future_denial_exposure"] == expected_denial,
         summary["future_repeat_payment_exposure"] == expected_repeat_payment,
+        predicted_avoidable
+        <= snapshot["predicted_repeat_allowed_exposure"] + 0.01,
+        predicted_avoidable_paid
+        <= snapshot["predicted_repeat_payment_exposure"] + 0.01,
+        summary["predicted_avoidable_spend"]
+        == predicted_avoidable,
+        summary["predicted_avoidable_provider_payment"]
+        == predicted_avoidable_paid,
     )
     if not all(checks):
         raise RuntimeError("PREDICTION_CONSISTENCY_ERROR")
@@ -758,6 +916,8 @@ def _validate_prediction_consistency(snapshot, categories, summary):
             "repeat_probability_90d",
             "denial_exposure",
             "repeat_payment_exposure",
+            "predicted_avoidable_spend",
+            "predicted_avoidable_provider_payment",
             "confidence",
         ],
     }
@@ -806,7 +966,7 @@ def _best_action(categories):
     }
 
 
-def _summary(categories, best_action):
+def _summary(categories, best_action, prediction_snapshot):
     recoverable_names = ["underpayment", "correctable_denial", "excessive_adjustment", "patient_balance", "duplicate_or_correction"]
     recoverable_supported = [
         (name, categories[name]["amount"])
@@ -827,6 +987,12 @@ def _summary(categories, best_action):
     }
     return {
         "recoverable_now": recoverable,
+        "predicted_avoidable_spend": prediction_snapshot[
+            "predicted_avoidable_spend"
+        ]["value"],
+        "predicted_avoidable_provider_payment": prediction_snapshot[
+            "predicted_avoidable_provider_payment"
+        ]["value"],
         "potentially_avoidable_spend": avoidable["amount"] if avoidable["status"] == "supported" else 0.0,
         "potentially_avoidable_spend_supported": avoidable["amount"] if avoidable["status"] == "supported" else 0.0,
         "future_denial_exposure": future["denial_revenue_exposure"],
@@ -849,30 +1015,23 @@ def _summary(categories, best_action):
 
 
 def _historical_comparison(database, claim):
-    peers, match_level = _historical_peers(database, claim)
+    peers, basis = select_peers(database, claim)
+    patterns = historical_patterns(database, claim)
     return {
-        "match_level": match_level,
+        "match_level": basis["peer_label"],
+        "peer_level": basis["peer_level"],
+        "matching_dimensions": basis["matching_dimensions"],
+        "readable_basis": basis["readable_basis"],
         "sample_size": len(peers),
         "cutoff_date": claim.get("dos"),
-        "earlier_same_member_claims": sum(
-            row.get("memberId") == claim.get("memberId") and row.get("dos", "") < claim.get("dos", "")
-            for row in database.claims
-        ),
-        "earlier_same_cpt_claims": sum(
-            row.get("cptCode") == claim.get("cptCode") and row.get("dos", "") < claim.get("dos", "")
-            for row in database.claims
-        ),
-        "previous_denials": sum(
-            row.get("memberId") == claim.get("memberId")
-            and row.get("dos", "") < claim.get("dos", "")
-            and ("denied" in _lower(row.get("status")) or "reject" in _lower(row.get("status")))
-            for row in database.claims
-        ),
-        "peer_claim_ids": [row["claimId"] for row in peers[:20]],
+        "earlier_same_member_claims": patterns["earlier_member_claims"],
+        "earlier_same_cpt_claims": patterns["same_cpt_claims"],
+        "previous_denials": patterns["previous_denials"],
+        "peer_claim_ids": basis["claim_ids_used"],
     }
 
 
-def _scenario_map(claim, snapshot, categories, supported, summary, comparison, database):
+def _scenario_map(claim, snapshot, categories, supported, summary, comparison, database, patterns, similar, short_patterns):
     fields = claim["workbookFields"]
     best = summary["best_action"]
     visible_categories = {name: category for name, category in categories.items() if name != "future_exposure"}
@@ -882,8 +1041,8 @@ def _scenario_map(claim, snapshot, categories, supported, summary, comparison, d
                 "step": 1,
                 "title": "Member History",
                 "items": {
-                    "earlier_claims": comparison["earlier_same_member_claims"],
-                    "same_cpt_claims": comparison["earlier_same_cpt_claims"],
+                    "earlier_claims": patterns["earlier_member_claims"],
+                    "same_cpt_icd_claims": patterns["same_cpt_icd_claims"],
                     "previous_denials": comparison["previous_denials"],
                     "episode_id": claim.get("episodeId"),
                     "peer_evidence_count": comparison["sample_size"],
@@ -904,44 +1063,46 @@ def _scenario_map(claim, snapshot, categories, supported, summary, comparison, d
             },
             {
                 "step": 3,
-                "title": "Actual Payment",
+                "title": "ICD + CPT Relationship",
                 "items": {
-                    "charge": _money(fields.get("Charge_Amount")),
-                    "allowed": _money(fields.get("Allowed_Amount")),
-                    "paid": _money(fields.get("Paid_Amount")),
-                    "patient_responsibility": _money(fields.get("Patient_Responsibility")),
-                    "adjustment": _money(fields.get("Adjustment_Amount")),
-                    "claim_status": _text(fields.get("Claim_Status_Description")),
+                    "cpt": claim.get("cptCode"), "icd_family": fields.get("ICD10_Family"),
+                    "matching_basis": comparison["readable_basis"],
                 },
             },
             {
                 "step": 4,
-                "title": "Model Prediction",
+                "title": "Similar Historical Claims",
+                "items": {"matches": len(similar), "top_claim_ids": [item["claim_id"] for item in similar[:5]]},
+            },
+            {
+                "step": 5,
+                "title": "Short-Timeframe / Repeat Pattern",
+                "items": {"related_pairs": len(short_patterns), "within_90_days": patterns["within_90_days"]},
+            },
+            {
+                "step": 6,
+                "title": "Financial Prediction",
                 "items": {
                     "predicted_allowed": snapshot["predicted_allowed"]["value"],
                     "predicted_provider_payment": snapshot["predicted_provider_payment"]["value"],
                     "predicted_patient_responsibility": snapshot["predicted_patient_responsibility"]["value"],
                     "predicted_contractual_adjustment": snapshot["predicted_contractual_adjustment"]["value"],
                     "denial_probability": snapshot["denial_probability"],
+                    "future_denial_exposure": snapshot[
+                        "future_denial_exposure"
+                    ]["value"],
                     "repeat_probability_90d": snapshot["repeat_probability_90d"],
+                    "predicted_avoidable_spend": snapshot[
+                        "predicted_avoidable_spend"
+                    ]["value"],
+                    "predicted_avoidable_provider_payment": snapshot[
+                        "predicted_avoidable_provider_payment"
+                    ]["value"],
                 },
             },
             {
-                "step": 5,
-                "title": "Payment Comparison",
-                "items": {
-                    "actual_paid": _money(fields.get("Paid_Amount")),
-                    "expected_reimbursement": _money(fields.get("Expected_Reimbursement")),
-                    "recovered_amount": _money(fields.get("Recovered_Amount")),
-                    "patient_responsibility": _money(fields.get("Patient_Responsibility")),
-                    "patient_payment_received": _money(fields.get("Patient_Payment_Received")),
-                    "outstanding_patient_balance": _money(fields.get("Outstanding_Patient_Balance")),
-                    "recoverable_now": summary["recoverable_now"],
-                },
-            },
-            {
-                "step": 6,
-                "title": "Supported Opportunity",
+                "step": 7,
+                "title": "Financial Opportunity",
                 "items": supported,
                 "calculations": [
                     {
@@ -956,21 +1117,14 @@ def _scenario_map(claim, snapshot, categories, supported, summary, comparison, d
                 ],
             },
             {
-                "step": 7,
-                "title": "Best Action",
-                "items": best,
+                "step": 8,
+                "title": "Supporting Evidence",
+                "items": {"workbook_sheet": "837_Claims", "workbook_row": claim["workbookSourceRow"], "peer_claim_ids": comparison["peer_claim_ids"][:10]},
             },
             {
-                "step": 8,
-                "title": "Data Trace",
-                "items": {
-                    "workbook_sheet": "837_Claims",
-                    "workbook_row": claim["workbookSourceRow"],
-                    "claim_ids": list(dict.fromkeys(sum((category["evidence_claim_ids"] for category in visible_categories.values()), []))),
-                    "reason_codes": list(dict.fromkeys(category["reason_code"] for category in visible_categories.values())),
-                    "fields_used": list(dict.fromkeys(sum((category["evidence_fields"] for category in visible_categories.values()), []))),
-                    "workbook_hash": database.workbook_hash,
-                },
+                "step": 9,
+                "title": "Best Provider Action",
+                "items": best,
             },
         ]
     }
@@ -1006,15 +1160,38 @@ def build_financial_result(database, claim_id):
     }
     categories["future_exposure"] = _future_exposure(claim, prediction)
     best_action = _best_action(categories)
-    summary = _summary(categories, best_action)
+    summary = _summary(categories, best_action, prediction_snapshot)
     supported_opportunities, non_actionable_evidence = _supported_and_non_actionable(
         claim, categories
     )
     comparison = _historical_comparison(database, claim)
+    patterns = historical_patterns(database, claim)
+    similar = similar_historical_claims(database, claim)
+    short_patterns = short_timeframe_patterns(database, claim)
     consistency_check = _validate_prediction_consistency(
         prediction_snapshot, categories, summary
     )
     fields = claim["workbookFields"]
+    validated_category = categories[
+        "potentially_avoidable_episode_spend"
+    ]
+    validated_avoidable_spend = {
+        "available": validated_category["reason_code"]
+        != "INSUFFICIENT_COMPARABLE_EPISODES"
+        and validated_category["status"] != "insufficient_source_fields",
+        "value": validated_category["amount"],
+        "reason": validated_category["reason"],
+        "reason_code": validated_category["reason_code"],
+        "comparator_episode_count": int(
+            _number(
+                validated_category.get("details", {}).get(
+                    "comparable_episode_count",
+                    fields.get("Comparable_Episodes_Count"),
+                ),
+                0,
+            )
+        ),
+    }
     result = {
         "claim_id": claim["claimId"],
         "member_id": claim["memberId"],
@@ -1032,10 +1209,13 @@ def build_financial_result(database, claim_id):
             "cpt_description": claim.get("cptDescription"),
             "diagnosis_code": claim.get("diagnosisCode"),
             "diagnosis_description": claim.get("diagnosisDescription"),
+            "units": claim.get("units"),
             "place_of_service_code": claim.get("placeOfServiceCode"),
             "place_of_service_description": claim.get("placeOfService"),
             "payer": claim.get("payer"),
             "provider": claim.get("billingProvider"),
+            "billing_provider": claim.get("billingProvider"),
+            "rendering_provider": _text(fields.get("Rendering_Provider_Name") or fields.get("Rendering_Provider_NPI")),
             "charge": _money(fields.get("Charge_Amount")),
             "allowed": _money(fields.get("Allowed_Amount")),
             "paid": _money(fields.get("Paid_Amount")),
@@ -1053,13 +1233,24 @@ def build_financial_result(database, claim_id):
             "referral_status": _text(fields.get("Referral_Status")),
         },
         "prediction": prediction,
+        "financial_prediction": prediction_snapshot,
         "financial_prediction_snapshot": prediction_snapshot,
+        "predicted_avoidable_spend": prediction_snapshot[
+            "predicted_avoidable_spend"
+        ],
+        "predicted_avoidable_provider_payment": prediction_snapshot[
+            "predicted_avoidable_provider_payment"
+        ],
+        "validated_avoidable_spend": validated_avoidable_spend,
         "financial_opportunities": categories,
         "supported_financial_opportunities": supported_opportunities,
         "non_actionable_evidence": non_actionable_evidence,
         "supported_money_summary": summary,
         "best_action": best_action,
         "historical_comparison": comparison,
+        "historical_patterns": patterns,
+        "similar_historical_claims": similar,
+        "short_timeframe_patterns": short_patterns,
         "historical_prediction_basis": comparison,
         "scenario_map": {},
         "rag_evidence": [],
@@ -1085,6 +1276,7 @@ def build_financial_result(database, claim_id):
             "groq_prompt_version": GROQ_PROMPT_VERSION,
         },
     }
+    result["claim_facts"] = result["actual_claim_facts"]
     result["scenario_map"] = _scenario_map(
         claim,
         prediction_snapshot,
@@ -1093,7 +1285,19 @@ def build_financial_result(database, claim_id):
         summary,
         comparison,
         database,
+        patterns,
+        similar,
+        short_patterns,
     )
+    try:
+        from .prediction_validation import (
+            claim_backtest,
+            validate_prediction_result,
+        )
+    except ImportError:
+        from prediction_validation import claim_backtest, validate_prediction_result
+    result["retrospective_validation"] = claim_backtest(result)
+    result["consistency_check"] = validate_prediction_result(result)
     result["financial_result_hash"] = sha256(
         json.dumps(
             {
@@ -1120,12 +1324,27 @@ def member_supported_summary(database, member_id):
     future_denial = _money(sum(item["supported_money_summary"]["future_denial_exposure"] for item in results))
     future_repeat = _money(sum(item["supported_money_summary"]["future_repeat_payment_exposure"] for item in results))
     episode_values = {}
+    latest_episode_predictions = {}
     supported_actions = []
     for item in results:
         episode_values[item["episode_id"]] = max(
             episode_values.get(item["episode_id"], 0),
             item["supported_money_summary"]["potentially_avoidable_spend_supported"],
         )
+        episode_key = item["episode_id"] or item["claim_id"]
+        current = latest_episode_predictions.get(episode_key)
+        if (
+            current is None
+            or (
+                item["actual_claim_facts"]["service_date"],
+                item["claim_id"],
+            )
+            > (
+                current["actual_claim_facts"]["service_date"],
+                current["claim_id"],
+            )
+        ):
+            latest_episode_predictions[episode_key] = item
         for opportunity in item["supported_financial_opportunities"]:
             supported_actions.append({
                 "claim_id": item["claim_id"],
@@ -1136,9 +1355,36 @@ def member_supported_summary(database, member_id):
                 "best_action": item["best_action"],
             })
     top = max(supported_actions, key=lambda item: item["amount"]) if supported_actions else {}
+    member_predicted_avoidable = _money(
+        sum(
+            item["predicted_avoidable_spend"]["value"]
+            for item in latest_episode_predictions.values()
+        )
+    )
+    member_predicted_avoidable_paid = _money(
+        sum(
+            item["predicted_avoidable_provider_payment"]["value"]
+            for item in latest_episode_predictions.values()
+        )
+    )
+    validated_total = _money(sum(episode_values.values()))
     return {
+        "member_id": member_id,
+        "active_episode_count": len(latest_episode_predictions),
+        "predicted_avoidable_spend_90d": member_predicted_avoidable,
+        "predicted_avoidable_provider_payment_90d": member_predicted_avoidable_paid,
+        "validated_avoidable_spend": validated_total,
+        "recoverable_now_total": recoverable,
+        "supported_avoidable_spend_total": validated_total,
+        "future_denial_exposure_total": future_denial,
+        "future_repeat_payment_exposure_total": future_repeat,
+        "supported_action_count": len(supported_actions),
+        "top_opportunity": top,
+        "top_action": top.get("best_action", {}),
         "recoverable_now": recoverable,
-        "potentially_avoidable_spend_supported": _money(sum(episode_values.values())),
+        "potentially_avoidable_spend_supported": validated_total,
+        "predicted_avoidable_spend": member_predicted_avoidable,
+        "predicted_avoidable_provider_payment": member_predicted_avoidable_paid,
         "future_denial_exposure": future_denial,
         "future_repeat_payment_exposure": future_repeat,
         "claims_with_supported_actions": len({
@@ -1147,7 +1393,7 @@ def member_supported_summary(database, member_id):
         "top_supported_opportunity": top,
         "highest_priority_action": top.get("best_action", {}),
         "claim_count": len(results),
-        "episode_count": len(episode_values),
+        "episode_count": len(latest_episode_predictions),
         "workbook_hash": database.workbook_hash,
         "calculation_version": CALCULATION_VERSION,
     }

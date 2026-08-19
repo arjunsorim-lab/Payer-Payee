@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.codex.payer-payee.mongodb.27018</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/mongod</string>
+    <string>--dbpath</string>
+    <string>/Users/user/Downloads/payer/payer_payee_mongodb/data</string>
+    <string>--logpath</string>
+    <string>/Users/user/Downloads/payer/payer_payee_mongodb/logs/mongod.log</string>
+    <string>--port</string>
+    <string>27018</string>
+    <string>--bind_ip</string>
+    <string>127.0.0.1</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/user/Downloads/payer/payer_payee_mongodb/logs/launchd.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/user/Downloads/payer/payer_payee_mongodb/logs/launchd.stderr.log</string>
+</dict>
+</plist>

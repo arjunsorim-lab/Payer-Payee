@@ -13,19 +13,49 @@ try:
     from .financial_engine import build_financial_result, member_supported_summary
     from .import_claims import read_claims
     from .llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
+    from .ollama_service import OllamaClient, OllamaError
+    from .prediction_validation import (
+        PredictionConsistencyError,
+        build_validation_report,
+    )
     from .prediction_service import build_prediction_scenarios, summarize_scenarios
+    from .payer_prediction import (
+        build_member_payer_cohort_summary,
+        build_payer_cohort_portfolio_summary,
+        build_payer_prediction,
+        build_payer_prediction_for_claim,
+        build_payer_prediction_options,
+    )
     from .provider_prediction import build_provider_prediction_payload, find_case
     from .workbook_enrichment import load_workbook_database, read_savings_workbook
     from .workbook_llm import generate_workbook_chat_answer, generate_workbook_prediction_explanation
+    from .workbook_rag import (
+        build_index,
+        index_status,
+        retrieve_evidence,
+    )
 except ImportError:
     from db import connect_mongo, get_mongo_config
     from financial_engine import build_financial_result, member_supported_summary
     from import_claims import read_claims
     from llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
+    from ollama_service import OllamaClient, OllamaError
+    from prediction_validation import (
+        PredictionConsistencyError,
+        build_validation_report,
+    )
     from prediction_service import build_prediction_scenarios, summarize_scenarios
+    from payer_prediction import (
+        build_member_payer_cohort_summary,
+        build_payer_cohort_portfolio_summary,
+        build_payer_prediction,
+        build_payer_prediction_for_claim,
+        build_payer_prediction_options,
+    )
     from provider_prediction import build_provider_prediction_payload, find_case
     from workbook_enrichment import load_workbook_database, read_savings_workbook
     from workbook_llm import generate_workbook_chat_answer, generate_workbook_prediction_explanation
+    from workbook_rag import build_index, index_status, retrieve_evidence
 
 FRONTEND_DIST_DIR = Path(__file__).resolve().parent.parent / "dist"
 BUNDLED_WORKBOOK_PATH = (
@@ -80,6 +110,38 @@ def configured_workbook_database():
         return load_workbook_database(configured)
     except (FileNotFoundError, OSError, ValueError, RuntimeError) as error:
         raise ServiceUnavailable(description=str(error)) from error
+
+
+def workbook_prediction_with_rag(database, claim_number):
+    result = build_financial_result(database, claim_number)
+    try:
+        rag = retrieve_evidence(
+            database,
+            result,
+            "provider financial prediction evidence",
+        )
+        return {
+            **result,
+            "rag": rag,
+            "rag_evidence": rag["retrieved_documents"],
+            "prediction_available": True,
+            "explanation_available": OllamaClient().health().get(
+                "chat_model_available", False
+            ),
+        }
+    except (RuntimeError, OllamaError) as error:
+        return {
+            **result,
+            "rag": {
+                "ready": False,
+                "retrieved_documents": [],
+                "retrieved_chunks": [],
+                "error": str(error),
+            },
+            "rag_evidence": [],
+            "prediction_available": True,
+            "explanation_available": False,
+        }
 
 
 def workbook_claims_for_request(database, args):
@@ -411,6 +473,7 @@ def get_member(member_id):
             "item": {
                 **member,
                 "supportedMoneySummary": member_supported_summary(database, member_id),
+                "payerCohortSavingsSummary": build_member_payer_cohort_summary(database, member_id),
             },
             "source": database.source_banner(),
         })
@@ -493,16 +556,45 @@ def get_prediction_scenarios():
         rows = workbook_claims_for_request(database, request.args)
         results = [build_financial_result(database, claim["claimId"]) for claim in rows]
         episode_avoidable = {}
+        latest_episode_predictions = {}
         for item in results:
             episode_avoidable[item["episode_id"]] = max(
                 episode_avoidable.get(item["episode_id"], 0),
                 item["supported_money_summary"]["potentially_avoidable_spend_supported"],
             )
+            episode_key = item["episode_id"] or item["claim_id"]
+            current = latest_episode_predictions.get(episode_key)
+            if (
+                current is None
+                or (
+                    item["actual_claim_facts"]["service_date"],
+                    item["claim_id"],
+                )
+                > (
+                    current["actual_claim_facts"]["service_date"],
+                    current["claim_id"],
+                )
+            ):
+                latest_episode_predictions[episode_key] = item
         return json_response({
             "summary": {
                 "totalClaims": len(results),
                 "recoverableNow": round(sum(item["supported_money_summary"]["recoverable_now"] for item in results), 2),
                 "supportedAvoidableSpend": round(sum(episode_avoidable.values()), 2),
+                "predictedAvoidableSpend90d": round(
+                    sum(
+                        item["predicted_avoidable_spend"]["value"]
+                        for item in latest_episode_predictions.values()
+                    ),
+                    2,
+                ),
+                "predictedAvoidableProviderPayment90d": round(
+                    sum(
+                        item["predicted_avoidable_provider_payment"]["value"]
+                        for item in latest_episode_predictions.values()
+                    ),
+                    2,
+                ),
                 "futureDenialExposure": round(sum(item["supported_money_summary"]["future_denial_exposure"] for item in results), 2),
                 "futureRepeatPaymentExposure": round(sum(item["supported_money_summary"]["future_repeat_payment_exposure"] for item in results), 2),
             },
@@ -529,6 +621,68 @@ def get_prediction_scenarios():
             "source": get_mongo_config()["dataSource"],
         },
     })
+
+
+@app.get("/api/predictions/payer/options")
+def get_payer_prediction_options():
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Configured workbook is required."}, 409)
+    return json_response(build_payer_prediction_options(database))
+
+
+@app.post("/api/predictions/payer/generate")
+def generate_payer_prediction():
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Configured workbook is required."}, 409)
+    payload = request.get_json(silent=True) or {}
+    required = ("member_id", "diagnosis_family", "comparison_episode_id")
+    clean = lambda value: str(value or "").strip()
+    missing = [name for name in required if not clean(payload.get(name))]
+    if missing:
+        return json_response({"message": f"Missing required input: {', '.join(missing)}"}, 400)
+    try:
+        result = build_payer_prediction(
+            database,
+            clean(payload["member_id"]),
+            clean(payload["diagnosis_family"]),
+            clean(payload["comparison_episode_id"]),
+        )
+    except ValueError as error:
+        return json_response({"message": str(error)}, 422)
+    return json_response(result)
+
+
+@app.route("/api/predictions/payer/claim/<claim_number>", methods=["GET", "POST"])
+def generate_claim_anchored_payer_prediction(claim_number):
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Configured workbook is required."}, 409)
+    try:
+        return json_response(build_payer_prediction_for_claim(database, claim_number))
+    except KeyError as error:
+        return json_response({"message": str(error)}, 404)
+    except ValueError as error:
+        return json_response({"message": str(error)}, 422)
+
+
+@app.get("/api/predictions/payer/member/<member_id>")
+def get_member_payer_cohort_summary(member_id):
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Configured workbook is required."}, 409)
+    if not any(claim.get("memberId") == member_id for claim in database.selectable_claims):
+        return json_response({"message": "Selectable workbook member not found"}, 404)
+    return json_response(build_member_payer_cohort_summary(database, member_id))
+
+
+@app.get("/api/predictions/payer/portfolio")
+def get_payer_cohort_portfolio_summary():
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Configured workbook is required."}, 409)
+    return json_response(build_payer_cohort_portfolio_summary(database))
 
 
 def build_provider_case(db, claim_number):
@@ -587,16 +741,16 @@ def get_provider_case_prediction(claim_number):
     database = configured_workbook_database()
     if database:
         try:
-            return json_response(build_financial_result(database, claim_number))
+            return json_response(
+                workbook_prediction_with_rag(database, claim_number)
+            )
         except KeyError as error:
             return json_response({"message": str(error)}, 404)
-        except RuntimeError as error:
-            if str(error) == "PREDICTION_CONSISTENCY_ERROR":
-                return json_response({
-                    "code": "PREDICTION_CONSISTENCY_ERROR",
-                    "message": "The canonical prediction failed its consistency check.",
-                }, 500)
-            raise
+        except PredictionConsistencyError as error:
+            return json_response({
+                "error": error.code,
+                "details": error.details,
+            }, 500)
     db = connect_mongo()
     scenario, error = build_provider_case(db, claim_number)
     if error:
@@ -623,6 +777,62 @@ def get_provider_case_prediction(claim_number):
     })
 
 
+@app.get("/api/ai/health")
+def get_ai_health():
+    database = configured_workbook_database()
+    client = OllamaClient()
+    ollama = client.health()
+    rag = index_status(database, client) if database else {"ready": False}
+    try:
+        from .workbook_enrichment import (
+            CALCULATION_VERSION,
+            PREDICTION_VERSION,
+        )
+    except ImportError:
+        from workbook_enrichment import CALCULATION_VERSION, PREDICTION_VERSION
+    return json_response({
+        "ollama": ollama,
+        "rag": rag,
+        "prediction": {
+            "model_version": PREDICTION_VERSION,
+            "calculation_version": CALCULATION_VERSION,
+            "available": bool(database),
+        },
+    })
+
+
+@app.post("/api/rag/rebuild")
+def rebuild_rag():
+    if os.getenv("ENABLE_RAG_ADMIN", "false").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return json_response({"message": "RAG administration is disabled."}, 404)
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Configured workbook is required."}, 409)
+    try:
+        bundle = build_index(database, force=True)
+        return json_response({
+            **bundle["manifest"],
+            "index_path": bundle["path"],
+        })
+    except (RuntimeError, OllamaError) as error:
+        return json_response({"message": str(error)}, 503)
+
+
+@app.get("/api/predictions/validation")
+def get_prediction_validation():
+    database = configured_workbook_database()
+    if not database:
+        return json_response(
+            {"message": "Configured workbook is required for validation."}, 409
+        )
+    return json_response(build_validation_report(database))
+
+
 @app.post("/api/predictions/provider-case/<claim_number>/llm")
 def get_provider_case_llm_analysis(claim_number):
     """Explain one de-identified, provider-side financial prediction."""
@@ -632,12 +842,12 @@ def get_provider_case_llm_analysis(claim_number):
             return json_response(generate_workbook_prediction_explanation(database, claim_number))
         except KeyError as error:
             return json_response({"message": str(error)}, 404)
+        except PredictionConsistencyError as error:
+            return json_response({
+                "error": error.code,
+                "details": error.details,
+            }, 500)
         except RuntimeError as error:
-            if str(error) == "PREDICTION_CONSISTENCY_ERROR":
-                return json_response({
-                    "code": "PREDICTION_CONSISTENCY_ERROR",
-                    "message": "The canonical prediction failed its consistency check.",
-                }, 500)
             return json_response({"message": str(error), "ragAvailable": False}, 503)
     db = connect_mongo()
     scenario, error = build_provider_case(db, claim_number)
@@ -687,6 +897,11 @@ def provider_llm_chat():
             return json_response({"message": str(error)}, 404)
         except ValueError as error:
             return json_response({"message": str(error)}, 409)
+        except PredictionConsistencyError as error:
+            return json_response({
+                "error": error.code,
+                "details": error.details,
+            }, 500)
         except RuntimeError as error:
             return json_response({"message": str(error), "ragAvailable": False}, 503)
     db = connect_mongo()
@@ -756,12 +971,54 @@ def serve_frontend_asset(asset_path):
 
 @app.errorhandler(Exception)
 def handle_error(error):
+    if isinstance(error, PredictionConsistencyError):
+        return json_response({
+            "error": error.code,
+            "details": error.details,
+        }, 500)
     if isinstance(error, HTTPException):
         return json_response({"message": error.description}, error.code)
     app.logger.exception(error)
     return json_response({"message": "Internal server error"}, 500)
 
 
+def startup_ai_check():
+    try:
+        database = configured_workbook_database()
+    except ServiceUnavailable as error:
+        app.logger.error("Workbook startup check failed: %s", error.description)
+        return
+    if not database:
+        app.logger.warning("No workbook is configured; workbook predictions are unavailable.")
+        return
+    client = OllamaClient()
+    health = client.health()
+    app.logger.info(
+        "Ollama startup status available=%s chat_model=%s embed_model=%s",
+        health.get("available"),
+        client.chat_model,
+        client.embed_model,
+    )
+    status = index_status(database, client)
+    if (
+        not status.get("ready")
+        and health.get("embedding_model_available")
+        and os.getenv("RAG_AUTO_BUILD", "true").strip().lower()
+        in {"1", "true", "yes", "on"}
+    ):
+        try:
+            bundle = build_index(database, client=client)
+            status = {
+                "ready": True,
+                **bundle["manifest"],
+                "index_path": bundle["path"],
+            }
+        except (RuntimeError, OllamaError) as error:
+            app.logger.error("RAG startup build failed: %s", error)
+    app.logger.info("RAG startup status: %s", status)
+
+
 if __name__ == "__main__":
+    startup_ai_check()
     port = int(os.getenv("PORT", "4000"))
     app.run(host="0.0.0.0", port=port)

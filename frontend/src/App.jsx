@@ -342,16 +342,22 @@ function buildMembers(rows) {
     .sort((a, b) => b.latestClaim.dos.localeCompare(a.latestClaim.dos))
 }
 
-function buildMemberStats(member) {
+function buildMemberStats(member, money, payerCohortSavings) {
   const claimCount = member.claims.length
-  const money = member.supportedMoneySummary
+  const financialValue = (field) => (
+    money ? formatCurrency(money[field]) : 'Loading…'
+  )
+  const payerCohortValue = payerCohortSavings
+    ? formatCurrency(payerCohortSavings.member_predicted_payer_avoidable_spend)
+    : 'Loading…'
   return [
     { label: 'Total Allowed', value: formatCurrency(member.totalAllowed), note: `Across ${claimCount.toLocaleString()} claims` },
     { label: 'Total Paid', value: formatCurrency(member.totalPaid), note: 'Payer payments in the database' },
-    { label: 'Recoverable Now', value: formatCurrency(money.recoverable_now), note: 'Sum of canonical claim-level opportunities' },
-    { label: 'Supported Avoidable Spend', value: formatCurrency(money.potentially_avoidable_spend_supported), note: 'Deduplicated by episode' },
-    { label: 'Future Denial Exposure', value: formatCurrency(money.future_denial_exposure), note: 'Forecast kept separate' },
-    { label: 'Future Repeat Exposure', value: formatCurrency(money.future_repeat_payment_exposure), note: 'Forecast kept separate' },
+    { label: 'Recoverable Now', value: financialValue('recoverable_now'), note: 'Sum of canonical claim-level opportunities' },
+    { label: 'Predicted Avoidable Spend — Next 90 Days', value: financialValue('predicted_avoidable_spend_90d'), note: 'Latest anchor prediction per episode' },
+    { label: 'Predicted Payer Avoidable Spend — Cohort', value: payerCohortValue, note: 'One primary scenario per non-overlapping disease episode' },
+    { label: 'Future Denial Exposure', value: financialValue('future_denial_exposure'), note: 'Forecast kept separate' },
+    { label: 'Future Repeat Exposure', value: financialValue('future_repeat_payment_exposure'), note: 'Forecast kept separate' },
     { label: 'Total Claims', value: claimCount.toLocaleString(), note: `${claimCount - member.deniedCount} non-denied, ${member.deniedCount} denied` },
     { label: 'Last Encounter', value: formatDate(member.latestClaim.dos), note: member.latestClaim.placeOfService },
   ]
@@ -864,6 +870,7 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
   const [payerFilter, setPayerFilter] = useState('All Payers')
   const [sortBy, setSortBy] = useState('Highest Confidence')
   const [currentPage, setCurrentPage] = useState(1)
+  const [payerModalOpen, setPayerModalOpen] = useState(false)
   const pageSize = 10
   const normalizedQuery = searchQuery.trim().toLowerCase()
 
@@ -906,7 +913,7 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
     })
     .sort((a, b) => {
       if (sortBy === 'Recoverable Now') return b.supported_money_summary.recoverable_now - a.supported_money_summary.recoverable_now
-      if (sortBy === 'Supported Avoidable Spend') return b.supported_money_summary.potentially_avoidable_spend_supported - a.supported_money_summary.potentially_avoidable_spend_supported
+      if (sortBy === 'Highest Predicted Avoidable Spend') return b.predicted_avoidable_spend.value - a.predicted_avoidable_spend.value
       if (sortBy === 'Predicted Paid') return b.prediction.predicted_paid - a.prediction.predicted_paid
       if (sortBy === 'Newest Claim') return b.actual_claim_facts.service_date.localeCompare(a.actual_claim_facts.service_date)
       return b.confidence.score - a.confidence.score
@@ -937,6 +944,9 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
                 <p>Provider-focused payment forecasts, repeat-utilisation risk, and actionable claim opportunities.</p>
               </div>
               <div className="prediction-controls">
+                <button className="payer-generate-button" type="button" onClick={() => setPayerModalOpen(true)}>
+                  <Sparkles size={16} /> Generate Prediction
+                </button>
                 <label className="prediction-select">
                   <span>Risk</span>
                   <select value={riskFilter} onChange={(event) => setRiskFilter(event.target.value)}>
@@ -959,7 +969,7 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
                   <select value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
                     <option>Highest Confidence</option>
                     <option>Recoverable Now</option>
-                    <option>Supported Avoidable Spend</option>
+                    <option>Highest Predicted Avoidable Spend</option>
                     <option>Predicted Paid</option>
                     <option>Newest Claim</option>
                   </select>
@@ -991,10 +1001,179 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
                 <PredictionMethodPanel totalCount={scenarioMeta?.totalClaims || claimsData.length} scenarioCount={filteredScenarios.length} model={scenarioMeta} />
               </>
             ) : null}
+            {payerModalOpen ? (
+              <PayerPredictionModal
+                onClose={() => setPayerModalOpen(false)}
+                onOpenProviderForecast={(claimId) => {
+                  const targetClaim = claimsData.find((claim) => claim.claimId === claimId || claim.number === claimId)
+                  if (targetClaim) onOpenPrediction(targetClaim)
+                }}
+              />
+            ) : null}
           </>
         )}
       </section>
     </>
+  )
+}
+
+const payerCurrency = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(Number(value || 0))
+const payerCurrencyOrDash = (value) => value == null ? '—' : payerCurrency(value)
+const payerNumber = (value) => Number(value || 0).toLocaleString('en-US', { maximumFractionDigits: 1 })
+const payerDate = (value) => {
+  if (!value) return ''
+  const [year, month, day] = value.slice(0, 10).split('-').map(Number)
+  return new Intl.DateTimeFormat('en-AU', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(year, month - 1, day))
+}
+
+function PayerPredictionModal({ onClose, onOpenProviderForecast }) {
+  const [options, setOptions] = useState(null)
+  const [memberId, setMemberId] = useState('')
+  const [diseaseFamily, setDiseaseFamily] = useState('')
+  const [episodeId, setEpisodeId] = useState('')
+  const [result, setResult] = useState(null)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [completedSteps, setCompletedSteps] = useState(0)
+  const [showAllEvidence, setShowAllEvidence] = useState(false)
+  const steps = [
+    'Finding comparison episode', 'Matching peer members', 'Selecting strongest scenario',
+    'Building lower-utilisation benchmark', 'Calculating payer savings prediction',
+    'Retrieving supporting evidence',
+  ]
+
+  useEffect(() => {
+    const onKeyDown = (event) => { if (event.key === 'Escape') onClose() }
+    document.addEventListener('keydown', onKeyDown)
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    fetchJson('/api/predictions/payer/options')
+      .then(setOptions)
+      .catch((requestError) => setError(requestError.message || 'Prediction inputs could not be loaded.'))
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = previousOverflow
+    }
+  }, [onClose])
+
+  useEffect(() => {
+    if (!loading) return undefined
+    setCompletedSteps(0)
+    const interval = window.setInterval(() => setCompletedSteps((current) => Math.min(current + 1, steps.length - 1)), 420)
+    return () => window.clearInterval(interval)
+  }, [loading, steps.length])
+
+  const selectedMember = options?.members?.find((member) => member.member_id === memberId)
+  const diseases = selectedMember?.diseases || []
+  const selectedDisease = diseases.find((disease) => disease.family === diseaseFamily)
+  const episodes = selectedDisease?.episodes || []
+
+  const generate = async () => {
+    if (!memberId || !diseaseFamily || !episodeId) {
+      setError('Select a member, disease family, and comparison episode before generating the prediction.')
+      return
+    }
+    setLoading(true)
+    setError('')
+    setResult(null)
+    setShowAllEvidence(false)
+    try {
+      const payload = await fetchJson('/api/predictions/payer/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ member_id: memberId, diagnosis_family: diseaseFamily, comparison_episode_id: episodeId }),
+      })
+      setCompletedSteps(steps.length)
+      setResult(payload)
+    } catch (requestError) {
+      setError(requestError.message || 'The payer savings prediction could not be generated.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const evidence = result?.supporting_evidence || []
+  const visibleEvidence = showAllEvidence ? evidence : evidence.slice(0, 10)
+
+  return createPortal(
+    <div className="payer-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+      <section className="payer-prediction-modal" role="dialog" aria-modal="true" aria-labelledby="payer-modal-title">
+        <header className="payer-modal-header">
+          <div><h2 id="payer-modal-title">Generate Prediction</h2><p>Rule-based payer savings prediction</p></div>
+          <button className="payer-modal-close" type="button" aria-label="Close Generate Prediction" onClick={onClose}><X size={19} /></button>
+        </header>
+
+        <div className="payer-modal-body">
+          {!result ? (
+            <div className="payer-input-panel">
+              <div className="payer-input-grid">
+                <label><span>Member</span><select value={memberId} onChange={(event) => { setMemberId(event.target.value); setDiseaseFamily(''); setEpisodeId(''); setError('') }} disabled={!options || loading}><option value="">Select member</option>{options?.members?.map((member) => <option key={member.member_id} value={member.member_id}>{member.member_id}</option>)}</select></label>
+                <label><span>Disease Family</span><select value={diseaseFamily} onChange={(event) => { setDiseaseFamily(event.target.value); setEpisodeId(''); setError('') }} disabled={!memberId || loading}><option value="">Select disease</option>{diseases.map((disease) => <option key={disease.family} value={disease.family}>{disease.family}{disease.description ? ` — ${disease.description}` : ''}</option>)}</select></label>
+                <label><span>Comparison Episode</span><select value={episodeId} onChange={(event) => { setEpisodeId(event.target.value); setError('') }} disabled={!diseaseFamily || loading}><option value="">Select episode</option>{episodes.map((episode) => <option key={episode.episode_id} value={episode.episode_id}>{payerDate(episode.start_date)} – {payerDate(episode.end_date)} · {episode.claim_count} claims</option>)}</select></label>
+              </div>
+              <div className="payer-scenario-line"><span>Comparison Scenario</span><strong>Auto-select strongest valid scenario</strong></div>
+              {loading ? <div className="payer-progress" aria-live="polite"><strong>Generating prediction…</strong>{steps.map((step, index) => <div key={step} className={index <= completedSteps ? 'done' : ''}>{index <= completedSteps ? <CheckCircle2 size={16} /> : <span className="payer-step-dot" />} {step}</div>)}</div> : null}
+              {error ? <div className="payer-modal-error"><Info size={17} /> {error}</div> : null}
+              {!loading ? <div className="payer-input-actions"><button className="payer-generate-button" type="button" onClick={generate} disabled={!options}><Sparkles size={16} /> Generate Prediction</button></div> : null}
+            </div>
+          ) : (
+            <PayerPredictionResult result={result} evidence={visibleEvidence} evidenceCount={evidence.length} showAllEvidence={showAllEvidence} onShowAllEvidence={() => setShowAllEvidence(true)} />
+          )}
+        </div>
+
+        <footer className="payer-modal-footer">
+          <button className="payer-secondary-button" type="button" onClick={onClose}>Close</button>
+          {result ? <button className="payer-secondary-button" type="button" onClick={() => { setResult(null); setError('') }}>New Prediction</button> : null}
+          {result ? <button className="payer-secondary-button" type="button" onClick={() => onOpenProviderForecast(result.target?.claim_id)}>Open Separate Provider Forecast</button> : null}
+        </footer>
+      </section>
+    </div>,
+    document.body,
+  )
+}
+
+function PayerPredictionResult({ result, evidence, evidenceCount, showAllEvidence, onShowAllEvidence }) {
+  const benchmark = result.benchmark_summary || {}
+  const scenario = result.scenario || {}
+  const calculation = result.calculation_summary || {}
+  const confidence = calculation.confidence || {}
+  const trace = result.evidence_trace || {}
+  return (
+    <div className="payer-result">
+      <section className="payer-result-section">
+        <h3>Benchmark Summary</h3>
+        <div className="payer-table-wrap"><table><thead><tr><th>Metric</th><th>Target Episode</th><th>Benchmark</th></tr></thead><tbody>
+          <tr><td>Related Claims</td><td>{payerNumber(benchmark.target_claim_count)}</td><td>{payerNumber(benchmark.benchmark_claim_count)}</td></tr>
+          <tr><td>Payer Paid Amount</td><td>{payerCurrency(benchmark.target_payer_spend)}</td><td>{payerCurrency(benchmark.benchmark_payer_spend)}</td></tr>
+          <tr><td>Median Paid per Claim</td><td>{payerCurrency(benchmark.target_median_paid_per_claim)}</td><td>{payerCurrency(benchmark.benchmark_median_paid_per_claim)}</td></tr>
+          <tr><td>Episode Duration</td><td>{payerNumber(benchmark.target_episode_duration)} days</td><td>{payerNumber(benchmark.benchmark_episode_duration)} days</td></tr>
+        </tbody></table></div>
+        <dl className="payer-summary-meta"><div><dt>Selected Scenario</dt><dd>Scenario {scenario.number} — {scenario.name}</dd></div><div><dt>Disease Family</dt><dd>{result.target?.diagnosis_family}</dd></div><div><dt>Peer Members</dt><dd>{scenario.peer_member_count}</dd></div><div><dt>Benchmark Method</dt><dd>{benchmark.benchmark_method}</dd></div></dl>
+      </section>
+
+      <section className="payer-result-section">
+        <h3>Peer Members Used</h3>
+        <div className="payer-table-wrap"><table><thead><tr><th>Member ID</th><th>Related Claims</th><th>Payer Spend</th><th>Similarity / Match</th><th>Role</th></tr></thead><tbody>{result.peer_members_used.map((peer) => <tr key={peer.member_id}><td>{peer.member_id}</td><td>{payerNumber(peer.related_claims)} claims</td><td>{payerCurrency(peer.payer_spend)}</td><td>{Math.round(peer.similarity * 100)}%</td><td>{peer.role}</td></tr>)}</tbody></table></div>
+        <p className={`payer-peer-note ${scenario.peer_member_count === 1 ? 'low' : ''}`}>{scenario.peer_member_count === 1 ? '1 external peer used · Low confidence' : `${scenario.peer_member_count} different-member peers used`}</p>
+      </section>
+
+      <section className="payer-result-section">
+        <h3>Prediction Range / Calculation Summary</h3>
+        <div className="payer-calculation-overview"><div><span>Target Episode Payer Spend</span><strong>{payerCurrency(benchmark.target_payer_spend)}</strong></div><div><span>Benchmark Payer Spend</span><strong>{payerCurrency(benchmark.benchmark_payer_spend)}</strong></div><div><span>Target Related Claims</span><strong>{payerNumber(benchmark.target_claim_count)}</strong></div><div><span>Benchmark Related Claims</span><strong>{payerNumber(benchmark.benchmark_claim_count)}</strong></div><div><span>Excess Claims</span><strong>{payerNumber(calculation.excess_claim_count)}</strong></div></div>
+        <div className="payer-formulas"><article><h4>Count-Based Estimate</h4><p>{payerNumber(calculation.excess_claim_count)} × {payerCurrency(calculation.median_peer_paid_per_claim)} = <strong>{payerCurrency(calculation.count_based_excess_spend)}</strong></p><small>Excess claims × median peer paid per claim</small></article><article><h4>Cost-Based Estimate</h4><p>{payerCurrency(benchmark.target_payer_spend)} − {payerCurrency(benchmark.benchmark_payer_spend)} = <strong>{payerCurrency(calculation.cost_based_excess_spend)}</strong></p><small>Target episode payer spend − benchmark payer spend</small></article></div>
+        <div className="payer-final-value"><span>Predicted Payer Avoidable Spend</span><strong>{payerCurrency(calculation.predicted_payer_avoidable_spend)}</strong><small>Conservative estimate using the lower of the two rule-based methods</small>{calculation.zero_reason ? <p><b>Reason:</b> {calculation.zero_reason}</p> : null}</div>
+        <div className="payer-range"><div><span>Prediction Range</span>{calculation.range ? <strong>{payerCurrency(calculation.range.low)} – {payerCurrency(calculation.range.high)}</strong> : <p>{calculation.range_reason}</p>}</div>{calculation.range ? <dl><div><dt>Q25 peer paid / claim</dt><dd>{payerCurrency(calculation.q25_peer_paid_per_claim)}</dd></div><div><dt>Median peer paid / claim</dt><dd>{payerCurrency(calculation.median_peer_paid_per_claim)}</dd></div><div><dt>Q75 peer paid / claim</dt><dd>{payerCurrency(calculation.q75_peer_paid_per_claim)}</dd></div></dl> : null}</div>
+        <p className={`payer-confidence ${confidence.level?.toLowerCase()}`}>Confidence: {confidence.score}% · {confidence.level}</p>
+        <p className="payer-confidence-basis">Based on: {scenario.peer_member_count} external peer members · {scenario.peer_claim_count} peer claims · Scenario {scenario.number} match · {confidence.dispersion}</p>
+      </section>
+
+      <section className="payer-result-section">
+        <h3>Supporting Evidence</h3>
+        <div className="payer-table-wrap evidence"><table><thead><tr><th>Claim ID</th><th>Member ID</th><th>Service Date</th><th>ICD-10</th><th>CPT</th><th>Payer</th><th>Provider</th><th>POS</th><th>Paid Amount</th><th>Evidence Role</th></tr></thead><tbody>{evidence.map((row, index) => <tr key={`${row.claim_id}-${index}`}><td>{row.claim_id}</td><td>{row.member_id}</td><td>{payerDate(row.service_date)}</td><td>{row.icd10}</td><td>{row.cpt}</td><td>{row.payer}</td><td>{row.provider}</td><td>{row.pos}</td><td>{payerCurrency(row.paid_amount)}</td><td>{row.evidence_role}</td></tr>)}</tbody></table></div>
+        {!showAllEvidence && evidenceCount > evidence.length ? <button className="payer-evidence-button" type="button" onClick={onShowAllEvidence}>View All Supporting Evidence</button> : null}
+        <p className="payer-evidence-trace">Prediction calculated from workbook data using: Scenario {trace.scenario} · {trace.peer_member_count} peer members · {trace.peer_claim_count} peer claims · Workbook source: {trace.source}</p>
+      </section>
+    </div>
   )
 }
 
@@ -1094,8 +1273,9 @@ function PredictionScenarioDirectory({ scenarios, totalCount, onOpenScenario, em
 
               <div className="scenario-card-footer">
                 <div>
-                  <span>Supported avoidable spend</span>
-                  <strong>{formatOptionalCurrency(scenario.supported_money_summary.potentially_avoidable_spend_supported)}</strong>
+                  <span>Predicted avoidable spend</span>
+                  <strong>{formatOptionalCurrency(scenario.predicted_avoidable_spend.value)}</strong>
+                  <small>90-day repeat probability {formatProbability(scenario.predicted_avoidable_spend.repeat_probability_90d)} · Confidence {formatProbability(scenario.predicted_avoidable_spend.confidence)}</small>
                 </div>
                 <button type="button" onClick={() => onOpenScenario?.(scenario)}>
                   Open scenario <ArrowRight size={16} />
@@ -1115,10 +1295,11 @@ function PredictionScenarioMap({ scenario }) {
   const facts = scenario.actual_claim_facts
   const summary = scenario.supported_money_summary
   const snapshot = scenario.financial_prediction_snapshot
+  const historicalPeerCount = snapshot.peer_sample_size ?? scenario.historical_comparison?.sample_size ?? 0
   const topMetrics = [
     ['Recoverable now', formatOptionalCurrency(summary.recoverable_now), summary.best_action.stage],
-    ['Supported avoidable spend', formatOptionalCurrency(summary.potentially_avoidable_spend_supported), 'Current evidence'],
-    ['Predicted paid', formatOptionalCurrency(snapshot.predicted_provider_payment.value), `${snapshot.peer_sample_size} historical peers`],
+    ['Expected avoidable repeat cost', formatOptionalCurrency(snapshot.predicted_avoidable_spend.value), 'Probability-weighted 90-day provider forecast'],
+    ['Predicted paid', formatOptionalCurrency(snapshot.predicted_provider_payment.value), `${historicalPeerCount} historical peers`],
     ['Future denial exposure', formatOptionalCurrency(summary.future_denial_exposure), 'Forecast kept separate'],
     ['Model confidence', formatProbability(snapshot.confidence.score), snapshot.confidence.level],
   ]
@@ -1127,12 +1308,25 @@ function PredictionScenarioMap({ scenario }) {
     <Card className="provider-forecast-detail">
       <header className="provider-forecast-heading">
         <div>
-          <span>Provider case forecast · {scenario.episode_id}</span>
+          <span>Provider revenue forecast · {scenario.episode_id}</span>
           <h1>{facts.diagnosis_description}</h1>
           <p>{facts.provider} · {facts.payer} · claim {scenario.claim_id}</p>
         </div>
         <span className="priority-chip">{summary.best_action.stage}</span>
       </header>
+
+      <aside className="prediction-perspective-note provider-perspective-note">
+        <span className="prediction-perspective-icon"><Hospital size={19} /></span>
+        <div>
+          <span>Provider perspective · Forecast</span>
+          <strong>Payment, revenue exposure, and provider action</strong>
+          <p>The {formatOptionalCurrency(snapshot.predicted_avoidable_spend.value)} amount is a probability-weighted estimate of extra allowed cost from a possible related repeat within 90 days. It is not the rule-based payer cohort savings amount.</p>
+        </div>
+        <dl>
+          <div><dt>Primary payment forecast</dt><dd>{formatOptionalCurrency(snapshot.predicted_provider_payment.value)}</dd></div>
+          <div><dt>Immediate provider opportunity</dt><dd>{formatOptionalCurrency(summary.recoverable_now)}</dd></div>
+        </dl>
+      </aside>
 
       <div className="provider-forecast-metrics">
         {topMetrics.map(([label, value, note]) => (
@@ -1231,8 +1425,9 @@ function WorkbookFinancialPredictionCard({ claim }) {
         <div className="forecast-money-card"><span>Predicted allowed</span><strong>{formatOptionalCurrency(prediction.predicted_allowed.value)}</strong><small>{prediction.matching_level}</small></div>
         <div className="forecast-money-card"><span>Predicted paid</span><strong>{formatOptionalCurrency(prediction.predicted_provider_payment.value)}</strong><small>{prediction.peer_sample_size} historical references</small></div>
         <div className="forecast-money-card"><span>Recoverable now</span><strong>{formatOptionalCurrency(summary.recoverable_now)}</strong><small>{summary.best_action.stage}</small></div>
-        <div className="forecast-money-card"><span>Supported avoidable spend</span><strong>{formatOptionalCurrency(summary.potentially_avoidable_spend_supported)}</strong><small>Future exposure excluded</small></div>
+        <div className="forecast-money-card"><span>Predicted avoidable spend</span><strong>{formatOptionalCurrency(prediction.predicted_avoidable_spend.value)}</strong><small>Forecast · 90-day horizon</small></div>
       </div>
+      <details className="validated-avoidable-detail"><summary>Historical validation detail</summary><p>Validated avoidable spend: {formatOptionalCurrency(result.validated_avoidable_spend.value)} · {result.validated_avoidable_spend.reason}</p></details>
     </Card>
   )
 }
@@ -1316,7 +1511,44 @@ function EncounterSearch({ searchQuery, onSearchChange, onSelectMember, onOpenCl
 function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMember, onOpenClaim, onOpenPrediction }) {
   const { defaultDateRange } = useAppData()
   const latestClaim = selectedClaim || member.latestClaim
-  const memberStats = buildMemberStats(member)
+  const [memberMoney, setMemberMoney] = useState(null)
+  const [payerCohortSavings, setPayerCohortSavings] = useState(null)
+  const [memberEncountersPage, setMemberEncountersPage] = useState(1)
+  const memberEncountersPageSize = 10
+  const memberEncountersPageCount = Math.max(1, Math.ceil(member.claims.length / memberEncountersPageSize))
+  const safeMemberEncountersPage = Math.min(memberEncountersPage, memberEncountersPageCount)
+  const memberClaimsPage = useMemo(
+    () => member.claims.slice(
+      (safeMemberEncountersPage - 1) * memberEncountersPageSize,
+      safeMemberEncountersPage * memberEncountersPageSize,
+    ),
+    [member.claims, safeMemberEncountersPage],
+  )
+  const memberStats = buildMemberStats(member, memberMoney, payerCohortSavings)
+
+  useEffect(() => {
+    setMemberEncountersPage(1)
+  }, [member.memberId])
+
+  useEffect(() => {
+    let active = true
+    setMemberMoney(null)
+    setPayerCohortSavings(null)
+    fetchJson(`/api/members/${encodeURIComponent(member.memberId)}`)
+      .then((payload) => {
+        if (active) {
+          setMemberMoney(payload.item?.supportedMoneySummary || null)
+          setPayerCohortSavings(payload.item?.payerCohortSavingsSummary || null)
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setMemberMoney(member.supportedMoneySummary || null)
+          setPayerCohortSavings(null)
+        }
+      })
+    return () => { active = false }
+  }, [member.memberId, member.supportedMoneySummary])
 
   return (
     <>
@@ -1406,7 +1638,21 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
             <ProviderKpis claim={latestClaim} />
           </div>
 
-          <RecentEncounters title="Member Encounters" claims={member.claims.slice(0, 8)} onSelectMember={onSelectMember} onOpenClaim={onOpenClaim} />
+          <RecentEncounters
+            title="Member Encounters"
+            claims={memberClaimsPage}
+            onSelectMember={onSelectMember}
+            onOpenClaim={onOpenClaim}
+            footer={(
+              <ClaimsTableFooter
+                currentPage={safeMemberEncountersPage}
+                pageCount={memberEncountersPageCount}
+                pageSize={memberEncountersPageSize}
+                totalCount={member.claims.length}
+                onPageChange={setMemberEncountersPage}
+              />
+            )}
+          />
           <ClaimTimeline claim={latestClaim} />
         </div>
 
@@ -1705,18 +1951,38 @@ function ClaimReasonCard({ claim }) {
       <div className="claim-reason-header">
         <div>
           <h2>Adjudication Reasons</h2>
-          <p>Why each key claim value appears on this 837 claim record.</p>
+          <p>Select the information button beside a value to see its source and how it is displayed.</p>
         </div>
         <span className={`claim-status ${statusClass(claim.status)}`}>{statusLabel(claim.status)}</span>
       </div>
       <div className="reason-card-grid">
         {getClaimReasonRows(claim).map((row) => (
           <div className="reason-card" key={row.field}>
-            <div>
-              <span>{row.field}</span>
-              <strong>{row.value}</strong>
+            <div className="reason-card-heading">
+              <div>
+                <span>{row.field}</span>
+                <strong>{row.value}</strong>
+              </div>
+              <details className="reason-info">
+                <summary aria-label={`Explain ${row.field}`} title={`Explain ${row.field}`}>
+                  <Info size={16} aria-hidden="true" />
+                </summary>
+                <div className="reason-info-panel">
+                  <strong>Why this is shown</strong>
+                  <p>{row.reason}</p>
+                  <dl>
+                    <div>
+                      <dt>Source</dt>
+                      <dd>{row.source}</dd>
+                    </div>
+                    <div>
+                      <dt>How it works</dt>
+                      <dd>{row.method}</dd>
+                    </div>
+                  </dl>
+                </div>
+              </details>
             </div>
-            <p>{row.reason}</p>
           </div>
         ))}
       </div>
@@ -1735,16 +2001,22 @@ function getClaimReasonRows(claim) {
       field: 'Status',
       value: statusLabel(claim.status),
       reason: statusReason,
+      source: 'Current enriched 837 claim · Claim_Status_Code, Claim_Status_Description, Denial_Reason, Payer_Name, and Claim_Filing_Indicator.',
+      method: 'The source status description is mapped to a concise display label. The payer, filing indicator, and denial reason add context when those source fields are present.',
     },
     {
       field: 'Total Charge',
       value: formatCurrency(claim.totalCharge),
       reason: `${claim.billingProvider} billed ${claim.units || 1} unit(s) for ${procedure} at ${getService(claim)}.`,
+      source: 'Current enriched 837 claim · Charge_Amount, Units, CPT_Code, Billing_Provider_Name, and Place_of_Service_Description.',
+      method: 'The displayed amount is Charge_Amount from the selected claim. The remaining source fields explain who billed it and which service the charge represents.',
     },
     {
       field: 'Allowed',
       value: formatCurrency(claim.allowed),
       reason: `${claim.payer} adjudicated the billed charge to the allowed amount after contract and claim edits. Adjustment recorded: ${formatCurrency(claim.adjustment)}.`,
+      source: 'Current enriched 837 claim · Allowed_Amount, Adjustment_Amount, and Payer_Name.',
+      method: 'The displayed amount is Allowed_Amount from the selected claim. Adjustment_Amount explains the recorded difference created during adjudication.',
     },
     {
       field: 'Paid',
@@ -1752,11 +2024,15 @@ function getClaimReasonRows(claim) {
       reason: claim.paid > 0
         ? `${claim.payer} paid this amount toward the allowed claim after adjudication and member responsibility were applied.`
         : `No payer payment is recorded for this claim, typically because the claim is denied, pending, or forwarded to another payer.`,
+      source: 'Current enriched 837 claim · Paid_Amount, Allowed_Amount, Patient_Responsibility, and Payer_Name.',
+      method: 'The displayed value is Paid_Amount from the selected claim. It is a payer-spend source value and is not calculated by the browser.',
     },
     {
       field: 'Patient Resp.',
       value: formatCurrency(claim.patientResp),
       reason: `This is the member responsibility assigned on the claim, such as deductible, copay, coinsurance, or non-covered balance.`,
+      source: 'Current enriched 837 claim · Patient_Responsibility.',
+      method: 'The displayed value is Patient_Responsibility from the selected claim. It is shown directly and is not inferred from the charge, allowed, or paid amounts.',
     },
   ]
 }
@@ -1925,11 +2201,7 @@ function ProviderLlmPanel({ claim, onCasePrediction }) {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
-  const predictionReady = Boolean(
-    result?.supported_money_summary
-    || result?.forecast
-    || result?.provider_financial_opportunity_summary
-  )
+  const predictionReady = Boolean(result?.benchmark_summary)
 
   useEffect(() => {
     setResult(null)
@@ -1943,12 +2215,11 @@ function ProviderLlmPanel({ claim, onCasePrediction }) {
     setModalOpen(true)
     try {
       const payload = await fetchJson(
-        `/api/predictions/provider-case/${encodeURIComponent(claim.claimId || claim.number)}/llm`,
-        { method: 'POST' },
+        `/api/predictions/payer/claim/${encodeURIComponent(claim.claimId || claim.number)}`,
       )
       setResult(payload)
     } catch (requestError) {
-      setError(requestError.message || 'Provider financial prediction could not be loaded.')
+      setError(requestError.message || 'Payer savings prediction could not be loaded.')
     } finally {
       setLoading(false)
     }
@@ -1958,31 +2229,31 @@ function ProviderLlmPanel({ claim, onCasePrediction }) {
     <Card className="provider-llm-card">
       <div className="provider-llm-header">
         <div>
-          <span className="provider-llm-kicker"><Sparkles size={14} /> Groq provider assistant</span>
-          <h2>Provider Financial Prediction</h2>
-          <p>Predicts provider payment outcomes from de-identified workbook history and explains the supporting evidence.</p>
+          <span className="provider-llm-kicker"><Sparkles size={14} /> Two financial perspectives</span>
+          <h2>Claim Financial Predictions</h2>
+          <p>Provider Forecast estimates payment and revenue outcomes. Payer Savings uses a separate rule-based matched-cohort benchmark.</p>
         </div>
         <div className="provider-llm-actions">
-          <button className="llm-secondary-button" type="button" onClick={onCasePrediction}>View {claim.number || claim.claimId} forecast</button>
+          <button className="llm-secondary-button" type="button" onClick={onCasePrediction}>Open Provider Forecast</button>
           <button className="llm-primary-button" type="button" onClick={generatePrediction} disabled={loading}>
             {loading ? <RefreshCw className="spin" size={16} /> : <Sparkles size={16} />}
-            {loading ? 'Generating…' : 'Generate Prediction'}
+            {loading ? 'Generating…' : 'Open Payer Savings'}
           </button>
         </div>
       </div>
 
       {!result && !error ? (
-        <div className="llm-intro">Run a concise provider-side explanation for this exact claim. Successful results are cached for faster repeat viewing.</div>
+        <div className="llm-intro">These views use different methods and their dollar amounts should not be compared as if they were the same prediction.</div>
       ) : null}
       {error ? <div className="llm-config-note error">{error}</div> : null}
-      {predictionReady ? <div className="llm-intro">Prediction ready for {result.claim_id}. Open it to review the forecast, financial exposure, recommended actions and supporting evidence.</div> : null}
-      {predictionReady ? <button className="llm-secondary-button" type="button" onClick={() => setModalOpen(true)}>Open Provider Financial Prediction</button> : null}
-      {modalOpen ? <ProviderLlmModal claim={claim} result={result} loading={loading} error={error} onClose={() => setModalOpen(false)} onRetry={generatePrediction} /> : null}
+      {predictionReady ? <div className="llm-intro">Payer savings prediction ready for {result.target?.selected_claim_id}. Open it to review the cohort benchmark, calculation and supporting evidence.</div> : null}
+      {predictionReady ? <button className="llm-secondary-button" type="button" onClick={() => setModalOpen(true)}>Open Payer Savings Prediction</button> : null}
+      {modalOpen ? <ProviderLlmModal claim={claim} result={result} loading={loading} error={error} onClose={() => setModalOpen(false)} onRetry={generatePrediction} onOpenProviderForecast={onCasePrediction} /> : null}
     </Card>
   )
 }
 
-function ProviderLlmModal({ claim, result, loading, error, onClose, onRetry }) {
+function ProviderLlmModal({ claim, result, loading, error, onClose, onRetry, onOpenProviderForecast }) {
   useEffect(() => {
     const onKeyDown = (event) => { if (event.key === 'Escape') onClose() }
     document.addEventListener('keydown', onKeyDown)
@@ -1996,29 +2267,90 @@ function ProviderLlmModal({ claim, result, loading, error, onClose, onRetry }) {
 
   return createPortal(
     <div className="provider-llm-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
-      <div className="provider-llm-modal" role="dialog" aria-modal="true" aria-labelledby="provider-llm-modal-title">
+      <div className="provider-llm-modal payer-cohort-modal" role="dialog" aria-modal="true" aria-labelledby="provider-llm-modal-title">
         <header className="provider-llm-modal-header">
           <div>
-            <span className="provider-llm-kicker"><Sparkles size={14} /> Groq provider assistant</span>
-            <h2 id="provider-llm-modal-title">Provider Financial Prediction</h2>
-            <p>{claim.number || claim.claimId} · Provider financial decision support</p>
+            <h2 id="provider-llm-modal-title">Payer Savings Prediction</h2>
+            <p>Rule-based comparison against matched member cohorts</p>
+            {result?.target ? <small>Member: {result.target.member_id} · ICD-10 Family: {result.target.diagnosis_family} · Episode: {payerDate(result.target.episode_start)} – {payerDate(result.target.episode_end)} · Scenario: Scenario {result.scenario_selection?.selected?.number} — {result.scenario_selection?.selected?.name}</small> : null}
           </div>
-          <button className="provider-llm-close" type="button" aria-label="Close Provider Financial Prediction" onClick={onClose}><X size={20} /></button>
+          <button className="provider-llm-close" type="button" aria-label="Close Payer Savings Prediction" onClick={onClose}><X size={20} /></button>
         </header>
         <div className="provider-llm-modal-body">
-          {loading ? <div className="llm-modal-state"><RefreshCw className="spin" size={22} /> Calculating provider forecast and grounded explanation…</div> : null}
+          {loading ? <div className="llm-modal-state"><RefreshCw className="spin" size={22} /> Building the 90-day episode and matched payer cohort…</div> : null}
           {!loading && error ? <div className="llm-config-note error"><span>{error}</span><button className="llm-primary-button" type="button" onClick={onRetry}>Retry prediction</button></div> : null}
-          {!loading && result?.supported_money_summary ? <ProviderMoneyLlmResult result={result} /> : null}
-          {!loading && !error && !result?.supported_money_summary && result?.forecast ? <ProviderRenderPredictionResult result={result} /> : null}
-          {!loading && !error && result && !result?.supported_money_summary && !result?.forecast ? (
+          {!loading && result?.benchmark_summary ? <ClaimPayerPredictionResult result={result} /> : null}
+          {!loading && !error && result && !result?.benchmark_summary ? (
             <div className="llm-modal-state provider-response-error">
               The prediction service returned an unsupported response. Please retry after the deployment finishes.
             </div>
           ) : null}
         </div>
+        <footer className="payer-cohort-modal-footer">
+          <button className="payer-secondary-button" type="button" onClick={onClose}>Close</button>
+          {result?.benchmark_summary ? <button className="payer-secondary-button" type="button" onClick={onOpenProviderForecast}>Open Separate Provider Forecast</button> : null}
+        </footer>
       </div>
     </div>,
     document.body,
+  )
+}
+
+function ClaimPayerPredictionResult({ result }) {
+  const [showAllEvidence, setShowAllEvidence] = useState(false)
+  const target = result.target || {}
+  const scenarioSelection = result.scenario_selection || {}
+  const scenario = scenarioSelection.selected || {}
+  const benchmark = result.benchmark_summary || {}
+  const calculation = result.calculation_summary || {}
+  const lowerSpendDetail = benchmark.lower_spend_benchmark_detail || {}
+  const confidence = calculation.confidence || {}
+  const peers = result.peer_members_used || []
+  const evidence = result.supporting_evidence || []
+  const visibleEvidence = showAllEvidence ? evidence : evidence.slice(0, 10)
+
+  return (
+    <div className="payer-result claim-payer-result">
+      <aside className="prediction-perspective-note payer-perspective-note">
+        <span className="prediction-perspective-icon"><Landmark size={19} /></span>
+        <div>
+          <span>Payer perspective · Rule-based</span>
+          <strong>Actual payer spend compared with a matched-cohort benchmark</strong>
+          <p>This result uses Paid_Amount and compares the target disease episode with lower-spend peer episodes. It does not use or modify the separate provider forecast.</p>
+        </div>
+        <dl>
+          <div><dt>Actual payer spend</dt><dd>{payerCurrency(target.payer_spend)}</dd></div>
+          <div><dt>Rule-based payer savings</dt><dd>{payerCurrency(calculation.predicted_payer_avoidable_spend)}</dd></div>
+        </dl>
+      </aside>
+      <section className="payer-result-section">
+        <h3>Benchmark Summary</h3>
+        <dl className="payer-summary-meta"><div><dt>Selected Scenario</dt><dd>Scenario {scenario.number} — {scenario.name}</dd></div><div><dt>Target Member</dt><dd>{target.member_id}</dd></div><div><dt>ICD-10 Family</dt><dd>{target.diagnosis_family}</dd></div><div><dt>Target Episode Dates</dt><dd>{payerDate(target.episode_start)} – {payerDate(target.episode_end)}</dd></div><div><dt>Target Related Claims</dt><dd>{payerNumber(target.claim_count)}</dd></div><div><dt>Target Payer Spend</dt><dd>{payerCurrency(target.payer_spend)}</dd></div><div><dt>Utilisation Benchmark Claims</dt><dd>{payerNumber(benchmark.utilisation_benchmark_claim_count)}</dd></div><div><dt>Lower-Spend Benchmark</dt><dd>{payerCurrencyOrDash(benchmark.lower_spend_benchmark)}</dd></div><div><dt>External Peer Members</dt><dd>{benchmark.peer_member_count}</dd></div><div><dt>Peer Episodes</dt><dd>{benchmark.peer_episode_count}</dd></div><div><dt>Benchmark Method</dt><dd>{benchmark.benchmark_method}</dd></div><div><dt>Benchmark Type</dt><dd>{benchmark.benchmark_label}</dd></div></dl>
+        <p className="payer-confidence-basis">{scenario.reason}</p>
+      </section>
+
+      <section className="payer-result-section">
+        <h3>Peer Members Used</h3>
+        <p className={`payer-peer-note ${scenario.peer_member_count === 1 ? 'low' : ''}`}>{scenario.peer_member_count === 1 ? '1 external peer used · Low confidence' : `${scenario.peer_member_count} different-member peers used`}</p>
+        <div className="payer-table-wrap"><table><thead><tr><th>Member ID</th><th>ICD Family</th><th>Exact ICD Match</th><th>Payer Match</th><th>Provider Match</th><th>CPT Match</th><th>POS Match</th><th>Peer Episodes</th><th>Peer Claims</th><th>Payer Spend Range</th><th>Benchmark Role</th></tr></thead><tbody>{peers.map((peer) => <tr key={peer.member_id}><td>{peer.member_id}</td><td>{peer.diagnosis_family}</td><td>{peer.exact_icd_match}</td><td>{peer.payer_match}</td><td>{peer.provider_match}</td><td>{peer.cpt_match}</td><td>{peer.pos_match}</td><td><details><summary>{peer.peer_episode_count} episodes</summary>{peer.episodes?.map((episode) => <p key={episode.peer_episode_id}>{payerDate(episode.episode_start)} – {payerDate(episode.episode_end)} · {payerNumber(episode.claim_count)} claims · {payerCurrency(episode.total_paid)}</p>)}</details></td><td>{payerNumber(peer.peer_claim_count)}</td><td>{payerCurrency(peer.payer_spend_range?.low)} – {payerCurrency(peer.payer_spend_range?.high)}</td><td>{peer.benchmark_role}</td></tr>)}</tbody></table></div>
+      </section>
+
+      <section className="payer-result-section">
+        <h3>Prediction Range / Calculation Summary</h3>
+        <div className="payer-calculation-overview"><div><span>Target Episode Payer Spend</span><strong>{payerCurrency(target.payer_spend)}</strong></div><div><span>Target Related Claims</span><strong>{payerNumber(target.claim_count)}</strong></div><div><span>Utilisation Benchmark Claims</span><strong>{payerNumber(benchmark.utilisation_benchmark_claim_count)}</strong></div><div><span>Excess Claims</span><strong>{payerNumber(calculation.excess_claim_count)}</strong></div></div>
+        <div className="payer-formulas"><article><h4>Utilisation Reduction</h4><p>{payerNumber(calculation.excess_claim_count)} × {payerCurrency(calculation.median_peer_paid_per_claim)} = <strong>{payerCurrency(calculation.utilisation_reduction_opportunity)}</strong></p><small>Excess Claims × Median Peer Paid / Claim</small></article><article><h4>Lower-Spend Benchmark</h4><p><strong>{payerCurrencyOrDash(calculation.lower_spend_benchmark)}</strong></p><small>{payerNumber(lowerSpendDetail.episodes_used?.length)} peer episodes used</small></article><article><h4>Payer Spend Reduction</h4><p>{payerCurrency(target.payer_spend)} − {payerCurrencyOrDash(calculation.lower_spend_benchmark)} = <strong>{payerCurrency(calculation.payer_spend_reduction_opportunity)}</strong></p><small>Target Payer Spend − Lower-Spend Benchmark</small></article></div>
+        <div className="payer-final-value"><span>Predicted Payer Avoidable Spend</span><strong>{payerCurrency(calculation.predicted_payer_avoidable_spend)}</strong><small>Conservative rule-based estimate using the larger validated opportunity, capped at actual payer spend.</small>{calculation.zero_reason ? <p><b>Reason:</b> {calculation.zero_reason}</p> : null}</div>
+        <div className="payer-range"><div><span>{calculation.range_label}</span><strong>{payerCurrency(calculation.range?.low)} – {payerCurrency(calculation.range?.high)}</strong></div></div>
+        <p className={`payer-confidence ${confidence.level?.toLowerCase()}`}>Confidence: {confidence.score}% · {confidence.level}</p>
+        {confidence.penalties?.length ? <p className="payer-confidence-basis">Reason: {confidence.penalties.join(' · ')}</p> : null}
+      </section>
+
+      <section className="payer-result-section">
+        <h3>Supporting Evidence</h3>
+        <div className="payer-table-wrap evidence"><table><thead><tr><th>Claim ID</th><th>Member ID</th><th>Service Date</th><th>ICD-10</th><th>CPT</th><th>Payer</th><th>Provider</th><th>Place of Service</th><th>Paid Amount</th><th>Evidence Role</th></tr></thead><tbody>{visibleEvidence.map((row, index) => <tr key={`${row.claim_id}-${index}`}><td>{row.claim_id}</td><td>{row.member_id}</td><td>{payerDate(row.service_date)}</td><td>{row.icd10}</td><td>{row.cpt}</td><td>{row.payer}</td><td>{row.provider}</td><td>{row.pos}</td><td>{payerCurrency(row.paid_amount)}</td><td>{row.evidence_role}</td></tr>)}</tbody></table></div>
+        {!showAllEvidence && evidence.length > visibleEvidence.length ? <button className="payer-evidence-button" type="button" onClick={() => setShowAllEvidence(true)}>View All Supporting Evidence</button> : null}
+      </section>
+    </div>
   )
 }
 
@@ -2189,10 +2521,17 @@ const MONEY_ITEM_KEYS = new Set([
   'predicted_provider_payment', 'predicted_patient_responsibility',
   'predicted_contractual_adjustment', 'actual_paid', 'recovered_amount',
   'outstanding_patient_balance',
-  'supported_avoidable_spend', 'future_denial_exposure', 'future_repeat_payment_exposure',
+  'supported_avoidable_spend', 'predicted_avoidable_spend',
+  'predicted_avoidable_provider_payment', 'expected_extra_repeat_allowed_cost',
+  'prediction_low', 'prediction_high',
+  'future_denial_exposure', 'future_repeat_payment_exposure',
   'amount_addressed',
 ])
-const PROBABILITY_ITEM_KEYS = new Set(['denial_probability', 'repeat_probability_30d', 'repeat_probability_60d', 'repeat_probability_90d'])
+const PROBABILITY_ITEM_KEYS = new Set(['denial_probability', 'repeat_probability_30d', 'repeat_probability_60d', 'repeat_probability_90d', 'avoidable_given_repeat_probability', 'confidence'])
+const SCENARIO_ITEM_LABELS = {
+  predicted_avoidable_spend: 'Expected Avoidable Repeat Cost',
+  predicted_avoidable_provider_payment: 'Expected Avoidable Provider Payment',
+}
 
 function readableLabel(value) {
   return String(value || '').replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
@@ -2200,7 +2539,7 @@ function readableLabel(value) {
 
 function ScenarioMapSection({ section }) {
   const items = section.items || {}
-  if (section.step === 6) {
+  if (section.title === 'Financial Opportunity') {
     return (
       <article className="scenario-path-step calculation-step">
         <header><b>{section.step}</b><strong>{section.title}</strong></header>
@@ -2217,7 +2556,7 @@ function ScenarioMapSection({ section }) {
       </article>
     )
   }
-  if (section.step === 7) {
+  if (section.title === 'Best Provider Action') {
     return (
       <article className="scenario-path-step action-step">
         <header><b>{section.step}</b><strong>{section.title}</strong></header>
@@ -2231,16 +2570,13 @@ function ScenarioMapSection({ section }) {
       </article>
     )
   }
-  if (section.step === 8) {
+  if (section.title === 'Supporting Evidence') {
     return (
       <article className="scenario-path-step trace-step">
         <header><b>{section.step}</b><strong>{section.title}</strong></header>
         <dl className="scenario-purpose-grid">
           <div><dt>Workbook location</dt><dd>{items.workbook_sheet} · row {items.workbook_row}</dd></div>
-          <div><dt>Claim evidence</dt><dd>{(items.claim_ids || []).join(', ')}</dd></div>
-          <div><dt>Reason codes</dt><dd>{(items.reason_codes || []).join(', ')}</dd></div>
-          <div><dt>Fields used</dt><dd>{(items.fields_used || []).join(', ')}</dd></div>
-          <div><dt>Workbook hash</dt><dd><code>{items.workbook_hash}</code></dd></div>
+          <div><dt>Claim evidence</dt><dd>{(items.peer_claim_ids || []).join(', ')}</dd></div>
         </dl>
       </article>
     )
@@ -2251,7 +2587,7 @@ function ScenarioMapSection({ section }) {
       <dl className="scenario-purpose-grid">
         {Object.entries(items).map(([key, value]) => (
           <div key={key}>
-            <dt>{readableLabel(key)}</dt>
+            <dt>{SCENARIO_ITEM_LABELS[key] || readableLabel(key)}</dt>
             <dd>{MONEY_ITEM_KEYS.has(key) ? formatOptionalCurrency(value) : PROBABILITY_ITEM_KEYS.has(key) ? formatProbability(value) : String(value ?? '')}</dd>
           </div>
         ))}
@@ -2283,6 +2619,86 @@ function NonActionableEvidence({ items }) {
   )
 }
 
+function PredictionEvidence({ rag }) {
+  const documents = rag?.retrieved_documents || rag?.retrieved_chunks || []
+  return (
+    <details className="prediction-evidence-panel">
+      <summary>Prediction Evidence <span>Retrieved workbook evidence: {documents.length} documents</span></summary>
+      {rag?.error ? <p>{rag.error}</p> : null}
+      <div className="prediction-evidence-table-wrap">
+        <table>
+          <thead><tr><th>Source</th><th>Claim ID</th><th>Service date</th><th>Evidence type</th><th>Fields used</th><th>Similarity</th><th>Structured match</th><th>Reason code</th></tr></thead>
+          <tbody>
+            {documents.map((document) => (
+              <tr key={document.document_id || `${document.source_sheet}-${document.source_row}-${document.document_type}`}>
+                <td>{document.source_sheet} · row {document.source_row}</td>
+                <td>{document.claim_id || 'Reference'}</td>
+                <td>{document.service_date || 'Reference'}</td>
+                <td>{readableLabel(document.document_type || 'workbook evidence')}</td>
+                <td>{(document.fields_used || []).join(', ')}</td>
+                <td>{Number(document.vector_similarity ?? document.similarity ?? 0).toFixed(3)}</td>
+                <td>{Number(document.structured_match_score ?? 0).toFixed(3)}</td>
+                <td>{document.reason_code || 'Reference context'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  )
+}
+
+function PredictionValidationPanel({ claimValidation }) {
+  const [report, setReport] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const loadReport = async () => {
+    if (report || loading) return
+    setLoading(true); setError('')
+    try { setReport(await fetchJson('/api/predictions/validation')) }
+    catch (requestError) { setError(requestError.message) }
+    finally { setLoading(false) }
+  }
+  return (
+    <details className="prediction-validation-panel" onToggle={(event) => { if (event.currentTarget.open) loadReport() }}>
+      <summary>Prediction Validation <span>Retrospective actual-versus-predicted quality</span></summary>
+      <div className="claim-validation-grid">
+        {Object.entries(claimValidation || {}).map(([name, metric]) => (
+          <article key={name}>
+            <strong>{readableLabel(name)}</strong>
+            <span>Predicted {formatOptionalCurrency(metric.predicted)}</span>
+            <span>Actual {formatOptionalCurrency(metric.actual)}</span>
+            <span>Absolute error {formatOptionalCurrency(metric.absolute_error)}</span>
+            <span>{metric.percentage_error == null ? 'Percentage error excluded because actual is zero' : `Percentage error ${formatProbability(metric.percentage_error)}`}</span>
+            <span>Interval {formatOptionalCurrency(metric.prediction_interval?.low)}–{formatOptionalCurrency(metric.prediction_interval?.high)}</span>
+            <span>Actual {metric.actual_inside_interval ? 'inside' : 'outside'} interval</span>
+          </article>
+        ))}
+      </div>
+      {loading ? <p>Calculating workbook-wide retrospective validation…</p> : null}
+      {error ? <p>{error}</p> : null}
+      {report ? (
+        <dl className="validation-report-grid">
+          <div><dt>Evaluated claims</dt><dd>{report.evaluated_claims}</dd></div>
+          <div><dt>Allowed MAE</dt><dd>{formatOptionalCurrency(report.financial.allowed_mae)}</dd></div>
+          <div><dt>Paid MAE</dt><dd>{formatOptionalCurrency(report.financial.paid_mae)}</dd></div>
+          <div><dt>Allowed MAPE</dt><dd>{formatProbability(report.financial.allowed_mape)}</dd></div>
+          <div><dt>Paid MAPE</dt><dd>{formatProbability(report.financial.paid_mape)}</dd></div>
+          <div><dt>Denial accuracy</dt><dd>{formatProbability(report.denial.accuracy)}</dd></div>
+          <div><dt>Denial Brier score</dt><dd>{Number(report.denial.brier_score).toFixed(4)}</dd></div>
+          <div><dt>Repeat-risk Brier score</dt><dd>{Number(report.repeat_risk.brier_score_90d).toFixed(4)}</dd></div>
+          <div><dt>Avoidable anchors</dt><dd>{report.avoidable_spend?.evaluated_anchors}</dd></div>
+          <div><dt>Mean predicted avoidable spend</dt><dd>{formatOptionalCurrency(report.avoidable_spend?.mean_predicted_avoidable_spend)}</dd></div>
+          <div><dt>Median predicted avoidable spend</dt><dd>{formatOptionalCurrency(report.avoidable_spend?.median_predicted_avoidable_spend)}</dd></div>
+          <div><dt>Avoidable-spend MAE</dt><dd>{formatOptionalCurrency(report.avoidable_spend?.mae)}</dd></div>
+          <div><dt>Mathematical zero predictions</dt><dd>{Number(report.avoidable_spend?.zero_prediction_percentage || 0).toFixed(1)}%</dd></div>
+          <div><dt>Average avoidable confidence</dt><dd>{formatProbability(report.avoidable_spend?.average_confidence)}</dd></div>
+        </dl>
+      ) : null}
+    </details>
+  )
+}
+
 export function ProviderMoneyLlmResult({ result }) {
   const summary = result.supported_money_summary || {}
   const action = summary.best_action || {}
@@ -2295,32 +2711,114 @@ export function ProviderMoneyLlmResult({ result }) {
   const sections = result.scenario_map?.sections || []
   const rag = result.rag || {}
   const explanation = result.prediction_explanation || result.explanation || {}
+  const validatedAvoidable = result.validated_avoidable_spend || {}
+  const patterns = result.historical_patterns || {}
+  const similarClaims = result.similar_historical_claims || []
+  const shortPatterns = result.short_timeframe_patterns || []
+  const predictionHelp = {
+    allowed: 'The amount the payer is expected to recognize. Calculated in Python from the median allowed amount of earlier matched workbook claims; the range comes from the matched-peer distribution.',
+    providerPayment: 'The amount the provider is expected to receive. Calculated in Python from earlier matched paid amounts. This is a forecast, not the payment already recorded on this claim.',
+    patientResponsibility: 'The amount the patient is expected to owe. Calculated in Python from patient-responsibility amounts on earlier matched workbook claims.',
+    adjustment: 'The amount expected to be written off or adjusted. Calculated in Python from adjustment amounts on earlier matched workbook claims.',
+    avoidableSpend: 'Plain meaning: the expected extra allowed cost if this claim leads to related care that might have been avoided within 90 days. Formula: 90-day repeat probability × chance the repeat is avoidable × expected extra repeat allowed cost. It is a forecast, not confirmed savings.',
+    avoidablePayment: 'The provider-cash version of the avoidable-repeat forecast. Formula: 90-day repeat probability × chance the repeat is avoidable × expected extra repeat provider payment.',
+    denialExposure: 'The provider payment at risk from a possible future denial. Formula: denial probability × predicted provider payment. It is not a confirmed loss.',
+    repeatPayment: 'The expected provider payment associated with a possible related repeat claim. Formula: 90-day repeat probability × predicted provider payment.',
+    avoidableProbability: 'Among earlier matched repeat episodes, the estimated chance that a repeat showed workbook evidence of being potentially avoidable. Planned follow-ups are not automatically counted.',
+    excessRepeatCost: 'The typical extra allowed cost added by a repeat episode. For earlier matched episodes: total episode allowed amount − initial claim allowed amount; the model uses the median.',
+    avoidableConfidence: 'How strongly the workbook history supports the avoidable-cost forecast. It reflects peer count, match specificity, history depth, and prediction-range width.',
+    repeat30: 'Estimated chance of a related repeat claim within 30 days, calculated from earlier workbook history with peer fallback and Bayesian smoothing.',
+    repeat60: 'Estimated chance of a related repeat claim within 60 days, calculated from earlier workbook history with peer fallback and Bayesian smoothing.',
+    repeat90: 'Estimated chance of a related repeat claim within 90 days, calculated from earlier workbook history with peer fallback and Bayesian smoothing.',
+    modelConfidence: 'Overall prediction reliability based on the amount, quality, and specificity of earlier matched workbook evidence.',
+    method: 'The matching and smoothing method used by the Python prediction engine. Broader historical peers are used when exact peers are limited.',
+    version: 'The backend calculation version that produced these values. It helps ensure the page, scenario map, and chat use the same result.',
+  }
+  const HelpCard = ({ help, children, className = '' }) => (
+    <article className={`prediction-help-card ${className}`.trim()} tabIndex="0">
+      {children}
+      <span className="prediction-help-icon" aria-label="Hover or focus for explanation"><Info size={14} /></span>
+      <span className="prediction-help-tooltip" role="tooltip">{help}</span>
+    </article>
+  )
+  const HelpDetail = ({ help, children }) => (
+    <div className="prediction-help-card prediction-help-detail" tabIndex="0">
+      {children}
+      <span className="prediction-help-icon" aria-label="Hover or focus for explanation"><Info size={13} /></span>
+      <span className="prediction-help-tooltip" role="tooltip">{help}</span>
+    </div>
+  )
+  const PredictionBasis = ({ value, rateLabel }) => <small className="prediction-rate-basis">{rateLabel}: {formatProbability(value?.historical_rate)} · Matched historical claims: {value?.peer_count || 0}<br />Matching basis: {value?.peer_level || basis.readable_basis}<br />Prediction range: {formatPredictionRange(value)}</small>
   return (
     <div className="provider-llm-workspace">
       <main className="provider-analysis-scroll">
         <div className="provider-llm-result provider-money-result">
+          <section className="llm-wide-section claim-facts-section">
+            <div className="llm-section-heading"><span>Claim Facts — Directly from claims data</span><small>837_Claims row {result.source?.source_row}</small></div>
+            <dl className="llm-facts-grid">
+              {[
+                ['Claim ID', actual.claim_id], ['Service date', actual.service_date], ['ICD-10', `${actual.diagnosis_code || ''} — ${actual.diagnosis_description || ''}`],
+                ['CPT', `${actual.cpt_code || ''} — ${actual.cpt_description || ''}`], ['Units', actual.units], ['Place of service', `${actual.place_of_service_code || ''} — ${actual.place_of_service_description || ''}`],
+                ['Payer', actual.payer], ['Billing provider', actual.billing_provider], ['Rendering provider', actual.rendering_provider || 'Rendering provider is not populated in this workbook row.'],
+                ['Charge', formatOptionalCurrency(actual.charge)], ['Allowed', formatOptionalCurrency(actual.allowed)], ['Paid', formatOptionalCurrency(actual.paid)],
+                ['Patient responsibility', formatOptionalCurrency(actual.patient_responsibility)], ['Adjustment', formatOptionalCurrency(actual.adjustment)], ['Claim status', actual.claim_status],
+                ['Authorization status', actual.authorization_status || 'Authorization status is not populated in this workbook row.'], ['Referral status', actual.referral_status || 'Referral status is not populated in this workbook row.'],
+              ].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
+            </dl>
+          </section>
           <section className="llm-wide-section financial-prediction-snapshot">
             <div className="llm-section-heading"><span>Financial Prediction Snapshot</span><small>{snapshot.model_version}</small></div>
+            <div className="prediction-plain-language-note">
+              <Info size={16} />
+              <p><strong>Forecasts are not confirmed savings.</strong> “Expected avoidable repeat cost” estimates the extra allowed cost of a potentially avoidable related repeat within 90 days. The supported opportunity below is money the workbook currently supports acting on.</p>
+            </div>
             <div className="prediction-primary-grid">
-              <article><span>Predicted provider payment</span><strong>{formatOptionalCurrency(snapshot.predicted_provider_payment?.value)}</strong><small>{formatPredictionRange(snapshot.predicted_provider_payment)}</small></article>
-              <article><span>Predicted contractual adjustment</span><strong>{formatOptionalCurrency(snapshot.predicted_contractual_adjustment?.value)}</strong><small>{formatPredictionRange(snapshot.predicted_contractual_adjustment)}</small></article>
-              <article><span>Predicted denial exposure</span><strong>{formatOptionalCurrency(snapshot.predicted_denial_revenue_exposure)}</strong><small>{formatProbability(snapshot.denial_probability)} probability</small></article>
-              <article><span>Predicted repeat-payment exposure</span><strong>{formatOptionalCurrency(snapshot.predicted_repeat_payment_exposure)}</strong><small>{formatProbability(snapshot.repeat_probability_90d)} at 90 days</small></article>
+              <HelpCard help={predictionHelp.allowed}><span>Predicted allowed</span><strong>{formatOptionalCurrency(snapshot.predicted_allowed?.value)}</strong><PredictionBasis value={snapshot.predicted_allowed} rateLabel="Historical allowed-to-charge rate" /></HelpCard>
+              <HelpCard help={predictionHelp.providerPayment}><span>Predicted provider payment</span><strong>{formatOptionalCurrency(snapshot.predicted_provider_payment?.value)}</strong><PredictionBasis value={snapshot.predicted_provider_payment} rateLabel="Historical paid-to-allowed rate" /></HelpCard>
+              <HelpCard help={predictionHelp.patientResponsibility}><span>Predicted patient responsibility</span><strong>{formatOptionalCurrency(snapshot.predicted_patient_responsibility?.value)}</strong><PredictionBasis value={snapshot.predicted_patient_responsibility} rateLabel="Historical patient-to-allowed rate" /></HelpCard>
+              <HelpCard help={predictionHelp.adjustment}><span>Predicted contractual adjustment</span><strong>{formatOptionalCurrency(snapshot.predicted_contractual_adjustment?.value)}</strong><PredictionBasis value={snapshot.predicted_contractual_adjustment} rateLabel="Historical adjustment-to-charge rate" /></HelpCard>
+              <HelpCard help={predictionHelp.avoidableSpend} className="predicted-avoidable-card"><span>Expected avoidable repeat cost</span><strong>{formatOptionalCurrency(snapshot.predicted_avoidable_spend?.value)}</strong><small>Forecast for the next 90 days · {formatPredictionRange(snapshot.predicted_avoidable_spend)}</small><small>Repeat risk: {formatProbability(snapshot.predicted_avoidable_spend?.repeat_probability_90d)} × avoidable if repeated: {formatProbability(snapshot.predicted_avoidable_spend?.avoidable_given_repeat_probability)} × extra repeat cost: {formatOptionalCurrency(snapshot.predicted_avoidable_spend?.expected_extra_repeat_allowed_cost)}</small></HelpCard>
+              <HelpCard help={predictionHelp.avoidablePayment}><span>Expected avoidable provider payment</span><strong>{formatOptionalCurrency(snapshot.predicted_avoidable_provider_payment?.value)}</strong><small>Provider cash forecast · {formatPredictionRange(snapshot.predicted_avoidable_provider_payment)}</small></HelpCard>
+              <HelpCard help={predictionHelp.denialExposure}><span>Future denial exposure</span><strong>{formatOptionalCurrency(snapshot.future_denial_exposure?.value)}</strong><small>Forecast only</small><small>Denial probability: {formatProbability(snapshot.future_denial_exposure?.denial_probability)} × predicted provider payment: {formatOptionalCurrency(snapshot.future_denial_exposure?.predicted_paid)}</small></HelpCard>
+              <HelpCard help={predictionHelp.repeatPayment}><span>Predicted repeat-payment exposure</span><strong>{formatOptionalCurrency(snapshot.predicted_repeat_payment_exposure)}</strong><small>{formatProbability(snapshot.repeat_probability_90d)} at 90 days</small></HelpCard>
             </div>
             <dl className="prediction-detail-grid">
-              <div><dt>Predicted allowed</dt><dd>{formatOptionalCurrency(snapshot.predicted_allowed?.value)}</dd><small>{formatPredictionRange(snapshot.predicted_allowed)}</small></div>
-              <div><dt>Predicted patient responsibility</dt><dd>{formatOptionalCurrency(snapshot.predicted_patient_responsibility?.value)}</dd><small>{formatPredictionRange(snapshot.predicted_patient_responsibility)}</small></div>
-              <div><dt>30-day repeat probability</dt><dd>{formatProbability(snapshot.repeat_probability_30d)}</dd></div>
-              <div><dt>60-day repeat probability</dt><dd>{formatProbability(snapshot.repeat_probability_60d)}</dd></div>
-              <div><dt>90-day repeat probability</dt><dd>{formatProbability(snapshot.repeat_probability_90d)}</dd></div>
-              <div><dt>Model confidence</dt><dd>{formatProbability(snapshot.confidence?.score)} · {snapshot.confidence?.level}</dd></div>
-              <div><dt>Prediction method</dt><dd>{snapshot.prediction_method}</dd></div>
-              <div><dt>Calculation version</dt><dd>{snapshot.calculation_version}</dd></div>
+              <HelpDetail help={predictionHelp.avoidableProbability}><dt>Avoidable if repeat</dt><dd>{formatProbability(snapshot.predicted_avoidable_spend?.avoidable_given_repeat_probability)}</dd></HelpDetail>
+              <HelpDetail help={predictionHelp.excessRepeatCost}><dt>Expected excess repeat cost</dt><dd>{formatOptionalCurrency(snapshot.predicted_avoidable_spend?.expected_extra_repeat_allowed_cost)}</dd></HelpDetail>
+              <HelpDetail help={predictionHelp.avoidableConfidence}><dt>Avoidable forecast confidence</dt><dd>{formatProbability(snapshot.predicted_avoidable_spend?.confidence)}</dd><small>{snapshot.predicted_avoidable_spend?.peer_count} peers · {snapshot.predicted_avoidable_spend?.peer_level}</small></HelpDetail>
+              <HelpDetail help={predictionHelp.repeat30}><dt>30-day repeat probability</dt><dd>{formatProbability(snapshot.repeat_probability_30d)}</dd></HelpDetail>
+              <HelpDetail help={predictionHelp.repeat60}><dt>60-day repeat probability</dt><dd>{formatProbability(snapshot.repeat_probability_60d)}</dd></HelpDetail>
+              <HelpDetail help={predictionHelp.repeat90}><dt>90-day repeat probability</dt><dd>{formatProbability(snapshot.repeat_probability_90d)}</dd></HelpDetail>
+              <HelpDetail help={predictionHelp.modelConfidence}><dt>Model confidence</dt><dd>{formatProbability(snapshot.confidence?.score)} · {snapshot.confidence?.level}</dd></HelpDetail>
+              <HelpDetail help={predictionHelp.method}><dt>Prediction method</dt><dd>{snapshot.prediction_method}</dd></HelpDetail>
+              <HelpDetail help={predictionHelp.version}><dt>Calculation version</dt><dd>{snapshot.calculation_version}</dd></HelpDetail>
             </dl>
+            <details className="validated-avoidable-summary">
+              <summary>Historical validation detail</summary>
+              <div><span>Validated Avoidable Spend</span><strong>{formatOptionalCurrency(validatedAvoidable.value)}</strong><small>Retrospective evidence · separate from the forecast</small></div>
+              <p>{validatedAvoidable.reason}</p>
+            </details>
+          </section>
+
+          <section className="llm-wide-section historical-prediction-basis">
+            <div className="llm-section-heading"><span>Historical Claim Patterns</span><small>Earlier than {basis.cutoff_date}</small></div>
+            <dl className="llm-facts-grid">{Object.entries(patterns).map(([key, value]) => <div key={key}><dt>{readableLabel(key)}</dt><dd>{value == null ? 'No related earlier pair was available to calculate a median.' : value}</dd></div>)}</dl>
+            <p>{basis.readable_basis}</p>
+          </section>
+
+          <section className="llm-wide-section similar-claims-section">
+            <div className="llm-section-heading"><span>Similar Historical Claims</span><small>Strongest earlier matches</small></div>
+            <div className="evidence-table-wrap"><table><thead><tr><th>Claim ID</th><th>Service date</th><th>ICD-10</th><th>CPT</th><th>Provider</th><th>Payer</th><th>Charge</th><th>Allowed</th><th>Paid</th><th>Similarity</th><th>Why matched</th></tr></thead><tbody>{similarClaims.map((item) => <tr key={item.claim_id}><td>{item.claim_id}</td><td>{item.service_date}</td><td>{item.icd10}</td><td>{item.cpt}</td><td>{item.provider}</td><td>{item.payer}</td><td>{formatOptionalCurrency(item.charge)}</td><td>{formatOptionalCurrency(item.allowed)}</td><td>{formatOptionalCurrency(item.paid)}</td><td>{Number(item.similarity_score).toFixed(1)}</td><td>{item.match_reason}</td></tr>)}</tbody></table></div>
+          </section>
+
+          <section className="llm-wide-section short-patterns-section">
+            <div className="llm-section-heading"><span>Short-Timeframe / Repeated-Service Patterns</span><small>Observable earlier claim pairs only</small></div>
+            {shortPatterns.length ? <div className="evidence-table-wrap"><table><thead><tr><th>Claims</th><th>Dates</th><th>Days apart</th><th>Relationship</th><th>Score</th></tr></thead><tbody>{shortPatterns.slice(0, 10).map((item) => <tr key={`${item.claim_1}-${item.claim_2}`}><td>{item.claim_1} → {item.claim_2}</td><td>{item.date_1} → {item.date_2}</td><td>{item.days_apart}</td><td>{[item.same_cpt && 'same CPT', item.same_icd_family && 'same ICD family', item.same_provider && 'same provider', item.same_payer && 'same payer', item.same_episode && 'same episode'].filter(Boolean).join(', ')}</td><td>{item.relationship_score}</td></tr>)}</tbody></table></div> : <p>No earlier same-member claim pairs within 90 days shared a CPT, procedure family, ICD family, provider, payer, or episode identifier.</p>}
+            <p>The claims data shows dates and coded relationships only; it does not establish the clinical reason for repeated activity.</p>
           </section>
 
           <section className="llm-wide-section provider-savings-section">
-            <div className="llm-section-heading"><span>Supported Financial Opportunity</span><small>{supported.length} positive opportunity category</small></div>
+            <div className="llm-section-heading"><span>Supported Financial Opportunity</span><small>{supported.length} current opportunity category</small></div>
             {primaryOpportunity ? (
               <article className="supported-opportunity-hero">
                 <span>{primaryOpportunity.label}</span>
@@ -2353,22 +2851,24 @@ export function ProviderMoneyLlmResult({ result }) {
             <div className="llm-section-heading"><span>Actual vs Predicted</span><small>Workbook result and model forecast remain separate</small></div>
             <div className="actual-predicted-columns">
               <article><h3>Actual Claim Result</h3><dl><div><dt>Claim status</dt><dd>{actual.claim_status}</dd></div><div><dt>Charge</dt><dd>{formatOptionalCurrency(actual.charge)}</dd></div><div><dt>Allowed</dt><dd>{formatOptionalCurrency(actual.allowed)}</dd></div><div><dt>Paid</dt><dd>{formatOptionalCurrency(actual.paid)}</dd></div><div><dt>Patient responsibility</dt><dd>{formatOptionalCurrency(actual.patient_responsibility)}</dd></div><div><dt>Adjustment</dt><dd>{formatOptionalCurrency(actual.adjustment)}</dd></div></dl></article>
-              <article><h3>Financial Prediction</h3><dl><div><dt>Predicted allowed</dt><dd>{formatOptionalCurrency(snapshot.predicted_allowed?.value)}</dd></div><div><dt>Predicted provider payment</dt><dd>{formatOptionalCurrency(snapshot.predicted_provider_payment?.value)}</dd></div><div><dt>Predicted patient responsibility</dt><dd>{formatOptionalCurrency(snapshot.predicted_patient_responsibility?.value)}</dd></div><div><dt>Predicted adjustment</dt><dd>{formatOptionalCurrency(snapshot.predicted_contractual_adjustment?.value)}</dd></div><div><dt>Denial probability</dt><dd>{formatProbability(snapshot.denial_probability)}</dd></div><div><dt>90-day repeat probability</dt><dd>{formatProbability(snapshot.repeat_probability_90d)}</dd></div></dl></article>
+              <article><h3>Financial Prediction</h3><dl><div><dt>Predicted allowed</dt><dd>{formatOptionalCurrency(snapshot.predicted_allowed?.value)}</dd></div><div><dt>Predicted provider payment</dt><dd>{formatOptionalCurrency(snapshot.predicted_provider_payment?.value)}</dd></div><div><dt>Predicted patient responsibility</dt><dd>{formatOptionalCurrency(snapshot.predicted_patient_responsibility?.value)}</dd></div><div><dt>Predicted adjustment</dt><dd>{formatOptionalCurrency(snapshot.predicted_contractual_adjustment?.value)}</dd></div><div><dt>Predicted avoidable spend</dt><dd>{formatOptionalCurrency(snapshot.predicted_avoidable_spend?.value)}</dd></div><div><dt>Predicted avoidable provider payment</dt><dd>{formatOptionalCurrency(snapshot.predicted_avoidable_provider_payment?.value)}</dd></div><div><dt>Denial probability</dt><dd>{formatProbability(snapshot.denial_probability)}</dd></div><div><dt>90-day repeat probability</dt><dd>{formatProbability(snapshot.repeat_probability_90d)}</dd></div></dl></article>
             </div>
-          </section>
-
-          <section className="llm-wide-section historical-prediction-basis">
-            <div className="llm-section-heading"><span>Historical Prediction Basis</span><small>Cutoff {basis.cutoff_date}</small></div>
-            <dl className="llm-facts-grid"><div><dt>Match level</dt><dd>{basis.match_level}</dd></div><div><dt>Peer sample</dt><dd>{basis.sample_size}</dd></div><div><dt>Earlier member claims</dt><dd>{basis.earlier_same_member_claims}</dd></div><div><dt>Earlier same-CPT claims</dt><dd>{basis.earlier_same_cpt_claims}</dd></div><div><dt>Previous denials</dt><dd>{basis.previous_denials}</dd></div><div><dt>Consistency check</dt><dd>{result.consistency_check?.passed ? 'Passed' : ''}</dd></div></dl>
+            <PredictionValidationPanel claimValidation={result.retrospective_validation} />
           </section>
 
           <section className="llm-wide-section scenario-map-section">
-            <div className="llm-section-heading"><span>Provider Money Scenario Map</span><small>History → actual payment → prediction → supported action</small></div>
+            <div className="llm-section-heading"><span>Transparent Provider Money Scenario Map</span><small>History → coded relationship → prediction → evidence → action</small></div>
             <div className="scenario-pathway">{sections.map((section) => <ScenarioMapSection key={section.step} section={section} />)}</div>
           </section>
 
+          <section className="llm-wide-section">
+            <div className="llm-section-heading"><span>Prediction Evidence / RAG</span><small>{rag.embedding_model || 'Local workbook vectors'}</small></div>
+            <PredictionEvidence rag={rag} />
+          </section>
+
           <section className="llm-wide-section prediction-basis-section">
-            <div className="llm-section-heading"><span>Prediction Explanation</span><small>RAG index {rag.index_version}</small></div>
+            <div className="llm-section-heading"><span>Ollama Prediction Explanation</span><small>Explanation only; Python owns every numeric result</small></div>
+            {explanation.summary ? <p className="ollama-prediction-summary">{explanation.summary}</p> : null}
             {explanation.sections?.length ? (
               <div className="layman-explanation">
                 {explanation.sections.map((section, index) => (
@@ -2378,7 +2878,7 @@ export function ProviderMoneyLlmResult({ result }) {
                   </article>
                 ))}
               </div>
-            ) : <p>{explanation.summary}</p>}
+            ) : null}
             <div className="llm-evidence-list">{(rag.retrieved_chunks || []).map((chunk, index) => <article key={`${chunk.source_sheet}-${chunk.source_row}-${index}`}><strong>{chunk.source_sheet} · row {chunk.source_row}</strong><small>Claim {chunk.claim_id || 'supporting reference'} · {chunk.reason_code || 'workbook context'}</small><small>Similarity {Number(chunk.similarity || 0).toFixed(3)} · Fields: {(chunk.fields_used || []).join(', ')}</small></article>)}</div>
           </section>
         </div>
@@ -2393,6 +2893,7 @@ function ChatFinancialExplanation({ explanation }) {
   const action = explanation.best_action || {}
   const future = explanation.future_financial_exposure || {}
   const validated = explanation.validated_real_savings || {}
+  const denialDetail = explanation.future_denial_exposure_detail || {}
   if (explanation.future_financial_exposure || explanation.validated_real_savings) {
     return (
       <section className="chat-financial-explanation">
@@ -2412,13 +2913,15 @@ function ChatFinancialExplanation({ explanation }) {
       <strong>Prediction and Money Breakdown</strong>
       <div className="chat-financial-grid">
         <article><span>Recoverable now</span><b>{formatOptionalCurrency(explanation.recoverable_now)}</b></article>
-        <article><span>Supported avoidable spend</span><b>{formatOptionalCurrency(explanation.potentially_avoidable_spend_supported)}</b></article>
+        <article><span>Predicted avoidable spend</span><b>{formatOptionalCurrency(explanation.predicted_avoidable_spend?.value)}</b><small>Forecast · 90-day horizon</small></article>
+        <article><span>Predicted avoidable provider payment</span><b>{formatOptionalCurrency(explanation.predicted_avoidable_provider_payment?.value)}</b><small>Provider cash view</small></article>
         <article><span>Predicted provider payment</span><b>{formatOptionalCurrency(explanation.predicted_provider_payment?.value)}</b><small>{formatPredictionRange(explanation.predicted_provider_payment)}</small></article>
         <article><span>Predicted contractual adjustment</span><b>{formatOptionalCurrency(explanation.predicted_contractual_adjustment?.value)}</b><small>{formatPredictionRange(explanation.predicted_contractual_adjustment)}</small></article>
-        <article><span>Future denial exposure</span><b>{formatOptionalCurrency(explanation.future_denial_exposure)}</b><small>Forecast only</small></article>
+        <article><span>Future denial exposure</span><b>{formatOptionalCurrency(explanation.future_denial_exposure)}</b><small>Forecast only · {formatProbability(denialDetail.denial_probability)} denial probability · {formatOptionalCurrency(denialDetail.predicted_paid)} predicted provider payment</small></article>
         <article><span>Future repeat-payment exposure</span><b>{formatOptionalCurrency(explanation.future_repeat_payment_exposure)}</b><small>Forecast only</small></article>
         <article><span>Best action</span><b>{action.stage}</b><small>{action.action}</small></article>
       </div>
+      {explanation.validated_avoidable_spend ? <details className="validated-avoidable-detail"><summary>Historical validation detail</summary><p>Validated avoidable spend: {formatOptionalCurrency(explanation.validated_avoidable_spend.value)} · {explanation.validated_avoidable_spend.reason}</p></details> : null}
       {explanation.formula_trace?.length ? <details><summary>Formula and workbook evidence</summary>{explanation.formula_trace.map((item) => <p key={item.category}><b>{readableLabel(item.category)}</b>: {item.formula} = {formatOptionalCurrency(item.amount)} · {item.reason_code}</p>)}<p>Evidence claims: {(explanation.evidence_claim_ids || []).join(', ')}</p><p>Evidence fields: {(explanation.evidence_fields || []).join(', ')}</p></details> : null}
       <footer>Confidence: {formatProbability(explanation.confidence?.score)}{explanation.limitations?.length ? ` · ${explanation.limitations[0]}` : ''}</footer>
     </section>
@@ -2483,7 +2986,7 @@ function ProviderPredictionChat({ result }) {
       <header className="provider-chat-header">
         <div className="provider-chat-heading">
           <span className="provider-chat-icon"><Sparkles size={18} /></span>
-          <div><strong>Provider assistant</strong><small>Ask about this claim prediction</small></div>
+          <div><strong>Ask About This Prediction</strong><small>Canonical prediction and workbook evidence only</small></div>
         </div>
         {messages.length ? <button className="provider-chat-clear" type="button" onClick={clear}>Clear chat</button> : null}
       </header>
@@ -2495,7 +2998,7 @@ function ProviderPredictionChat({ result }) {
             <p>Ask about predicted payments, savings opportunities, risk exposure, or the evidence behind this result.</p>
           </div>
         ) : null}
-        <div className="chat-results-list" ref={resultsRef} aria-live="polite">{messages.map((message, index) => <div className={`chat-message-block ${message.role}`} key={`${message.role}-${index}`}><article className={`chat-result-card ${message.role}`}><strong>{message.role === 'user' ? 'Your question' : 'Groq provider assistant'}</strong><p>{message.text}</p>{message.meta?.evidence_claim_ids?.length ? <small>Evidence: {message.meta.evidence_claim_ids.join(', ')}</small> : null}</article>{message.role === 'assistant' ? <ChatFinancialExplanation explanation={message.meta?.financial_explanation} /> : null}</div>)}{loading ? <article className="chat-result-card assistant loading"><RefreshCw className="spin" size={16} /> Reviewing the structured prediction…</article> : null}</div>
+        <div className="chat-results-list" ref={resultsRef} aria-live="polite">{messages.map((message, index) => <div className={`chat-message-block ${message.role}`} key={`${message.role}-${index}`}><article className={`chat-result-card ${message.role}`}><strong>{message.role === 'user' ? 'You' : 'Provider assistant'}</strong><p>{message.text}</p>{message.meta?.evidence_claim_ids?.length ? <small>Evidence: {message.meta.evidence_claim_ids.join(', ')}</small> : null}</article>{message.role === 'assistant' ? <ChatFinancialExplanation explanation={message.meta?.financial_explanation} /> : null}</div>)}{loading ? <article className="chat-result-card assistant loading"><RefreshCw className="spin" size={16} /> Reviewing this claim…</article> : null}</div>
         <div className="chat-suggestions" aria-label="Suggested questions">{suggested.slice(0, 4).map((question) => <button type="button" key={question} onClick={() => submit(question)}>{question}</button>)}</div>
         {error ? <div className="chat-error">{error}<button type="button" onClick={() => submit(lastQuestion)}>Retry</button></div> : null}
       </div>
@@ -2667,7 +3170,7 @@ function PredictionSummary({ summary }) {
   const cards = [
     { label: 'Selectable Claims', value: summary.totalClaims.toLocaleString(), note: 'current workbook claims', tone: 'blue' },
     { label: 'Recoverable Now', value: formatCurrency(summary.recoverableNow), note: 'canonical claim opportunities', tone: 'green' },
-    { label: 'Supported Avoidable Spend', value: formatCurrency(summary.supportedAvoidableSpend), note: 'episode-deduplicated', tone: 'orange' },
+    { label: 'Predicted Avoidable Spend — 90 Days', value: formatCurrency(summary.predictedAvoidableSpend90d), note: 'latest prediction per episode', tone: 'orange' },
     { label: 'Future Denial Exposure', value: formatCurrency(summary.futureDenialExposure), note: 'forecast kept separate', tone: 'violet' },
     { label: 'Future Repeat Exposure', value: formatCurrency(summary.futureRepeatPaymentExposure), note: 'forecast kept separate', tone: 'orange' },
   ]

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Claims Evidence Lab</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">Payer / Payee · Local analytics</p>
+      <h1>Claims Evidence Lab</h1>
+    </div>
+    <div class="status-wrap">
+      <span id="statusDot" class="dot"></span>
+      <span id="statusText">Checking services…</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="control-panel">
+      <div class="control-copy">
+        <p class="eyebrow">Evidence-first analysis</p>
+        <h2>See what the claims show. Nothing more.</h2>
+        <p>Compare diagnosis and procedure codes, financial amounts, providers, repeated activity, timing, and historical matches—with every finding tied to a claim record.</p>
+      </div>
+      <div class="controls">
+        <label>Member
+          <select id="memberSelect"><option value="">Choose a member</option></select>
+        </label>
+        <label>Claim
+          <select id="claimSelect" disabled><option value="">Member history</option></select>
+        </label>
+        <label class="toggle"><input id="llmToggle" type="checkbox" checked><span></span> Explain with local LLM</label>
+        <button id="analyzeButton" disabled>Run analysis</button>
+      </div>
+    </section>
+
+    <section class="principles">
+      <article><span>01</span><strong>Facts</strong><small>Directly stored claim fields</small></article>
+      <article><span>02</span><strong>Patterns</strong><small>Computed historical comparisons</small></article>
+      <article><span>03</span><strong>Limits</strong><small>What the data cannot establish</small></article>
+    </section>
+
+    <section id="emptyState" class="empty-state">
+      <div class="empty-mark">⌁</div>
+      <h3>Select a member to begin</h3>
+      <p>The service is connected to the local 837 claims collection. Analysis stays on this device.</p>
+    </section>
+
+    <section id="loadingState" class="empty-state hidden">
+      <div class="spinner"></div>
+      <h3>Building the evidence set</h3>
+      <p>Computing code, provider, timing, and financial comparisons.</p>
+    </section>
+
+    <section id="results" class="results hidden">
+      <div class="result-heading">
+        <div><p class="eyebrow">Grounded output</p><h2 id="resultTitle"></h2></div>
+        <span id="modeBadge" class="badge"></span>
+      </div>
+
+      <article class="narrative-card">
+        <div class="card-kicker">Explanation</div>
+        <p id="overview" class="overview"></p>
+        <div class="three-column">
+          <div><h3>Facts</h3><ul id="narrativeFacts"></ul></div>
+          <div><h3>Observed patterns</h3><ul id="narrativePatterns"></ul></div>
+          <div class="limits"><h3>Insufficient evidence</h3><ul id="narrativeLimits"></ul></div>
+        </div>
+      </article>
+
+      <div id="metricGrid" class="metric-grid"></div>
+
+      <div class="two-column">
+        <article class="panel"><div class="card-kicker">Pattern register</div><h3>What was identified</h3><div id="patterns"></div></article>
+        <article class="panel"><div class="card-kicker">Evidence limits</div><h3>What is not supported</h3><ul id="limits" class="limit-list"></ul></article>
+      </div>
+
+      <article class="panel evidence-panel">
+        <div class="panel-header"><div><div class="card-kicker">Source records</div><h3>Evidence behind the findings</h3></div><span id="evidenceCount" class="badge"></span></div>
+        <div class="table-wrap"><table><thead><tr><th>Claim</th><th>Date</th><th>ICD-10</th><th>CPT</th><th>Provider</th><th>Charge</th><th>Allowed</th><th>Paid</th><th>Patient</th></tr></thead><tbody id="evidenceRows"></tbody></table></div>
+      </article>
+
+      <article class="question-panel">
+        <div><div class="card-kicker">Ask the evidence</div><h3>Ask a claims-data question</h3><p>Try “Which earlier claims are most similar?” or “Were there claims within three days?”</p></div>
+        <form id="questionForm"><input id="questionInput" placeholder="Ask about the selected member or claim…"><button>Ask local LLM</button></form>
+      </article>
+    </section>
+  </main>
+
+  <footer>Local-only claims analytics · Not clinical advice · No diagnosis or treatment recommendations</footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>

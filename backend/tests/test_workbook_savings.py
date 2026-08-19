@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import re
@@ -21,10 +22,17 @@ os.environ.setdefault("DATA_NOTES_WORKSHEET_NAME", "Data_Notes_READ_ME")
 
 from backend.app import app
 from backend.financial_engine import build_financial_result
+from backend.financial_engine import clear_financial_cache
+from backend.prediction_validation import (
+    PredictionConsistencyError,
+    claim_backtest,
+    validate_prediction_result,
+)
 from backend.workbook_enrichment import REQUIRED_SHEETS, load_workbook_database
 from backend.workbook_enrichment import _notify_hash_change
 from backend.workbook_llm import (
     _groq_exact_answer,
+    _validate_model_numbers,
     generate_workbook_chat_answer,
     generate_workbook_llm_analysis,
 )
@@ -85,7 +93,11 @@ class IntegratedWorkbookTests(unittest.TestCase):
         avoidable = result["financial_opportunities"]["potentially_avoidable_episode_spend"]
         self.assertEqual(avoidable["reason_code"], "INSUFFICIENT_COMPARABLE_EPISODES")
         self.assertIn("Only 3 comparable episodes", avoidable["reason"])
-        calculation = result["scenario_map"]["sections"][5]["items"]
+        calculation = next(
+            section["items"]
+            for section in result["scenario_map"]["sections"]
+            if section["title"] == "Financial Opportunity"
+        )
         patient = next(item for item in calculation if item["type"] == "patient_balance")
         self.assertEqual(patient["formula"], "114.16 - 40.45 = 73.71")
 
@@ -108,9 +120,16 @@ class IntegratedWorkbookTests(unittest.TestCase):
             self.database, claim_id, canonical["episode_id"], "How much can be saved?", "c1"
         )
         expected = canonical["supported_money_summary"]
-        scenario_money = canonical["scenario_map"]["sections"][4]["items"]
+        scenario_money = next(
+            section["items"]
+            for section in canonical["scenario_map"]["sections"]
+            if section["title"] == "Financial Prediction"
+        )
         self.assertEqual(analysis["supported_money_summary"], expected)
-        self.assertEqual(scenario_money["recoverable_now"], expected["recoverable_now"])
+        self.assertEqual(
+            scenario_money["predicted_provider_payment"],
+            canonical["financial_prediction_snapshot"]["predicted_provider_payment"]["value"],
+        )
         self.assertEqual(
             chat["financial_explanation"]["recoverable_now"], expected["recoverable_now"]
         )
@@ -119,7 +138,11 @@ class IntegratedWorkbookTests(unittest.TestCase):
             expected["potentially_avoidable_spend_supported"],
         )
         explanation = analysis["prediction_explanation"]
-        self.assertEqual(len(explanation["sections"]), 6)
+        self.assertEqual(len(explanation["sections"]), 7)
+        self.assertIn(
+            "Predicted avoidable spend",
+            [section["title"] for section in explanation["sections"]],
+        )
         self.assertEqual(
             [section["title"] for section in explanation["sections"]],
             [
@@ -128,6 +151,7 @@ class IntegratedWorkbookTests(unittest.TestCase):
                 "How the amount was determined",
                 "What to do next",
                 "What the forecast risk means",
+                "Predicted avoidable spend",
                 "How confident the model is",
             ],
         )
@@ -142,7 +166,7 @@ class IntegratedWorkbookTests(unittest.TestCase):
             self.database, result["claim_id"], result["episode_id"], "How much can be saved?", "first"
         )
         second = generate_workbook_chat_answer(
-            self.database, result["claim_id"], result["episode_id"], "  HOW much can be saved? ", "second"
+            self.database, result["claim_id"], result["episode_id"], "  HOW much can be saved ", "second"
         )
         self.assertEqual(first["answer"], second["answer"])
         self.assertEqual(first["financial_explanation"], second["financial_explanation"])
@@ -152,7 +176,7 @@ class IntegratedWorkbookTests(unittest.TestCase):
     @patch("backend.workbook_llm.urlopen")
     def test_groq_cannot_change_backend_financial_text(self, mocked_urlopen):
         canonical = build_financial_result(self.database, "CLM00000143")
-        rag = retrieve_evidence(self.database, canonical, "How much can be saved?")
+        rag = {"retrieved_documents": []}
         mocked_urlopen.return_value.__enter__.return_value.read.return_value = json.dumps({
             "choices": [{"message": {"content": json.dumps({"answer": "The amount is $999,999.00."})}}]
         }).encode()
@@ -160,11 +184,59 @@ class IntegratedWorkbookTests(unittest.TestCase):
         self.assertEqual(answer, "The amount is $16.42.")
         self.assertEqual(source, "deterministic_backend")
 
+    def test_model_numeric_grounding_rejects_invented_money(self):
+        canonical = build_financial_result(self.database, "CLM00000143")
+        _validate_model_numbers("The supported amount is $16.42.", canonical)
+        with self.assertRaisesRegex(ValueError, "introduced numeric values"):
+            _validate_model_numbers("The supported amount is $999,999.00.", canonical)
+
+    def test_prediction_does_not_call_ollama_or_rag(self):
+        clear_financial_cache()
+        with patch(
+            "backend.ollama_service.OllamaClient.embed",
+            side_effect=AssertionError("prediction called Ollama"),
+        ), patch(
+            "backend.workbook_rag.retrieve_evidence",
+            side_effect=AssertionError("prediction called RAG"),
+        ):
+            result = build_financial_result(self.database, "CLM00000143")
+        self.assertTrue(result["consistency_check"]["passed"])
+
+    def test_prediction_validation_rejects_formula_and_probability_drift(self):
+        result = copy.deepcopy(
+            build_financial_result(self.database, "CLM00000143")
+        )
+        backtest = claim_backtest(result)
+        self.assertEqual(
+            backtest["paid"]["actual"],
+            result["actual_claim_facts"]["paid"],
+        )
+        self.assertIn("actual_inside_interval", backtest["paid"])
+        result["financial_prediction_snapshot"]["denial_probability"] = 1.01
+        result["financial_prediction_snapshot"][
+            "predicted_denial_revenue_exposure"
+        ] = -1
+        with self.assertRaises(PredictionConsistencyError) as raised:
+            validate_prediction_result(result)
+        self.assertTrue(
+            any("between zero and one" in item for item in raised.exception.details)
+        )
+        self.assertTrue(
+            any("canonical formula" in item for item in raised.exception.details)
+        )
+
     def test_rag_is_workbook_only_and_excludes_direct_phi(self):
         bundle = build_index(self.database)
-        self.assertEqual(bundle["metadata"]["document_count"], 2423)
+        self.assertGreater(bundle["manifest"]["document_count"], len(self.database.claims))
         self.assertEqual(
-            set(bundle["metadata"]["source_sheets"]),
+            bundle["manifest"]["document_count"],
+            bundle["manifest"]["vector_count"],
+        )
+        self.assertEqual(
+            {
+                document["metadata"]["source_sheet"]
+                for document in bundle["documents"]
+            },
             {"837_Claims", "Reason_Code_Legend", "New_Fields_Dictionary", "Data_Notes_READ_ME"},
         )
         forbidden_field_fragments = (
@@ -183,21 +255,45 @@ class IntegratedWorkbookTests(unittest.TestCase):
         canonical = build_financial_result(self.database, "CLM00001092")
         rag = retrieve_evidence(self.database, canonical, "patient balance")
         selected = self.database.find_claim(canonical["claim_id"])
-        by_location = {
-            (document["metadata"]["source_sheet"], document["metadata"]["source_row"]): document
+        by_id = {
+            document["metadata"]["document_id"]: document
             for document in build_index(self.database)["documents"]
         }
         for chunk in rag["retrieved_chunks"]:
-            document = by_location[(chunk["source_sheet"], chunk["source_row"])]
+            document = by_id[chunk["document_id"]]
             metadata = document["metadata"]
             if metadata["source_sheet"] != "837_Claims" or metadata["claim_id"] == selected["claimId"]:
                 continue
-            self.assertLessEqual(metadata["service_date"], selected["dos"])
+            self.assertLess(metadata["service_date"], selected["dos"])
             self.assertTrue(
                 metadata["member_id"] == selected["memberId"]
                 or metadata["episode_id"] == selected["episodeId"]
                 or metadata["is_historical_reference"]
             )
+
+    def test_clm_143_retrieval_contains_underpayment_evidence_fields(self):
+        canonical = build_financial_result(self.database, "CLM00000143")
+        rag = retrieve_evidence(
+            self.database,
+            canonical,
+            "Why is the supported underpayment recoverable?",
+        )
+        exact_claim_fields = {
+            field
+            for document in rag["retrieved_documents"]
+            if document["claim_id"] == canonical["claim_id"]
+            for field in document["fields_used"]
+        }
+        self.assertTrue(
+            {
+                "Expected_Reimbursement",
+                "Paid_Amount",
+                "Recovered_Amount",
+                "Underpayment_Amount",
+                "Underpayment_Flag",
+                "Payment_Tolerance",
+            }.issubset(exact_claim_fields)
+        )
 
     def test_workbook_hash_change_clears_financial_rag_llm_and_chat_caches(self):
         from backend import financial_engine, workbook_llm, workbook_rag

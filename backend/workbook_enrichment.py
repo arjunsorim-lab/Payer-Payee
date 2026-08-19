@@ -38,11 +38,11 @@ REQUIRED_SHEETS = {
     DATA_NOTES_SHEET,
 }
 
-CALCULATION_VERSION = "workbook-money-v1"
-PREDICTION_VERSION = "workbook-peer-forecast-v1"
+CALCULATION_VERSION = "workbook-money-v2"
+PREDICTION_VERSION = "workbook-peer-avoidable-forecast-v2"
 SAVINGS_VERSION = "workbook-opportunity-v1"
-RAG_INDEX_VERSION = "workbook-faiss-hash-v1"
-GROQ_PROMPT_VERSION = "workbook-layman-explanation-v2"
+RAG_INDEX_VERSION = "workbook-rag-v1"
+GROQ_PROMPT_VERSION = "workbook-ollama-explanation-v2"
 
 _CACHE: dict[tuple[str, int, int], "WorkbookDatabase"] = {}
 _ACTIVE_HASH = ""
@@ -193,6 +193,12 @@ class WorkbookDatabase:
             "savings_version": SAVINGS_VERSION,
             "rag_index_version": RAG_INDEX_VERSION,
             "groq_prompt_version": GROQ_PROMPT_VERSION,
+            "llm_prompt_version": GROQ_PROMPT_VERSION,
+            "llm_provider": os.getenv("LLM_PROVIDER", "ollama"),
+            "ollama_chat_model": os.getenv("OLLAMA_CHAT_MODEL", "gemma3"),
+            "ollama_embedding_model": os.getenv(
+                "OLLAMA_EMBED_MODEL", "embeddinggemma"
+            ),
         }
 
 
@@ -203,6 +209,8 @@ def _notify_hash_change(previous_hash, next_hash):
         ("backend.financial_engine", "clear_financial_cache"),
         ("backend.workbook_rag", "clear_rag_cache"),
         ("backend.workbook_llm", "clear_llm_caches"),
+        ("backend.prediction_validation", "clear_validation_cache"),
+        ("backend.avoidable_prediction", "clear_avoidable_prediction_cache"),
     ):
         try:
             module = __import__(module_name, fromlist=[function_name])

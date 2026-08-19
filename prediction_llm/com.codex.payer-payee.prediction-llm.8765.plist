@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.codex.payer-payee.prediction-llm.8765</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/user/Downloads/payer/prediction_llm/.venv/bin/python</string>
+    <string>/Users/user/Downloads/payer/prediction_llm/app.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/user/Downloads/payer/prediction_llm</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MONGODB_URI</key><string>mongodb://127.0.0.1:27018/</string>
+    <key>MONGODB_DATABASE</key><string>payer_payee</string>
+    <key>MONGODB_COLLECTION</key><string>837_claims</string>
+    <key>OLLAMA_URL</key><string>http://127.0.0.1:11434</string>
+    <key>OLLAMA_MODEL</key><string>gemma3:1b</string>
+    <key>PORT</key><string>8765</string>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key>
+  <string>/Users/user/Downloads/payer/prediction_llm/logs/app.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/user/Downloads/payer/prediction_llm/logs/app.stderr.log</string>
+</dict>
+</plist>

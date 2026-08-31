@@ -86,6 +86,19 @@ def claim_analysis(claim_id: str):
     return jsonify(with_narrative(engine.claim_analysis(claim_id)))
 
 
+@app.get("/api/claims/<claim_id>/payer-savings")
+def payer_savings(claim_id: str):
+    """Return the deterministic payer-spend benchmark for one selected claim.
+
+    Ollama is opt-in and receives this completed result only for wording; it
+    never participates in peer selection or financial arithmetic.
+    """
+    result = engine.payer_savings_prediction(claim_id)
+    if wants_llm():
+        result["narrative"] = narrator.explain(result)
+    return jsonify(result)
+
+
 @app.post("/api/ask")
 def ask():
     payload = request.get_json(silent=True) or {}

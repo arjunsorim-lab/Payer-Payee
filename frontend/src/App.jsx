@@ -1933,6 +1933,15 @@ function OrganSystemComparativeSavingsCard({ scenario, facts }) {
 
   const peerOrgan = activePeer ? getOrganSystemInfo(activePeer.icd10, activePeer.match_reason) : targetOrgan
   const visiblePeers = showAllPeers ? orderedPeers : orderedPeers.slice(0, 3)
+  const matchingFeatureCounts = useMemo(() => [
+    { label: 'same recorded condition group', count: organMatchedPeers.filter((peer) => peer.same_icd_family).length },
+    { label: 'same billing code', count: organMatchedPeers.filter((peer) => peer.same_cpt).length },
+    { label: 'same insurance company', count: organMatchedPeers.filter((peer) => peer.same_payer).length },
+    { label: 'same provider', count: organMatchedPeers.filter((peer) => peer.same_provider).length },
+    { label: 'same service location', count: organMatchedPeers.filter((peer) => peer.same_place_of_service).length },
+    { label: 'similar number of service units', count: organMatchedPeers.filter((peer) => peer.similar_units).length },
+  ].filter((feature) => feature.count > 0), [organMatchedPeers])
+  const selectedPeerReason = activePeer?.match_reason || 'It was ranked as an earlier claim with the closest recorded details.'
 
   return (
     <section className="organ-comparative-savings-section" aria-labelledby="organ-savings-heading">
@@ -1955,6 +1964,24 @@ function OrganSystemComparativeSavingsCard({ scenario, facts }) {
 
       {activePeer ? (
         <>
+          <div className="organ-comparison-reason" role="note">
+            <div>
+              <h4>Why compare with these {organMatchedPeers.length} earlier claim{organMatchedPeers.length === 1 ? '' : 's'}?</h4>
+              <p>
+                The system looks only at claims recorded before this visit. It ranks them by how closely their recorded details match this visit, then uses the strongest matches in the same type-of-care group to show whether insurance prices vary.
+              </p>
+            </div>
+            {matchingFeatureCounts.length ? (
+              <div className="comparison-match-list" aria-label="Recorded details shared with this visit">
+                {matchingFeatureCounts.map((feature) => (
+                  <span key={feature.label}>{feature.count} {feature.label}</span>
+                ))}
+              </div>
+            ) : null}
+            <p className="selected-peer-reason">
+              <strong>Why the claim on the right is included:</strong> {selectedPeerReason} It is shown first because it has the lowest insurance price in this comparison list; choose any row below to compare a different earlier claim.
+            </p>
+          </div>
           <p className="organ-comparison-one-liner">Another selected claim has an insurance-agreed price that is {formatOptionalCurrency(savingsAmount)} lower. Here is what was compared.</p>
           <div className="organ-savings-comparator-grid">
             <div className="member-comparator-card member-a-card">

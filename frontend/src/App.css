@@ -6041,6 +6041,55 @@ button {
   line-height: 1.45;
 }
 
+.organ-comparison-reason {
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  background: #f8fbff;
+  padding: 15px 16px;
+  color: #334155;
+}
+
+.organ-comparison-reason h4 {
+  margin: 0 0 5px;
+  color: #1e40af;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.organ-comparison-reason p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.comparison-match-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.comparison-match-list span {
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.3;
+  padding: 4px 8px;
+}
+
+.selected-peer-reason {
+  margin-top: 12px !important;
+  padding-top: 12px;
+  border-top: 1px solid #dbeafe;
+}
+
+.selected-peer-reason strong {
+  color: #1e3a8a;
+}
+
 @media (max-width: 1024px) {
   .organ-savings-comparator-grid {
     grid-template-columns: 1fr;

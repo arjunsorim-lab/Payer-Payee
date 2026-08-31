@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="594" height="572" viewBox="0 0 594 572" role="img" aria-labelledby="title desc">
+  <title id="title">ClaimsAI robot</title>
+  <desc id="desc">Blue ClaimsAI robot icon</desc>
+  <filter id="theme-tint" color-interpolation-filters="sRGB">
+    <!-- Map black pixels to the app's primary blue (#2563eb), while keeping white pixels white. -->
+    <feColorMatrix type="matrix" values="0.855 0 0 0.145 0  0 0.612 0 0.388 0  0 0 0.078 0.922 0  0 0 0 1 0" />
+  </filter>
+  <image href="claimsai-robot.png" width="594" height="572" preserveAspectRatio="none" filter="url(#theme-tint)" />
+</svg>

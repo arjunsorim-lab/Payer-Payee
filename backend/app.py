@@ -660,11 +660,38 @@ def generate_claim_anchored_payer_prediction(claim_number):
     if not database:
         return json_response({"message": "Configured workbook is required."}, 409)
     try:
-        return json_response(build_payer_prediction_for_claim(database, claim_number))
+        from backend.prediction_engine_v2 import build_payer_prediction_for_claim_v2
+        return json_response(build_payer_prediction_for_claim_v2(database, claim_number))
     except KeyError as error:
         return json_response({"message": str(error)}, 404)
     except ValueError as error:
         return json_response({"message": str(error)}, 422)
+
+
+@app.get("/api/payer-prediction/<member_id>")
+def get_payer_member_prediction(member_id):
+    """Phase 9 member-level payer savings prediction for a target member."""
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Configured workbook is required."}, 409)
+    try:
+        from backend.prediction_engine_v2 import build_member_payer_prediction
+
+        observation = request.args.get("window")
+        observation_days = int(observation) if observation and observation.isdigit() else None
+        return json_response(build_member_payer_prediction(database, member_id, observation_days))
+    except ValueError as error:
+        return json_response({"message": str(error)}, 422)
+
+
+@app.get("/api/payer-prediction/validation")
+def get_payer_prediction_validation():
+    """Phase 11 temporal backtest summary for payer savings benchmarks."""
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Configured workbook is required."}, 409)
+    from backend.prediction_engine_v2 import run_payer_temporal_backtest
+    return json_response(run_payer_temporal_backtest(database))
 
 
 @app.get("/api/predictions/payer/member/<member_id>")

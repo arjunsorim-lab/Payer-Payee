@@ -84,6 +84,9 @@ class IntegratedWorkbookTests(unittest.TestCase):
     def test_clm_1092_financial_categories_and_best_action(self):
         result = build_financial_result(self.database, "CLM00001092")
         summary = result["supported_money_summary"]
+        self.assertEqual(result["actual_claim_facts"]["days_outstanding"], 50)
+        self.assertEqual(result["actual_claim_facts"]["aging_bucket"], "31-60")
+        self.assertEqual(result["actual_claim_facts"]["payment_plan_status"], "Broken Plan")
         self.assertEqual(result["financial_opportunities"]["underpayment"]["amount"], 0.0)
         self.assertEqual(result["financial_opportunities"]["underpayment"]["status"], "supported_zero")
         self.assertEqual(result["financial_opportunities"]["patient_balance"]["amount"], 73.71)
@@ -100,6 +103,26 @@ class IntegratedWorkbookTests(unittest.TestCase):
         )
         patient = next(item for item in calculation if item["type"] == "patient_balance")
         self.assertEqual(patient["formula"], "114.16 - 40.45 = 73.71")
+        self.assertEqual(patient["details"]["responsibility_component_total"], 114.16)
+        self.assertEqual(patient["details"]["workbook_row"], 3)
+        self.assertIn("Synthetic demonstration value", patient["details"]["patient_payment_source"])
+        prediction_step = next(
+            section
+            for section in result["scenario_map"]["sections"]
+            if section["step"] == 6
+        )
+        self.assertIn(
+            "$424.52 target charge × 78.82%",
+            prediction_step["calculations"]["predicted_allowed"]["formula"],
+        )
+        self.assertIn(
+            "10.53% denial chance × $278.01",
+            prediction_step["calculations"]["future_denial_exposure"]["formula"],
+        )
+        self.assertIn(
+            "24.10% repeat chance × 68.85% avoidable share × $334.61",
+            prediction_step["calculations"]["predicted_avoidable_spend"]["formula"],
+        )
 
     def test_clm_143_financial_categories_and_best_action(self):
         result = build_financial_result(self.database, "CLM00000143")

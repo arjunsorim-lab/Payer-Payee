@@ -1931,14 +1931,22 @@ function ValueBasedRectificationCase({ valueBasedCase }) {
   const improved = valueBasedCase.improved_claim || prediction
   const calculation = valueBasedCase.calculation || {}
   const claimsIncluded = valueBasedCase.claims_included || []
+  const patternClues = (valueBasedCase.reference_selection?.evidence || []).map((clue) => ({
+    'same member': 'The bills are for the same person.',
+    'same payer': 'The same insurance company is involved.',
+    'same billing provider': 'The same hospital or billing provider is involved.',
+    'same ICD-10 family': 'The bills use the same detailed problem-code group.',
+    'same ICD-10 chapter': 'The problem codes start in the same broad medical group.',
+    'older office visit followed by a billed test': 'An office visit came before a billed test.',
+  }[clue] || clue))
 
   return (
     <section className="value-based-case" aria-labelledby="value-based-case-heading">
       <header>
         <span>Possible money-saving check</span>
-        <h2 id="value-based-case-heading">An older bill and a later bill to check</h2>
+        <h2 id="value-based-case-heading">A short sequence of bills to check</h2>
         <p>
-          These bills look connected because they use the same kind of problem code. They do not prove that anyone missed care or that a later bill could have been stopped.
+          We found these bills close together in this person's history. This does not prove that anyone missed care or that a later bill could have been stopped.
         </p>
       </header>
 
@@ -1979,12 +1987,18 @@ function ValueBasedRectificationCase({ valueBasedCase }) {
       </div>
 
       <div className="value-based-reason">
-        <strong>Why we picked the older bill:</strong> {valueBasedCase.reference_selection?.reason}
+        <strong>Why we put these bills together</strong>
+        <p>{valueBasedCase.reference_selection?.reason}</p>
+        {patternClues.length ? (
+          <ul>
+            {patternClues.map((clue) => <li key={clue}>{clue}</li>)}
+          </ul>
+        ) : null}
       </div>
 
       <div className="value-based-improvement">
         <div>
-          <span>What a person should check earlier</span>
+          <span>What to ask a clinician about</span>
           <strong>{improved.procedure_description || 'Procedure description not recorded'} · {improved.cpt || 'billing code not recorded'}</strong>
         </div>
         <p>{improved.reason}</p>
@@ -2544,12 +2558,6 @@ function PredictionScenarioMap({ scenario, valueBasedCase: loadedValueBasedCase 
         facts={facts}
         snapshot={snapshot}
         summary={summary}
-      />
-
-      <OrganSystemComparativeSavingsCard
-        scenario={scenario}
-        facts={facts}
-        snapshot={snapshot}
       />
 
       <details className="scenario-technical-details">

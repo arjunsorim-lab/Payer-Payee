@@ -6,7 +6,8 @@ from backend.value_based_case import build_value_based_case_for_claim
 
 
 def claim(claim_id, member_id, service_date, paid, *, family="E11", diagnosis=None,
-          cpt="99213", procedure="Office visit", historical=False):
+          cpt="99213", procedure="Office visit", historical=False,
+          payer_id="P1", provider_npi="1234567890"):
     diagnosis = diagnosis or f"{family}.9"
     return {
         "workbookFields": {
@@ -19,6 +20,8 @@ def claim(claim_id, member_id, service_date, paid, *, family="E11", diagnosis=No
             "CPT_Code": cpt,
             "CPT_Description": procedure,
             "Paid_Amount": paid,
+            "Payer_ID": payer_id,
+            "Billing_Provider_NPI": provider_npi,
             "Is_Historical_Reference_Record": "Y" if historical else "N",
         }
     }
@@ -46,7 +49,7 @@ class ValueBasedCaseTests(unittest.TestCase):
         result = build_value_based_case_for_claim(database, "PREDICTION")
 
         self.assertTrue(result["available"])
-        self.assertEqual(result["status"], "Rectification candidate")
+        self.assertEqual(result["status"], "Data-pattern review candidate")
         self.assertEqual(result["reference_claim"]["claim_id"], "REFERENCE")
         self.assertEqual(result["reference_selection"]["source"], "same patient")
         self.assertEqual(result["reference_selection"]["relationship"], "same ICD-10 family")
@@ -71,9 +74,32 @@ class ValueBasedCaseTests(unittest.TestCase):
         self.assertEqual(result["reference_selection"]["source"], "different patient")
         self.assertTrue(result["calculation"]["available"])
 
-    def test_same_icd_chapter_without_a_matching_family_does_not_create_a_scenario(self):
+    def test_recent_same_member_office_to_test_pattern_is_a_cautious_fallback(self):
         database = Database([
             claim("REFERENCE", "M1", "2026-05-01", 50, family="N30", diagnosis="N30.90"),
+            claim("PREDICTION", "M1", "2026-05-05", 100, family="N11", diagnosis="N11.1", cpt="87086", procedure="Urine culture"),
+            claim("LATER", "M1", "2026-05-20", 25, family="N39", diagnosis="N39.0", cpt="99214", procedure="Follow-up visit"),
+        ])
+
+        result = build_value_based_case_for_claim(database, "PREDICTION")
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["reference_claim"]["claim_id"], "REFERENCE")
+        self.assertEqual(
+            result["reference_selection"]["method"],
+            "recent_same_member_office_to_test_pattern",
+        )
+        self.assertIn("same payer", result["reference_selection"]["evidence"])
+        self.assertEqual(
+            [item["claim_id"] for item in result["avoidable_repetitive_claims"]],
+            ["LATER"],
+        )
+        self.assertEqual(result["calculation"]["potential_payer_spend_for_review"], 125.0)
+        self.assertTrue(any("weaker" in item for item in result["data_limitations"]))
+
+    def test_icd_chapter_alone_does_not_create_a_pattern(self):
+        database = Database([
+            claim("REFERENCE", "M1", "2026-05-01", 50, family="N30", diagnosis="N30.90", cpt="12345", procedure="Procedure"),
             claim("PREDICTION", "M1", "2026-05-05", 100, family="N11", diagnosis="N11.1", cpt="87086", procedure="Urine culture"),
         ])
 

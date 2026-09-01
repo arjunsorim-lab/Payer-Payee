@@ -1,4 +1,4 @@
-"""Deterministic, claims-only value-based rectification scenarios.
+"""Deterministic, partially data-driven value-based review scenarios.
 
 This module deliberately separates an observable billing pattern from a
 clinical conclusion.  Claims can establish chronology, billed services, and
@@ -15,6 +15,7 @@ import os
 
 VBC_REFERENCE_LOOKBACK_DAYS = int(os.getenv("VBC_REFERENCE_LOOKBACK_DAYS", "120"))
 VBC_REPETITIVE_CLAIM_DAYS = int(os.getenv("VBC_REPETITIVE_CLAIM_DAYS", "120"))
+VBC_RECENT_OFFICE_TO_TEST_DAYS = int(os.getenv("VBC_RECENT_OFFICE_TO_TEST_DAYS", "14"))
 
 
 def _field(claim, name, canonical=None, default=""):
@@ -67,6 +68,20 @@ def _family(claim):
     return explicit or diagnosis.split(".")[0][:3]
 
 
+def _chapter(claim):
+    """Return the first ICD-10 character, only for a cautious fallback rule."""
+    diagnosis = _text(_field(claim, "ICD10_Diagnosis_Code", "diagnosisCode"))
+    return diagnosis[:1].upper()
+
+
+def _payer_id(claim):
+    return _text(_field(claim, "Payer_ID", "payerId"))
+
+
+def _provider_npi(claim):
+    return _text(_field(claim, "Billing_Provider_NPI", "providerNpi"))
+
+
 def _is_historical_reference(claim):
     return _text(_field(claim, "Is_Historical_Reference_Record")).upper() in {
         "Y", "YES", "TRUE", "1",
@@ -99,21 +114,40 @@ def _is_office_or_evaluation_claim(claim):
     return code.startswith("992") or "office" in description or "evaluation" in description
 
 
+def _is_diagnostic_claim(claim):
+    """Identify a billed test without making a clinical conclusion from it."""
+    code = _text(_field(claim, "CPT_Code", "cptCode"))
+    description = _text(_field(claim, "CPT_Description", "cptDescription")).lower()
+    try:
+        numeric_code = int(float(code))
+    except (TypeError, ValueError):
+        numeric_code = 0
+    return (
+        80000 <= numeric_code <= 89999
+        or any(word in description for word in ("test", "culture", "analysis", "imaging", "laboratory"))
+    )
+
+
 def _reference_candidates(database, prediction_claim):
     """Return real claims that pre-date the selected later/prediction claim.
 
-    Same-member references are preferred. The reference must share the same
-    ICD-10 family as the selected claim. A broad ICD-10 chapter (for example,
-    every diagnosis beginning with "Z") is not enough evidence to calculate
-    a claim-level amount.
+    Same-member references are preferred. Exact ICD-10-family matches are the
+    normal rule. A limited fallback identifies a *recent office-to-test
+    sequence* for the same person, payer, provider, and ICD-10 chapter. It is
+    deliberately labelled as a data pattern, not a clinical pathway.
     """
     prediction_date = _day(_field(prediction_claim, "Service_Date_From", "dos"))
     prediction_member = _member_id(prediction_claim)
     prediction_family = _family(prediction_claim)
+    prediction_chapter = _chapter(prediction_claim)
+    prediction_payer = _payer_id(prediction_claim)
+    prediction_provider = _provider_npi(prediction_claim)
     cutoff = prediction_date - timedelta(days=VBC_REFERENCE_LOOKBACK_DAYS)
     candidates = []
 
-    for row in database.claims:
+    # Historical-reference rows in this workbook are synthetic comparators and
+    # must not become the basis for a member-level care review.
+    for row in database.selectable_claims:
         row_date = _day(_field(row, "Service_Date_From", "dos"))
         if (
             not row_date
@@ -122,30 +156,57 @@ def _reference_candidates(database, prediction_claim):
         ):
             continue
         same_member = _member_id(row) == prediction_member
-        if same_member and _is_historical_reference(row):
-            # Synthetic/archival peer rows must not become the patient's own
-            # documented reference care.
-            continue
         same_family = bool(prediction_family) and _family(row) == prediction_family
-        if not same_family:
+        days_before_prediction = (prediction_date - row_date).days
+        same_chapter = bool(prediction_chapter) and _chapter(row) == prediction_chapter
+        same_payer = bool(prediction_payer) and _payer_id(row) == prediction_payer
+        same_provider = bool(prediction_provider) and _provider_npi(row) == prediction_provider
+        recent_office_to_test_pattern = (
+            same_member
+            and 1 <= days_before_prediction <= VBC_RECENT_OFFICE_TO_TEST_DAYS
+            and prediction_chapter != "Z"
+            and same_chapter
+            and same_payer
+            and same_provider
+            and _is_office_or_evaluation_claim(row)
+            and _is_diagnostic_claim(prediction_claim)
+        )
+        if not same_family and not recent_office_to_test_pattern:
             continue
 
+        if recent_office_to_test_pattern:
+            relationship = "recent office visit followed by a test in the same ICD-10 chapter"
+            method = "recent_same_member_office_to_test_pattern"
+            evidence = [
+                "same member",
+                "same payer",
+                "same billing provider",
+                "same ICD-10 chapter",
+                "older office visit followed by a billed test",
+            ]
+        else:
+            relationship = "same ICD-10 family"
+            method = "same_icd10_family"
+            evidence = ["same ICD-10 family"]
         candidates.append({
             "claim": row,
             "same_member": same_member,
             "same_family": same_family,
-            "relationship": "same ICD-10 family",
+            "relationship": relationship,
+            "method": method,
+            "evidence": evidence,
         })
 
     def rank(candidate):
         row = candidate["claim"]
         row_date = _day(_field(row, "Service_Date_From", "dos"))
-        days_before_prediction = (prediction_date - row_date).days
+        recent_pattern = candidate["method"] == "recent_same_member_office_to_test_pattern"
         return (
+            int(recent_pattern),
             int(candidate["same_member"] and candidate["same_family"]),
             int(not candidate["same_member"] and candidate["same_family"]),
             int(_is_office_or_evaluation_claim(row)),
-            -days_before_prediction,
+            -(prediction_date - row_date).days,
             _claim_id(row),
         )
 
@@ -153,18 +214,32 @@ def _reference_candidates(database, prediction_claim):
 
 
 def _later_related_claims(database, prediction_claim, relationship_scope):
-    """Find later same-member claims in the selected claims relationship scope."""
+    """Find later bills in the same transparent, non-clinical pattern scope."""
     prediction_date = _day(_field(prediction_claim, "Service_Date_From", "dos"))
     prediction_member = _member_id(prediction_claim)
     prediction_family = _family(prediction_claim)
+    prediction_chapter = _chapter(prediction_claim)
+    prediction_payer = _payer_id(prediction_claim)
+    prediction_provider = _provider_npi(prediction_claim)
     end_date = prediction_date + timedelta(days=VBC_REPETITIVE_CLAIM_DAYS)
-    rows = [
-        row for row in database.selectable_claims
-        if _member_id(row) == prediction_member
-        and _family(row) == prediction_family
-        and (row_date := _day(_field(row, "Service_Date_From", "dos")))
-        and prediction_date < row_date <= end_date
-    ]
+    rows = []
+    for row in database.selectable_claims:
+        row_date = _day(_field(row, "Service_Date_From", "dos"))
+        if not row_date or not prediction_date < row_date <= end_date:
+            continue
+        if _member_id(row) != prediction_member:
+            continue
+        if relationship_scope == "same_icd10_family":
+            related = _family(row) == prediction_family
+        else:
+            related = (
+                prediction_chapter
+                and _chapter(row) == prediction_chapter
+                and _payer_id(row) == prediction_payer
+                and _provider_npi(row) == prediction_provider
+            )
+        if related:
+            rows.append(row)
     return sorted(rows, key=lambda row: (_day(_field(row, "Service_Date_From", "dos")), _claim_id(row)))
 
 
@@ -220,29 +295,48 @@ def build_value_based_case_for_claim(database, claim_number):
     reference_claim = reference_detail["claim"]
     reference = _claim_summary(reference_claim)
     days_between = (prediction_date - _day(_field(reference_claim, "Service_Date_From", "dos"))).days
-    relationship_scope = "same ICD-10 family"
+    relationship_scope = reference_detail["method"]
     repeats = _later_related_claims(database, prediction_claim, relationship_scope)
     repetitive_claims = []
     for row in repeats:
         item = _claim_summary(row)
+        if relationship_scope == "same_icd10_family":
+            inclusion_reason = (
+                "This later bill is for the same person and the same kind of problem. "
+                "It is included once in the possible amount."
+            )
+        else:
+            inclusion_reason = (
+                "This later bill is for the same person, payer, provider, and ICD-10 chapter "
+                "as the short office-to-test pattern. It is included once for review."
+            )
         item["inclusion_reason"] = (
-            "This later bill is for the same person and the same kind of problem. "
-            "It is included once in the possible amount."
+            inclusion_reason
         )
         repetitive_claims.append(item)
     repetitive_paid = _money(sum(item["paid_amount"] for item in repetitive_claims))
     present_claim_paid = prediction["paid_amount"]
     gross_spend_for_review = _money(present_claim_paid + repetitive_paid)
     source = "same patient" if reference_detail["same_member"] else "different patient"
-    status = "Rectification candidate"
-    reference_reason = (
-        f"This is an older bill for the {source}, from {days_between} day(s) before this bill. "
-        "Both bills use the same kind of problem code."
-    )
+    status = "Data-pattern review candidate"
+    if relationship_scope == "recent_same_member_office_to_test_pattern":
+        reference_reason = (
+            f"This is an office visit for the same person, payer, and provider, {days_between} day(s) before the billed test. "
+            "The diagnosis codes share an ICD-10 chapter. This is a timing pattern to review, not proof of a clinical connection."
+        )
+    else:
+        reference_reason = (
+            f"This is an older bill for the {source}, from {days_between} day(s) before this bill. "
+            "Both bills use the same kind of problem code."
+        )
     limitations = [
         "Claims establish billed services, dates, and payer spend; they do not establish that care was missed or caused a condition to worsen.",
         "A clinician or validated care-pathway rule must confirm whether the later service belongs in the earlier episode and whether any later claim was avoidable.",
     ]
+    if relationship_scope == "recent_same_member_office_to_test_pattern":
+        limitations.append(
+            "This broader connection is based only on timing, billing fields, and an ICD-10 chapter. It is weaker than an exact diagnosis-family match."
+        )
     if synthetic_outcomes:
         limitations.append(
             "This workbook labels its outcome and intervention fields as synthetic/illustrative, so they are not used to confirm rectification or savings."
@@ -264,6 +358,8 @@ def build_value_based_case_for_claim(database, claim_number):
         "reference_selection": {
             "source": source,
             "relationship": reference_detail["relationship"],
+            "method": relationship_scope,
+            "evidence": reference_detail["evidence"],
             "days_before_prediction": days_between,
             "reason": reference_reason,
         },

@@ -1,166 +1,183 @@
-"""Focused unit tests for the Phase 3-9 / Phase 11 payer prediction engine.
-
-Uses a lightweight in-memory cohort (no Excel workbook) so the suite stays fast.
-"""
+"""Focused regressions for the one authoritative payer savings engine."""
 
 import unittest
 
-from backend import prediction_engine_v2 as engine
-from backend.prediction_engine_v2 import (
-    build_member_payer_prediction,
-    build_payer_prediction_for_claim_v2,
+from backend.payer_prediction import (
+    build_payer_prediction_for_claim,
     run_payer_temporal_backtest,
-    similarity_score,
 )
+from backend.prediction_engine_v2 import build_payer_prediction_for_claim_v2
 
 
-def mk(claim_id, member_id, service_date, allowed, paid=None, *, icd="E11.9", payer="P1",
-       provider="NPI1", pos="11", cpt="99213", filing="F", description="Type 2 Diabetes"):
+def claim(claim_id, member_id, service_date, paid, *, allowed=None, family="E11", payer="P1",
+          provider="NPI1", pos="11", cpt="99214", units=1, historical=False):
     return {
         "workbookFields": {
             "Claim_ID": claim_id,
             "Member_ID": member_id,
             "Service_Date_From": service_date,
-            "Allowed_Amount": allowed,
-            "Paid_Amount": paid if paid is not None else allowed,
-            "ICD10_Diagnosis_Code": icd,
-            "ICD10_Diagnosis_Description": description,
+            "ICD10_Family": family,
+            "ICD10_Diagnosis_Code": f"{family}.9",
+            "Paid_Amount": paid,
+            "Allowed_Amount": paid if allowed is None else allowed,
+            "Payer_ID": payer,
             "Payer_Name": payer,
             "Billing_Provider_NPI": provider,
+            "Billing_Provider_Name": provider,
             "Place_of_Service_Code": pos,
             "CPT_Code": cpt,
-            "CPT_Description": "service",
-            "Claim_Filing_Indicator": filing,
-            "Units": 1,
+            "Units": units,
+            "Is_Historical_Reference_Record": "Y" if historical else "N",
         }
     }
 
 
-class CohortDatabase:
-    _counter = 0
-
-    def __init__(self, claims):
-        type(self)._counter += 1
-        self.workbook_hash = f"focused-v2-engine-{type(self)._counter}"
-        self.claims = tuple(claims)
-        self.selectable_claims = tuple(claims)
+class Database:
+    def __init__(self, selectable, historical=()):
+        self.workbook_hash = f"authoritative-{id(self)}"
+        self.selectable_claims = tuple(selectable)
+        self.claims = (*self.selectable_claims, *historical)
 
     def find_claim(self, claim_id, selectable_only=True):
-        normalized = str(claim_id).replace("-", "").upper()
-        source = self.selectable_claims if selectable_only else self.claims
-        for claim in source:
-            key = str(claim["workbookFields"]["Claim_ID"]).replace("-", "").upper()
-            if key == normalized:
-                return claim
-        return None
+        rows = self.selectable_claims if selectable_only else self.claims
+        return next((row for row in rows if row["workbookFields"]["Claim_ID"] == claim_id), None)
 
 
-def focused_database(*, peers=True):
-    target_claims = [
-        mk("TR01", "TARGET", "2026-01-01", 300, cpt="99213"),
-        mk("TR02", "TARGET", "2026-01-10", 160, cpt="80053"),
-        mk("TR03", "TARGET", "2026-02-15", 180, cpt="80053"),
-    ]
-    historical = []
-    if peers:
-        for index in range(5):
-            historical.extend([
-                mk(f"PH{index}1", f"PEER{index}", f"2025-{str(index + 1).zfill(2)}-01", 100 + 10 * index, cpt="99213"),
-                mk(f"PH{index}2", f"PEER{index}", f"2025-{str(index + 1).zfill(2)}-15", 60 + 10 * index, cpt="80053"),
-            ])
-    return CohortDatabase([*target_claims, *historical])
+class AuthoritativePayerEngineTests(unittest.TestCase):
+    def test_paid_amount_drives_savings_not_allowed_amount(self):
+        database = Database(
+            [claim("TARGET", "M1", "2026-05-01", 300, allowed=900)],
+            [claim("PEER", "M2", "2026-04-01", 100, allowed=1, historical=True)],
+        )
+        result = build_payer_prediction_for_claim(database, "TARGET")
+        self.assertEqual(result["target"]["payer_spend"], 300.0)
+        self.assertEqual(result["calculation_summary"]["payer_spend_reduction_opportunity"], 200.0)
 
+    def test_strict_cutoff_excludes_future_peer_claims(self):
+        database = Database(
+            [claim("TARGET", "M1", "2026-05-01", 300)],
+            [
+                claim("PAST", "M2", "2026-04-01", 200, historical=True),
+                claim("FUTURE", "M3", "2026-06-01", 1, historical=True),
+            ],
+        )
+        result = build_payer_prediction_for_claim(database, "TARGET")
+        evidence_ids = {row["claim_id"] for row in result["supporting_evidence"]}
+        self.assertIn("PAST", evidence_ids)
+        self.assertNotIn("FUTURE", evidence_ids)
+        self.assertTrue(all(
+            row["service_date"] <= result["calculation_trace"]["prediction_cutoff"]
+            for row in result["supporting_evidence"]
+            if row["evidence_role"] != "Target Episode"
+        ))
 
-class PayerEngineTests(unittest.TestCase):
-    def test_claim_anchored_payload_contains_plan_sections(self):
-        result = build_payer_prediction_for_claim_v2(focused_database(), "TR01")
-        for key in ("member", "observation", "target", "historical_cohort", "utilization",
-                    "cpt_analysis", "timeline", "care_pattern", "potential_savings",
-                    "evidence", "validation", "confidence"):
-            self.assertIn(key, result)
-        self.assertGreaterEqual(result["potential_savings"]["median_opportunity"], 0.0)
-        self.assertIn(result["confidence"]["level"], ("HIGH", "MEDIUM", "LOW"))
+    def test_historical_reference_cannot_be_selected_as_current_target(self):
+        database = Database(
+            [claim("REFERENCE", "M1", "2026-05-01", 300, historical=True)],
+            [claim("PEER", "M2", "2026-04-01", 100, historical=True)],
+        )
+        with self.assertRaises(KeyError):
+            build_payer_prediction_for_claim(database, "REFERENCE")
 
-    def test_observation_window_is_configurable(self):
-        for days in (7, 30, 90, 180, 365):
-            result = build_payer_prediction_for_claim_v2(focused_database(), "TR01", observation_days=days)
-            self.assertEqual(result["observation"]["days"], days)
+    def test_no_cohort_returns_an_unavailable_result_not_a_zero_prediction(self):
+        database = Database([claim("TARGET", "M1", "2026-05-01", 300)])
+        result = build_payer_prediction_for_claim(database, "TARGET")
+        self.assertFalse(result["available"])
+        self.assertEqual(result["scenario_selection"]["selected"]["number"], 0)
+        self.assertEqual(result["peer_members_used"], [])
+        self.assertNotIn("predicted_payer_avoidable_spend", result["calculation_summary"])
+        self.assertFalse(result["procedure_comparison"]["available"])
+        self.assertIn("different-member", result["procedure_comparison"]["reason"])
 
-    def test_similarity_weights_default_and_configurable(self):
-        weights = engine._similarity_weights()
-        self.assertAlmostEqual(sum(weights.values()), 1.0, places=6)
-        self.assertIn("icd10_weight", weights)
-        database = focused_database()
-        target = database.claims[:3]
-        member = database.claims[3:]
-        score, reasons = similarity_score(target, member, weights)
-        self.assertGreaterEqual(score, 0.0)
-        self.assertLessEqual(score, 100.0)
-        self.assertIsInstance(reasons, list)
+    def test_procedure_comparison_uses_one_different_member_and_prior_claim_history(self):
+        database = Database(
+            [
+                claim("TARGET_PRIOR", "M1", "2026-04-15", 100),
+                claim("TARGET", "M1", "2026-05-01", 300),
+            ],
+            [
+                claim("PEER_PRIOR", "M2", "2026-03-15", 90, historical=True),
+                claim("PEER_VISIT", "M2", "2026-04-01", 100, historical=True),
+            ],
+        )
+        comparison = build_payer_prediction_for_claim(database, "TARGET")["procedure_comparison"]
 
-    def test_savings_guardrail_clamps_to_zero(self):
-        claims = [mk("LOW-1", "TARGET", "2026-01-01", 40, cpt="99213")]
-        peers = [mk(f"P{i}-1", f"H{i}", f"2025-{str(i).zfill(2)}-01", 200, cpt="99213") for i in range(1, 4)]
-        database = CohortDatabase([*claims, *peers])
-        result = build_payer_prediction_for_claim_v2(database, "LOW-1")
-        self.assertEqual(result["potential_savings"]["median_opportunity"], 0.0)
-        self.assertEqual(result["utilization"]["excess_claims"], 0)
+        self.assertTrue(comparison["available"])
+        self.assertEqual(comparison["history_window_days"], 90)
+        self.assertEqual(comparison["target"]["claim"]["claim_id"], "TARGET")
+        self.assertEqual(comparison["target"]["claim"]["member_id"], "M1")
+        self.assertEqual(comparison["peer"]["claim"]["member_id"], "M2")
+        self.assertNotEqual(
+            comparison["target"]["claim"]["member_id"],
+            comparison["peer"]["claim"]["member_id"],
+        )
+        self.assertEqual(comparison["peer"]["claim"]["claim_id"], "PEER_VISIT")
+        self.assertEqual(
+            [item["claim_id"] for item in comparison["target"]["prior_services"]],
+            ["TARGET_PRIOR"],
+        )
+        self.assertEqual(
+            [item["claim_id"] for item in comparison["peer"]["prior_services"]],
+            ["PEER_PRIOR"],
+        )
+        self.assertIn("Exact billing-code match", comparison["matches"]["procedure"])
 
-    def test_member_anchored_entry_point(self):
-        result = build_member_payer_prediction(focused_database(), "TARGET")
-        self.assertEqual(result["member"]["member_id"], "TARGET")
-        self.assertEqual(result["member"]["condition"]["icd10"], "E11.9")
+    def test_exactly_one_scenario_controls_peer_evidence(self):
+        database = Database(
+            [claim("TARGET", "M1", "2026-05-01", 300)],
+            [
+                claim("STRICT", "M2", "2026-04-01", 200, historical=True),
+                claim("BROAD", "M3", "2026-04-01", 1, payer="P2", provider="NPI2", pos="22", cpt="80053", historical=True),
+            ],
+        )
+        result = build_payer_prediction_for_claim(database, "TARGET")
+        self.assertEqual(result["scenario_selection"]["selected"]["number"], 1)
+        self.assertEqual({peer["member_id"] for peer in result["peer_members_used"]}, {"M2"})
+        self.assertNotIn("BROAD", {row["claim_id"] for row in result["supporting_evidence"]})
 
-    def test_level_three_group_fallback_when_no_exact_peers(self):
-        target = [mk("GRP-1", "TARGET", "2026-01-01", 300, icd="E11.9", cpt="99213")]
-        peers = []
-        for index in range(11):
-            peers.extend([
-                mk(f"G{index}-1", f"HM{index}", f"2025-{str(index + 1).zfill(2)}-01", 100, icd="E11.0", cpt="99213"),
-                mk(f"G{index}-2", f"HM{index}", f"2025-{str(index + 1).zfill(2)}-20", 80, icd="E11.0", cpt="80053"),
-            ])
-        database = CohortDatabase([*target, *peers])
-        result = build_payer_prediction_for_claim_v2(database, "GRP-1")
-        self.assertEqual(result["historical_cohort"]["selection_level"], "ICD10_FAMILY")
-        self.assertGreaterEqual(result["historical_cohort"]["members"], 1)
-        self.assertEqual(result["member"]["condition"]["icd10_family"], "E11")
+    def test_equal_claim_counts_can_have_payer_spend_reduction(self):
+        database = Database(
+            [claim("TARGET", "M1", "2026-05-01", 300)],
+            [claim("PEER", "M2", "2026-04-01", 100, historical=True)],
+        )
+        calculation = build_payer_prediction_for_claim(database, "TARGET")["calculation_summary"]
+        self.assertEqual(calculation["excess_claim_count"], 0.0)
+        self.assertEqual(calculation["utilisation_reduction_opportunity"], 0.0)
+        self.assertEqual(calculation["payer_spend_reduction_opportunity"], 200.0)
+        self.assertEqual(calculation["predicted_payer_avoidable_spend"], 200.0)
 
-    def test_group_level_when_family_sparse(self):
-        target = [mk("G2-1", "TARGET", "2026-01-01", 300, icd="E11.9", cpt="99213")]
-        peers = [
-            mk(f"A{i}-1", f"HA{i}", f"2025-{str(i).zfill(2)}-01", 100, icd="E10.9", cpt="99213") for i in range(1, 12)
-        ]
-        database = CohortDatabase([*target, *peers])
-        result = build_payer_prediction_for_claim_v2(database, "G2-1")
-        self.assertIn(result["historical_cohort"]["selection_level"],
-                      ("EXACT_ICD10", "ICD10_FAMILY", "CONDITION_GROUP"))
-        self.assertEqual(result["member"]["condition"]["condition_group"], "DIABETES")
+    def test_multi_claim_episode_uses_proportional_claim_attribution(self):
+        database = Database(
+            [
+                claim("TARGET_A", "M1", "2026-05-01", 100),
+                claim("TARGET_B", "M1", "2026-05-02", 300),
+            ],
+            [claim("PEER", "M2", "2026-04-01", 100, historical=True)],
+        )
+        result = build_payer_prediction_for_claim(database, "TARGET_A")
+        self.assertEqual(result["target"]["payer_spend"], 400.0)
+        self.assertEqual(result["selected_claim"]["episode_spend_share"], 0.25)
+        self.assertEqual(result["selected_claim"]["attributed_payer_avoidable_spend"], 75.0)
 
-    def test_no_historical_peer_raises_value_error(self):
-        database = focused_database(peers=False)
-        with self.assertRaises(ValueError):
-            build_payer_prediction_for_claim_v2(database, "TR01")
+    def test_legacy_v2_entry_point_is_only_a_canonical_wrapper(self):
+        database = Database(
+            [claim("TARGET", "M1", "2026-05-01", 300)],
+            [claim("PEER", "M2", "2026-04-01", 100, historical=True)],
+        )
+        self.assertEqual(
+            build_payer_prediction_for_claim_v2(database, "TARGET"),
+            build_payer_prediction_for_claim(database, "TARGET"),
+        )
 
-    def test_timeline_and_care_pattern_are_built(self):
-        result = build_payer_prediction_for_claim_v2(focused_database(), "TR01")
-        self.assertGreaterEqual(len(result["timeline"]), 1)
-        self.assertIn("journey", result["care_pattern"])
-        self.assertIn("days_since_prior", result["timeline"][0])
-        self.assertTrue(result["care_pattern"]["steps"])
-
-    def test_claim_level_attribution_is_sorted_descending(self):
-        result = build_payer_prediction_for_claim_v2(focused_database(), "TR01")
-        attributions = result["potential_savings"]["claim_level_attribution"]
-        self.assertTrue(attributions)
-        contributions = [item["contribution"] for item in attributions]
-        self.assertEqual(contributions, sorted(contributions, reverse=True))
-        self.assertIn("claim_id", attributions[0])
-
-    def test_temporal_backtest_reports_metrics(self):
-        result = run_payer_temporal_backtest(focused_database())
-        self.assertEqual(result["method"], "TEMPORAL_HOLDOUT")
-        self.assertIn("sample_members", result)
-        self.assertIn("savings_prediction_accuracy", result)
+    def test_backtest_reports_the_paid_amount_three_scenario_method(self):
+        database = Database(
+            [claim("TARGET", "M1", "2026-05-01", 300)],
+            [claim("PEER", "M2", "2026-04-01", 100, historical=True)],
+        )
+        report = run_payer_temporal_backtest(database)
+        self.assertEqual(report["method"], "HISTORICAL_THREE_SCENARIO_PAID_AMOUNT_BACKTEST")
+        self.assertFalse(report["future_data_leakage_found"])
+        self.assertNotIn("savings_prediction_accuracy", report)
 
 
 if __name__ == "__main__":

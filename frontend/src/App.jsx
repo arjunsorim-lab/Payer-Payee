@@ -1152,64 +1152,39 @@ function PayerPredictionModal({ onClose, onOpenProviderForecast }) {
 }
 
 function PayerPredictionResult({ result, evidence, evidenceCount, showAllEvidence, onShowAllEvidence }) {
-  const benchmark = result.benchmark_summary || {}
-  const scenario = result.scenario || {}
-  const calculation = result.calculation_summary || {}
-  const confidence = calculation.confidence || {}
-  const trace = result.evidence_trace || {}
-  return (
-    <div className="payer-result">
-      <section className="payer-result-section">
-        <h3>Benchmark Summary</h3>
-        <div className="payer-table-wrap"><table><thead><tr><th>Metric</th><th>Target Episode</th><th>Benchmark</th></tr></thead><tbody>
-          <tr><td>Related Claims</td><td>{payerNumber(benchmark.target_claim_count)}</td><td>{payerNumber(benchmark.benchmark_claim_count)}</td></tr>
-          <tr><td>Payer Paid Amount</td><td>{payerCurrency(benchmark.target_payer_spend)}</td><td>{payerCurrency(benchmark.benchmark_payer_spend)}</td></tr>
-          <tr><td>Median Paid per Claim</td><td>{payerCurrency(benchmark.target_median_paid_per_claim)}</td><td>{payerCurrency(benchmark.benchmark_median_paid_per_claim)}</td></tr>
-          <tr><td>Episode Duration</td><td>{payerNumber(benchmark.target_episode_duration)} days</td><td>{payerNumber(benchmark.benchmark_episode_duration)} days</td></tr>
-        </tbody></table></div>
-        <dl className="payer-summary-meta"><div><dt>Selected Scenario</dt><dd>Scenario {scenario.number} — {scenario.name}</dd></div><div><dt>Disease Family</dt><dd>{result.target?.diagnosis_family}</dd></div><div><dt>Peer Members</dt><dd>{scenario.peer_member_count}</dd></div><div><dt>Benchmark Method</dt><dd>{benchmark.benchmark_method}</dd></div></dl>
-      </section>
-
-      <section className="payer-result-section">
-        <h3>Peer Members Used</h3>
-        <div className="payer-table-wrap"><table><thead><tr><th>Member ID</th><th>Related Claims</th><th>Payer Spend</th><th>Similarity / Match</th><th>Role</th></tr></thead><tbody>{result.peer_members_used.map((peer) => <tr key={peer.member_id}><td>{peer.member_id}</td><td>{payerNumber(peer.related_claims)} claims</td><td>{payerCurrency(peer.payer_spend)}</td><td>{Math.round(peer.similarity * 100)}%</td><td>{peer.role}</td></tr>)}</tbody></table></div>
-        <p className={`payer-peer-note ${scenario.peer_member_count === 1 ? 'low' : ''}`}>{scenario.peer_member_count === 1 ? '1 external peer used · Low confidence' : `${scenario.peer_member_count} different-member peers used`}</p>
-      </section>
-
-      <section className="payer-result-section">
-        <h3>Prediction Range / Calculation Summary</h3>
-        <div className="payer-calculation-overview"><div><span>Target Episode Payer Spend</span><strong>{payerCurrency(benchmark.target_payer_spend)}</strong></div><div><span>Benchmark Payer Spend</span><strong>{payerCurrency(benchmark.benchmark_payer_spend)}</strong></div><div><span>Target Related Claims</span><strong>{payerNumber(benchmark.target_claim_count)}</strong></div><div><span>Benchmark Related Claims</span><strong>{payerNumber(benchmark.benchmark_claim_count)}</strong></div><div><span>Excess Claims</span><strong>{payerNumber(calculation.excess_claim_count)}</strong></div></div>
-        <div className="payer-formulas"><article><h4>Count-Based Estimate</h4><p>{payerNumber(calculation.excess_claim_count)} × {payerCurrency(calculation.median_peer_paid_per_claim)} = <strong>{payerCurrency(calculation.count_based_excess_spend)}</strong></p><small>Excess claims × median peer paid per claim</small></article><article><h4>Cost-Based Estimate</h4><p>{payerCurrency(benchmark.target_payer_spend)} − {payerCurrency(benchmark.benchmark_payer_spend)} = <strong>{payerCurrency(calculation.cost_based_excess_spend)}</strong></p><small>Target episode payer spend − benchmark payer spend</small></article></div>
-        <div className="payer-final-value"><span>Predicted Payer Avoidable Spend</span><strong>{payerCurrency(calculation.predicted_payer_avoidable_spend)}</strong><small>Conservative estimate using the lower of the two rule-based methods</small>{calculation.zero_reason ? <p><b>Reason:</b> {calculation.zero_reason}</p> : null}</div>
-        <div className="payer-range"><div><span>Prediction Range</span>{calculation.range ? <strong>{payerCurrency(calculation.range.low)} – {payerCurrency(calculation.range.high)}</strong> : <p>{calculation.range_reason}</p>}</div>{calculation.range ? <dl><div><dt>Q25 peer paid / claim</dt><dd>{payerCurrency(calculation.q25_peer_paid_per_claim)}</dd></div><div><dt>Median peer paid / claim</dt><dd>{payerCurrency(calculation.median_peer_paid_per_claim)}</dd></div><div><dt>Q75 peer paid / claim</dt><dd>{payerCurrency(calculation.q75_peer_paid_per_claim)}</dd></div></dl> : null}</div>
-        <p className={`payer-confidence ${confidence.level?.toLowerCase()}`}>Confidence: {confidence.score}% · {confidence.level}</p>
-        <p className="payer-confidence-basis">Based on: {scenario.peer_member_count} external peer members · {scenario.peer_claim_count} peer claims · Scenario {scenario.number} match · {confidence.dispersion}</p>
-      </section>
-
-      <section className="payer-result-section">
-        <h3>Supporting Evidence</h3>
-        <div className="payer-table-wrap evidence"><table><thead><tr><th>Claim ID</th><th>Member ID</th><th>Service Date</th><th>ICD-10</th><th>CPT</th><th>Payer</th><th>Provider</th><th>POS</th><th>Paid Amount</th><th>Evidence Role</th></tr></thead><tbody>{evidence.map((row, index) => <tr key={`${row.claim_id}-${index}`}><td>{row.claim_id}</td><td>{row.member_id}</td><td>{payerDate(row.service_date)}</td><td>{row.icd10}</td><td>{row.cpt}</td><td>{row.payer}</td><td>{row.provider}</td><td>{row.pos}</td><td>{payerCurrency(row.paid_amount)}</td><td>{row.evidence_role}</td></tr>)}</tbody></table></div>
-        {!showAllEvidence && evidenceCount > evidence.length ? <button className="payer-evidence-button" type="button" onClick={onShowAllEvidence}>View All Supporting Evidence</button> : null}
-        <p className="payer-evidence-trace">Prediction calculated from workbook data using: Scenario {trace.scenario} · {trace.peer_member_count} peer members · {trace.peer_claim_count} peer claims · Workbook source: {trace.source}</p>
-      </section>
-    </div>
-  )
+  return <CanonicalClaimPayerPredictionResult result={result} />
 }
 
 function PredictionDetailPage({ claim, onBackToPredictions }) {
   const [scenario, setScenario] = useState(null)
+  const [valueBasedCase, setValueBasedCase] = useState(null)
   const [caseError, setCaseError] = useState('')
 
   useEffect(() => {
     let cancelled = false
     setScenario(null)
+    setValueBasedCase(null)
     setCaseError('')
-    fetchJson(`/api/predictions/provider-case/${encodeURIComponent(claim.claimId || claim.number)}`)
+    const claimNumber = claim.claimId || claim.number
+    fetchJson(`/api/predictions/provider-case/${encodeURIComponent(claimNumber)}`)
       .then((payload) => {
         if (!cancelled) setScenario(payload || null)
       })
       .catch(() => {
         if (!cancelled) setCaseError('Unable to build this provider case prediction from the current claim data.')
+      })
+    return () => { cancelled = true }
+  }, [claim.number, claim.claimId])
+
+  useEffect(() => {
+    let cancelled = false
+    const claimNumber = claim.claimId || claim.number
+    fetchJson(`/api/predictions/value-based-case/${encodeURIComponent(claimNumber)}`)
+      .then((payload) => {
+        if (!cancelled) setValueBasedCase(payload || null)
+      })
+      .catch(() => {
+        if (!cancelled) setValueBasedCase(null)
       })
     return () => { cancelled = true }
   }, [claim.number, claim.claimId])
@@ -1235,11 +1210,11 @@ function PredictionDetailPage({ claim, onBackToPredictions }) {
           Back to Predictions
         </button>
         <div className="data-stamp">
-          {scenario.historical_comparison.sample_size.toLocaleString()} earlier matched claims · Evidence strength: {scenario.confidence.level} ({formatProbability(scenario.confidence.score)})
+          {scenario.historical_comparison.sample_size.toLocaleString()} older bills looked at · How sure the computer is: {scenario.confidence.level} ({formatProbability(scenario.confidence.score)})
           <RefreshCw size={15} />
         </div>
       </div>
-      <PredictionScenarioMap scenario={scenario} />
+      <PredictionScenarioMap scenario={scenario} valueBasedCase={valueBasedCase} />
     </>
   )
 }
@@ -1334,8 +1309,8 @@ function DetailedClaimFinancialBreakdown({ scenario, facts, snapshot, summary })
         <div className="resp-title">
           <DollarSign size={20} className="resp-icon" />
           <div>
-            <h3>Claim money: recorded amounts and forecasts</h3>
-            <span className="resp-subtitle">Recorded payer and patient amounts, plus the separate {formatOptionalCurrency(avoidable.value)} repeat-cost forecast</span>
+            <h3>Money for this bill</h3>
+            <span className="resp-subtitle">Who paid, what is left, and one separate future guess</span>
           </div>
         </div>
         <div className="resp-tab-nav">
@@ -1344,28 +1319,28 @@ function DetailedClaimFinancialBreakdown({ scenario, facts, snapshot, summary })
             className={`resp-tab-btn ${activeTab === 'overview' ? 'active' : ''}`}
             onClick={() => setActiveTab('overview')}
           >
-            Who paid what
+            Who paid
           </button>
           <button
             type="button"
             className={`resp-tab-btn ${activeTab === 'avoidable_math' ? 'active' : ''}`}
             onClick={() => setActiveTab('avoidable_math')}
           >
-            How {formatOptionalCurrency(avoidable.value)} was calculated
+            Why we guessed {formatOptionalCurrency(avoidable.value)}
           </button>
           <button
             type="button"
             className={`resp-tab-btn ${activeTab === 'avoid_action' ? 'active' : ''}`}
             onClick={() => setActiveTab('avoid_action')}
           >
-            What needs human review
+            What a person should check
           </button>
           <button
             type="button"
             className={`resp-tab-btn ${activeTab === 'evidence_claims' ? 'active' : ''}`}
             onClick={() => setActiveTab('evidence_claims')}
           >
-            Earlier comparison claims ({similarClaims.length})
+            Older bills we looked at ({similarClaims.length})
           </button>
         </div>
       </div>
@@ -1374,41 +1349,41 @@ function DetailedClaimFinancialBreakdown({ scenario, facts, snapshot, summary })
         <div className="tab-pane-content">
           <div className="financial-waterfall-bar-wrap">
             <div className="waterfall-header">
-              <span className="waterfall-title">Where the {formatOptionalCurrency(billed)} billed amount went</span>
-              <span className="waterfall-discount-pill">Automatic insurance discount: -{formatOptionalCurrency(discount)}</span>
+              <span className="waterfall-title">How the {formatOptionalCurrency(billed)} bill was split</span>
+              <span className="waterfall-discount-pill">Price lowered by insurance: -{formatOptionalCurrency(discount)}</span>
             </div>
             <div className="waterfall-progress-bar">
               <div className="bar-segment bar-payer" style={{ width: `${billed > 0 ? (paid / billed) * 100 : 0}%` }} title={`Payer Paid: ${formatOptionalCurrency(paid)}`}>
                 <span>Insurance paid: {formatOptionalCurrency(paid)}</span>
               </div>
               <div className="bar-segment bar-patient" style={{ width: `${billed > 0 ? (patientResp / billed) * 100 : 0}%` }} title={`Patient: ${formatOptionalCurrency(patientResp)}`}>
-                <span>Patient assigned: {formatOptionalCurrency(patientResp)}</span>
+                <span>Patient share: {formatOptionalCurrency(patientResp)}</span>
               </div>
               <div className="bar-segment bar-discount" style={{ width: `${billed > 0 ? (discount / billed) * 100 : 0}%` }} title={`Discount: ${formatOptionalCurrency(discount)}`}>
-                <span>Discount: -{formatOptionalCurrency(discount)}</span>
+                <span>Price lowered: -{formatOptionalCurrency(discount)}</span>
               </div>
             </div>
           </div>
 
           <div className="resp-columns-grid">
             <div className="resp-column-box billed-box">
-              <span className="box-kicker">1. What the provider charged</span>
+              <span className="box-kicker">1. What the hospital asked for</span>
               <div className="box-main-num">
-                <span>Starting billed price</span>
+                <span>First price</span>
                 <PlainTooltip text="This is the provider's starting price before insurance contract rules were applied."><strong>{formatOptionalCurrency(billed)}</strong></PlainTooltip>
               </div>
               <div className="box-sub-items">
                 <div className="sub-row">
-                  <span>Insurance-agreed price:</span>
+                  <span>Insurance price:</span>
                   <PlainTooltip text="This is the amount the health plan recognizes for the service. It is often called the allowed amount."><strong>{formatOptionalCurrency(allowed)}</strong></PlainTooltip>
                 </div>
                 <div className="sub-row discount-row">
-                  <span>Automatic insurance discount:</span>
+                  <span>Price lowered by insurance:</span>
                   <strong className="success-text">-{formatOptionalCurrency(discount)}</strong>
                 </div>
                 <div className="sub-row">
-                  <span>Price reduction:</span>
-                  <span>{billed > 0 ? ((discount / billed) * 100).toFixed(1) : 0}% below the billed price</span>
+                  <span>How much lower:</span>
+                  <span>{billed > 0 ? ((discount / billed) * 100).toFixed(1) : 0}% lower</span>
                 </div>
               </div>
               <details className="box-provenance-explainer">
@@ -1422,22 +1397,22 @@ function DetailedClaimFinancialBreakdown({ scenario, facts, snapshot, summary })
             </div>
 
             <div className="resp-column-box payer-box">
-              <span className="box-kicker">2. What the insurance company paid</span>
+              <span className="box-kicker">2. What insurance paid</span>
               <div className="box-main-num">
-                <span>Recorded insurance payment</span>
+                <span>Money insurance paid</span>
                 <PlainTooltip text="This is the payer-paid amount stored on the claim. It is money recorded as paid, not the model's estimate."><strong className="payer-highlight">{formatOptionalCurrency(paid)}</strong></PlainTooltip>
               </div>
               <div className="box-sub-items">
                 <div className="sub-row">
-                  <span>Estimated payment from earlier claims:</span>
+                  <span>Computer’s guess from older bills:</span>
                   <strong>{formatOptionalCurrency(snapshot.predicted_provider_payment?.value)}</strong>
                 </div>
                 <div className="sub-row">
-                  <span>Insurance company:</span>
+                  <span>Insurance name:</span>
                   <span>{facts.payer || 'Not recorded'}</span>
                 </div>
                 <div className="sub-row">
-                  <span>Recorded payment as a share of the agreed price:</span>
+                  <span>Part of the insurance price paid:</span>
                   <strong className="payer-highlight">{allowed > 0 ? ((paid / allowed) * 100).toFixed(1) : 0}%</strong>
                 </div>
               </div>
@@ -1451,22 +1426,22 @@ function DetailedClaimFinancialBreakdown({ scenario, facts, snapshot, summary })
             </div>
 
             <div className="resp-column-box patient-box">
-              <span className="box-kicker">3. What the patient owes</span>
+              <span className="box-kicker">3. What the patient may pay</span>
               <div className="box-main-num">
-                <span>Amount assigned to the patient</span>
+                <span>Patient share</span>
                 <PlainTooltip text="This is the amount the workbook assigns to the patient, including deductible, copay, or coinsurance components."><strong className="patient-highlight">{formatOptionalCurrency(patientResp)}</strong></PlainTooltip>
               </div>
               <div className="box-sub-items">
                 <div className="sub-row">
-                  <span>Patient already paid:</span>
+                  <span>Already paid:</span>
                   <strong className="paid-amount">{formatOptionalCurrency(patientPaid)} ({patientResp > 0 ? ((patientPaid / patientResp) * 100).toFixed(0) : 0}%)</strong>
                 </div>
                 <div className="sub-row unpaid-row">
-                  <span>Amount still owed:</span>
+                  <span>Still to check:</span>
                   <PlainTooltip text="This is the recorded patient amount minus patient payments received. Staff should confirm it before contacting the patient."><strong className="warning-text">{formatOptionalCurrency(patientUnpaid)}</strong></PlainTooltip>
                 </div>
                 <div className="sub-row">
-                  <span>How long it has been outstanding:</span>
+                  <span>How long it has been waiting:</span>
                   <span className="badge-broken-plan">{facts.days_outstanding ?? 0} days · {facts.payment_plan_status || facts.balance_status || 'Status not recorded'}</span>
                 </div>
               </div>
@@ -1480,19 +1455,19 @@ function DetailedClaimFinancialBreakdown({ scenario, facts, snapshot, summary })
             </div>
 
             <div className="resp-column-box avoidable-box">
-              <span className="box-kicker">4. Potential future savings</span>
+              <span className="box-kicker">4. A possible future cost</span>
               <div className="box-main-num">
-                <span>Possible savings if an avoidable repeat is prevented</span>
+                <span>Possible extra money if another bill happens</span>
                 <PlainTooltip text="This is an average estimate across similar cases. It is not a confirmed saving for this patient."><strong className="avoidable-highlight">{formatOptionalCurrency(avoidable.value)}</strong></PlainTooltip>
               </div>
               <div className="box-sub-items">
                 <div className="sub-row formula-row">
-                  <span>How we calculated this:</span>
+                  <span>The small math:</span>
                   <code>{formatProbability(avoidable.repeat_probability_90d)} × {formatProbability(avoidable.avoidable_given_repeat_probability)} × {formatOptionalCurrency(avoidable.expected_extra_repeat_allowed_cost)}</code>
                 </div>
                 <div className="sub-row">
-                  <span>What the forecast assumes:</span>
-                  <span className="avoid-tip">A related claim could happen within three months. A reviewer must decide whether it would actually be avoidable.</span>
+                  <span>What this guess means:</span>
+                  <span className="avoid-tip">Another related bill might happen in the next three months. A person must decide if it would be needed.</span>
                 </div>
               </div>
               <details className="box-provenance-explainer">
@@ -1740,11 +1715,12 @@ function PlainLanguageClaimNarrative({ scenario, facts, summary, snapshot, histo
   const billed = facts.charge || 0
   const allowed = facts.allowed || 0
   const discount = Math.max(0, billed - allowed)
-  const discountPercent = billed > 0 ? (discount / billed) * 100 : 0
   const patientPaid = facts.patient_payment_received || 0
   const patientBalance = facts.outstanding_patient_balance || 0
-  const peerAllowedValues = peers.map((peer) => peer.allowed).filter(Number.isFinite)
-  const lowestPeerAllowed = peerAllowedValues.length ? Math.min(...peerAllowedValues) : null
+  const lowestPeer = peers.reduce((lowest, peer) => (
+    !lowest || peer.allowed < lowest.allowed ? peer : lowest
+  ), null)
+  const lowestPeerAllowed = Number.isFinite(lowestPeer?.allowed) ? lowestPeer.allowed : null
   const peerDifference = Number.isFinite(lowestPeerAllowed) ? Math.max(0, allowed - lowestPeerAllowed) : null
   const serviceName = facts.cpt_description || 'a healthcare service'
   const action = summary.best_action || {}
@@ -1753,7 +1729,7 @@ function PlainLanguageClaimNarrative({ scenario, facts, summary, snapshot, histo
     <section className="plain-claim-narrative" aria-labelledby="plain-claim-narrative-title">
       <header>
         <span>Start here</span>
-        <h2 id="plain-claim-narrative-title">What happened, what the estimate means, and what to do</h2>
+        <h2 id="plain-claim-narrative-title">A simple story about this visit</h2>
       </header>
 
       <div className="claim-story-grid">
@@ -1761,46 +1737,48 @@ function PlainLanguageClaimNarrative({ scenario, facts, summary, snapshot, histo
           <span className="story-number">1</span>
           <div>
             <h3>What happened</h3>
-            <p>The patient received <strong>{serviceName}</strong> at {facts.provider || 'the provider'} on {formatDate(facts.service_date)}. The provider billed <strong>{formatOptionalCurrency(billed)}</strong>. The health plan recorded an insurance-agreed price of <strong>{formatOptionalCurrency(allowed)}</strong>, which is {formatOptionalCurrency(discount)} ({discountPercent.toFixed(1)}%) below the billed price.</p>
-            <p>The workbook records <strong>{formatOptionalCurrency(facts.paid)}</strong> paid by {facts.payer || 'the insurance company'} and <strong>{formatOptionalCurrency(facts.patient_responsibility)}</strong> assigned to the patient. It also records {formatOptionalCurrency(patientPaid)} already paid by the patient and <strong>{formatOptionalCurrency(patientBalance)} still to verify</strong>.</p>
+            <p>This was a <strong>{serviceName}</strong> visit at {facts.provider || 'the provider'} on {formatDate(facts.service_date)}. The hospital first asked for <strong>{formatOptionalCurrency(billed)}</strong>. The insurance plan used <strong>{formatOptionalCurrency(allowed)}</strong> as its price. That is {formatOptionalCurrency(discount)} less.</p>
+            <p>The insurance company paid <strong>{formatOptionalCurrency(facts.paid)}</strong>. The patient’s share was <strong>{formatOptionalCurrency(facts.patient_responsibility)}</strong>. The record says {formatOptionalCurrency(patientPaid)} was already paid and <strong>{formatOptionalCurrency(patientBalance)} still needs to be checked</strong>.</p>
           </div>
         </article>
 
         <article>
           <span className="story-number">2</span>
           <div>
-            <h3>What the prediction says</h3>
-            <p>The system used <strong>{historicalPeerCount} earlier matched claims</strong> to estimate that the provider payment may be {formatOptionalCurrency(snapshot.predicted_provider_payment?.value)}.</p>
-            <p>It also estimates a <strong>{formatProbability(avoidable.repeat_probability_90d)}</strong> chance of another related claim within three months. After allowing for repeats with avoidability evidence, the average possible repeat cost is <strong>{formatOptionalCurrency(avoidable.value)}</strong> per similar case. This is not an exact bill or guaranteed saving.</p>
+            <h3>What the computer is guessing</h3>
+            <p>It looked at <strong>{historicalPeerCount} older bills that look similar</strong>. It guesses the provider might be paid {formatOptionalCurrency(snapshot.predicted_provider_payment?.value)}.</p>
+            <p>It also guesses there is a <strong>{formatProbability(avoidable.repeat_probability_90d)}</strong> chance of another related bill in the next three months. The possible extra cost is <strong>{formatOptionalCurrency(avoidable.value)}</strong>. This is only a guess, not a promise.</p>
           </div>
         </article>
 
         <article>
           <span className="story-number">3</span>
           <div>
-            <h3>What someone should do</h3>
+            <h3>What to do next</h3>
             <p>{action.action || 'Review the recorded claim information before taking action.'}</p>
-            <p>The amount connected to that review is <strong>{formatOptionalCurrency(summary.recoverable_now)}</strong>. A person must confirm the source records first.</p>
+            <p>The amount to check is <strong>{formatOptionalCurrency(summary.recoverable_now)}</strong>. A person must check the records before doing anything.</p>
           </div>
         </article>
       </div>
 
       {Number.isFinite(lowestPeerAllowed) ? (
-        <p className="plain-peer-comparison"><strong>Price comparison:</strong> Among the {peers.length} claims selected for comparison, the lowest insurance-agreed price was {formatOptionalCurrency(lowestPeerAllowed)}. That is {formatOptionalCurrency(peerDifference)} below this claim's {formatOptionalCurrency(allowed)} insurance-agreed price. This difference is a review clue, not proof that this claim was overpriced; payer, provider, location, contract, and service details may differ.</p>
+        <p className="plain-peer-comparison">
+          <strong>Why we looked at these {peers.length} older bills:</strong> They are the closest bills we found for the same kind of problem and visit. <strong>Why bill {lowestPeer.claim_id} is shown:</strong> {lowestPeer.match_reason || 'It was one of the closest matches.'} Its insurance price is the lowest. The difference is {formatOptionalCurrency(peerDifference)} because {formatOptionalCurrency(allowed)} minus {formatOptionalCurrency(lowestPeerAllowed)} equals {formatOptionalCurrency(peerDifference)}. This only tells us that the prices are different. It does not prove that anyone did something wrong.
+        </p>
       ) : null}
 
       <div className="narrative-guardrails">
-        <p><strong>Keep the numbers separate:</strong> The {formatOptionalCurrency(summary.recoverable_now)} current amount, {formatOptionalCurrency(avoidable.value)} repeat-cost estimate, and {formatOptionalCurrency(summary.future_denial_exposure)} denial-risk estimate answer different questions. Do not add them together.</p>
-        <p><strong>Demo-data note:</strong> The workbook marks added patient-payment fields and historical reference rows as synthetic illustrative data. Production use requires real claims, remittance, billing, and collections feeds.</p>
+        <p><strong>Do not add these numbers together:</strong> {formatOptionalCurrency(summary.recoverable_now)} is money to check now. {formatOptionalCurrency(avoidable.value)} is a possible future cost. {formatOptionalCurrency(summary.future_denial_exposure)} is money that might be at risk.</p>
+        <p><strong>About this practice data:</strong> Some added payment and older-reference information is made-up example data. Real use needs real bills and payment records.</p>
       </div>
 
       <details className="plain-glossary-toggle">
-        <summary>Plain-English definitions for terms used below</summary>
+        <summary>Tap here if a word is new</summary>
         <dl>
-          <div><dt>Insurance-agreed price</dt><dd>The maximum amount the health plan recognizes for the service. It is often called the allowed amount.</dd></div>
-          <div><dt>Patient responsibility</dt><dd>The amount assigned to the patient, such as a deductible, copay, or coinsurance.</dd></div>
-          <div><dt>Repeat claim</dt><dd>Another related claim within three months. It is not automatically unnecessary or a duplicate.</dd></div>
-          <div><dt>Denial risk</dt><dd>An estimate of money that may be at risk if insurance denies the claim. It is not a confirmed loss.</dd></div>
+          <div><dt>Insurance price</dt><dd>The price the insurance plan uses for this visit.</dd></div>
+          <div><dt>Patient share</dt><dd>The part of the bill the patient may need to pay.</dd></div>
+          <div><dt>Another bill</dt><dd>A related bill in the next three months. It may still be needed.</dd></div>
+          <div><dt>Money at risk</dt><dd>Money that could be lost if insurance does not pay. It is not lost yet.</dd></div>
         </dl>
       </details>
     </section>
@@ -1891,10 +1869,270 @@ function getOrganSystemInfo(icdCode = '', description = '') {
   }
 }
 
+function RecordedServicesBeforeVisit({ services, historyWindowDays }) {
+  return (
+    <div className="recorded-services-before-visit">
+      <h4>Other bills in the {historyWindowDays} days before this visit</h4>
+      {services?.length ? (
+        <ul>
+          {services.map((service) => (
+            <li key={service.claim_id}>
+              <strong>{service.service_date}</strong>
+              <span>{service.procedure_description || 'Procedure description not recorded'} ({service.cpt || 'billing code not recorded'})</span>
+              <small>{service.diagnosis_description || 'Condition description not recorded'} ({service.icd10 || 'medical code not recorded'})</small>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p>We did not find another bill in the {historyWindowDays} days before this visit.</p>
+      )}
+    </div>
+  )
+}
+
+function ValueBasedRectificationCase({ valueBasedCase }) {
+  if (!valueBasedCase) return null
+
+  if (!valueBasedCase.available) {
+    const prediction = valueBasedCase.prediction_claim || {}
+    const calculation = valueBasedCase.calculation || {}
+    return (
+      <section className="value-based-case value-based-case-no-reference" aria-labelledby="value-based-case-heading">
+        <header>
+          <span>Possible money-saving check</span>
+          <h2 id="value-based-case-heading">We could not find a good earlier bill to compare</h2>
+          <p>{valueBasedCase.reason}</p>
+        </header>
+        <div className="value-based-status" role="status">
+          <ShieldAlert size={18} />
+          <div>
+            <strong>No supported comparison</strong>
+            <span>The possible amount is $0.00 because we could not find an earlier bill for the same kind of problem.</span>
+          </div>
+        </div>
+        <div className="value-based-financials value-based-financials-single">
+          <div>
+            <span>What insurance paid for this bill</span>
+            <strong>{formatOptionalCurrency(prediction.paid_amount)}</strong>
+          </div>
+          <div className="value-based-total">
+            <span>Possible money to save (needs checking)</span>
+            <strong>{formatOptionalCurrency(calculation.potential_payer_spend_for_review)}</strong>
+            <small>{calculation.formula}</small>
+          </div>
+        </div>
+        <p className="value-based-calculation-note">{calculation.reason} This is not money we have definitely saved.</p>
+      </section>
+    )
+  }
+
+  const reference = valueBasedCase.reference_claim || {}
+  const prediction = valueBasedCase.prediction_claim || {}
+  const improved = valueBasedCase.improved_claim || prediction
+  const calculation = valueBasedCase.calculation || {}
+  const claimsIncluded = valueBasedCase.claims_included || []
+
+  return (
+    <section className="value-based-case" aria-labelledby="value-based-case-heading">
+      <header>
+        <span>Possible money-saving check</span>
+        <h2 id="value-based-case-heading">An older bill and a later bill to check</h2>
+        <p>
+          These bills look connected because they use the same kind of problem code. They do not prove that anyone missed care or that a later bill could have been stopped.
+        </p>
+      </header>
+
+      <div className="value-based-status" role="status">
+        <ShieldCheck size={18} />
+        <div>
+          <strong>Needs a person to check</strong>
+          <span>A doctor and billing reviewer must check this before calling it a real saving.</span>
+        </div>
+      </div>
+
+      <div className="value-based-claim-grid">
+        <article>
+          <span>Older bill · start checking here</span>
+          <h3>{reference.procedure_description || 'Procedure description not recorded'}</h3>
+          <p>{reference.diagnosis_description || 'Condition description not recorded'}</p>
+          <dl>
+            <div><dt>Bill number</dt><dd>{reference.claim_id}</dd></div>
+            <div><dt>When</dt><dd>{reference.service_date}</dd></div>
+            <div><dt>Problem code</dt><dd>{reference.icd10 || 'not recorded'}</dd></div>
+            <div><dt>Visit code</dt><dd>{reference.cpt || 'not recorded'}</dd></div>
+            <div><dt>Insurance paid</dt><dd>{formatOptionalCurrency(reference.paid_amount)}</dd></div>
+          </dl>
+        </article>
+
+        <article className="value-based-later-claim">
+          <span>Later bill · happened after the older bill</span>
+          <h3>{prediction.procedure_description || 'Procedure description not recorded'}</h3>
+          <p>{prediction.diagnosis_description || 'Condition description not recorded'}</p>
+          <dl>
+            <div><dt>Bill number</dt><dd>{prediction.claim_id}</dd></div>
+            <div><dt>When</dt><dd>{prediction.service_date}</dd></div>
+            <div><dt>Problem code</dt><dd>{prediction.icd10 || 'not recorded'}</dd></div>
+            <div><dt>Visit code</dt><dd>{prediction.cpt || 'not recorded'}</dd></div>
+            <div><dt>Insurance paid</dt><dd>{formatOptionalCurrency(prediction.paid_amount)}</dd></div>
+          </dl>
+        </article>
+      </div>
+
+      <div className="value-based-reason">
+        <strong>Why we picked the older bill:</strong> {valueBasedCase.reference_selection?.reason}
+      </div>
+
+      <div className="value-based-improvement">
+        <div>
+          <span>What a person should check earlier</span>
+          <strong>{improved.procedure_description || 'Procedure description not recorded'} · {improved.cpt || 'billing code not recorded'}</strong>
+        </div>
+        <p>{improved.reason}</p>
+      </div>
+
+      <div className="value-based-financials">
+        <div>
+          <span>What insurance paid for the later bill</span>
+          <strong>{formatOptionalCurrency(calculation.present_claim_paid)}</strong>
+        </div>
+        <div>
+          <span>Later bills for the same problem</span>
+          <strong>{formatOptionalCurrency(calculation.later_related_paid)}</strong>
+        </div>
+        <div className="value-based-total">
+          <span>Possible money to save (needs checking)</span>
+          <strong>{formatOptionalCurrency(calculation.potential_payer_spend_for_review)}</strong>
+          <small>{calculation.formula}</small>
+        </div>
+      </div>
+      <p className="value-based-calculation-note">{calculation.reason} This is not money we have definitely saved.</p>
+
+      {claimsIncluded.length ? (
+        <div className="value-based-repeat-list">
+          <h3>Bills included in this possible amount</h3>
+          <ul>
+            {claimsIncluded.map((claim) => (
+              <li key={claim.claim_id}>
+                <div>
+                  <span>{claim.service_date} · {claim.procedure_description || claim.cpt}</span>
+                  <small>{claim.inclusion_reason}</small>
+                </div>
+                <strong>{formatOptionalCurrency(claim.paid_amount)}</strong>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      <details className="value-based-limitations">
+        <summary>Why we cannot call this real saved money yet</summary>
+        <ul>
+          {(valueBasedCase.data_limitations || []).map((item) => <li key={item}>{item}</li>)}
+        </ul>
+      </details>
+    </section>
+  )
+}
+
+function PayerProcedureComparison({ payerSavings }) {
+  const comparison = payerSavings?.procedure_comparison
+  if (!comparison) return null
+
+  const target = comparison.target?.claim || {}
+  if (!comparison.available) {
+    return (
+      <section className="payer-procedure-comparison payer-procedure-comparison-unavailable" aria-labelledby="payer-procedure-heading">
+        <header>
+          <span>Other bills before this visit</span>
+          <h2 id="payer-procedure-heading">What bills came before this visit</h2>
+          <p>{comparison.reason}</p>
+        </header>
+        <article className="payer-procedure-single-visit">
+          <span className="payer-procedure-kicker">This person’s visit</span>
+          <h3>{target.procedure_description || 'Procedure description not recorded'}</h3>
+          <dl>
+            <div><dt>Bill number</dt><dd>{target.claim_id}</dd></div>
+            <div><dt>When</dt><dd>{target.service_date}</dd></div>
+            <div><dt>Problem written on the bill</dt><dd>{target.diagnosis_description || 'Description not recorded'} ({target.icd10 || 'code not recorded'})</dd></div>
+            <div><dt>Service written on the bill</dt><dd>{target.cpt || 'code not recorded'} · {target.units || 0} time{target.units === 1 ? '' : 's'}</dd></div>
+          </dl>
+          <RecordedServicesBeforeVisit
+            services={comparison.target?.prior_services}
+            historyWindowDays={comparison.history_window_days}
+          />
+        </article>
+        <p className="payer-procedure-limit">
+          These are bills, not a doctor’s notes. They cannot tell us that a service should be removed or was not needed.
+        </p>
+      </section>
+    )
+  }
+
+  const peer = comparison.peer?.claim || {}
+  const matchLabels = Object.values(comparison.matches || {}).filter(Boolean)
+
+  return (
+    <section className="payer-procedure-comparison" aria-labelledby="payer-procedure-heading">
+      <header>
+        <span>Looking at two similar visits</span>
+        <h2 id="payer-procedure-heading">What bills came before each visit</h2>
+        <p>
+          We look at this person’s visit and another person’s similar visit. The bills use the same kind of problem code.
+        </p>
+      </header>
+
+      <div className="payer-procedure-why" role="note">
+        <strong>Why we looked at these two visits:</strong> {comparison.reason}
+        {matchLabels.length ? (
+          <div className="payer-procedure-match-list" aria-label="Recorded details compared">
+            {matchLabels.map((label) => <span key={label}>{label}</span>)}
+          </div>
+        ) : null}
+      </div>
+
+      <div className="payer-procedure-grid">
+        <article>
+          <span className="payer-procedure-kicker">This person’s visit</span>
+          <h3>{target.procedure_description || 'Procedure description not recorded'}</h3>
+          <dl>
+            <div><dt>Bill number</dt><dd>{target.claim_id}</dd></div>
+            <div><dt>When</dt><dd>{target.service_date}</dd></div>
+            <div><dt>Problem written on the bill</dt><dd>{target.diagnosis_description || 'Description not recorded'} ({target.icd10 || 'code not recorded'})</dd></div>
+            <div><dt>Service written on the bill</dt><dd>{target.cpt || 'code not recorded'} · {target.units || 0} time{target.units === 1 ? '' : 's'}</dd></div>
+          </dl>
+          <RecordedServicesBeforeVisit
+            services={comparison.target?.prior_services}
+            historyWindowDays={comparison.history_window_days}
+          />
+        </article>
+
+        <article>
+          <span className="payer-procedure-kicker peer">Another person’s similar visit</span>
+          <h3>{peer.procedure_description || 'Procedure description not recorded'}</h3>
+          <dl>
+            <div><dt>Bill number</dt><dd>{peer.claim_id}</dd></div>
+            <div><dt>When</dt><dd>{peer.service_date}</dd></div>
+            <div><dt>Problem written on the bill</dt><dd>{peer.diagnosis_description || 'Description not recorded'} ({peer.icd10 || 'code not recorded'})</dd></div>
+            <div><dt>Service written on the bill</dt><dd>{peer.cpt || 'code not recorded'} · {peer.units || 0} time{peer.units === 1 ? '' : 's'}</dd></div>
+          </dl>
+          <RecordedServicesBeforeVisit
+            services={comparison.peer?.prior_services}
+            historyWindowDays={comparison.history_window_days}
+          />
+        </article>
+      </div>
+
+      <p className="payer-procedure-limit">
+        These are bills, not a doctor’s notes. They show what was written on the bills, but cannot tell us that a service should be removed or was not needed.
+      </p>
+    </section>
+  )
+}
+
 function OrganSystemComparativeSavingsCard({ scenario, facts }) {
   const targetOrgan = getOrganSystemInfo(facts.diagnosis_code, facts.diagnosis_description)
 
-  // Strictly filter peer claims to only compare against peer members with the matching organ system
+  // This price-review list is separate from the payer's different-member cohort.
   const organMatchedPeers = useMemo(() => {
     return (scenario.similar_historical_claims || []).filter((peer) => {
       const peerOrgan = getOrganSystemInfo(peer.icd10, peer.match_reason)
@@ -1919,14 +2157,17 @@ function OrganSystemComparativeSavingsCard({ scenario, facts }) {
   }, [orderedPeers, selectedPeerId])
 
   const memberAllowed = facts.allowed || 0
+  const memberBilled = facts.charge || 0
   const memberPaid = facts.paid || 0
   const memberPatient = facts.patient_responsibility || 0
 
   const peerAllowed = activePeer?.allowed || 0
+  const peerBilled = activePeer?.charge || 0
   const peerPaid = activePeer?.paid || 0
   const peerPatient = Math.max(0, peerAllowed - peerPaid)
 
   const savingsAmount = Math.max(0, memberAllowed - peerAllowed)
+  const billedPriceDifference = Math.max(0, memberBilled - peerBilled)
   const savingsPercent = memberAllowed > 0 ? ((savingsAmount / memberAllowed) * 100).toFixed(1) : '0.0'
   const payerSavings = Math.max(0, memberPaid - peerPaid)
   const patientSavings = Math.max(0, memberPatient - peerPatient)
@@ -1951,7 +2192,7 @@ function OrganSystemComparativeSavingsCard({ scenario, facts }) {
             <span className="organ-icon">{targetOrgan.organIcon}</span>
             <span>PRICE COMPARISON WITH EARLIER CLAIMS</span>
           </div>
-          <h3 id="organ-savings-heading">How this claim's insurance price compares with another claim</h3>
+          <h3 id="organ-savings-heading">How this claim's insurance price compares with earlier claims</h3>
           <p className="organ-subtitle">
             The comparison uses earlier claims in the same diagnosis grouping. It shows price variation for review; it does not prove that either service was unnecessary or incorrectly priced.
           </p>
@@ -2036,7 +2277,10 @@ function OrganSystemComparativeSavingsCard({ scenario, facts }) {
                 <span className="savings-percent-tag">{savingsPercent}% lower</span>
               </div>
               <p className="savings-equation-text">
-                This claim's insurance price ({formatOptionalCurrency(memberAllowed)}) − other claim's price ({formatOptionalCurrency(peerAllowed)})
+                {formatOptionalCurrency(savingsAmount)} = this claim's insurance price ({formatOptionalCurrency(memberAllowed)}) − the other claim's insurance price ({formatOptionalCurrency(peerAllowed)}).
+              </p>
+              <p className="billed-price-explainer">
+                <strong>Billed-price difference for review:</strong> {formatOptionalCurrency(billedPriceDifference)} = this claim's billed price ({formatOptionalCurrency(memberBilled)}) − the other claim's billed price ({formatOptionalCurrency(peerBilled)}). This is a charge difference, not payer savings.
               </p>
               <div className="savings-split-pills">
                 <div className="split-pill payer-split">
@@ -2055,9 +2299,9 @@ function OrganSystemComparativeSavingsCard({ scenario, facts }) {
             </div>
 
             <div className="member-comparator-card member-b-card">
-              <div className="comp-card-kicker">ANOTHER PATIENT'S CLAIM</div>
+              <div className="comp-card-kicker">EARLIER CLAIM</div>
               <div className="comp-member-identity">
-                <h4>Comparison claim</h4>
+                <h4>Earlier comparison claim</h4>
                 <span className="comp-claim-badge peer-badge">{activePeer.claim_id}</span>
               </div>
               <div className="comp-meta-rows">
@@ -2107,12 +2351,22 @@ function OrganSystemComparativeSavingsCard({ scenario, facts }) {
             <div className="drivers-grid">
               <div className="driver-box">
                 <strong>What it shows</strong>
-                <p>The selected comparison claim has an insurance-agreed price of {formatOptionalCurrency(peerAllowed)}, which is {formatOptionalCurrency(savingsAmount)} below this claim.</p>
+                <p>The selected comparison claim has an insurance-agreed price of {formatOptionalCurrency(peerAllowed)}, which is {formatOptionalCurrency(savingsAmount)} below this claim. Its billed price is {formatOptionalCurrency(peerBilled)}, which is {formatOptionalCurrency(billedPriceDifference)} below this claim's billed price.</p>
               </div>
               <div className="driver-box">
-                <strong>What must be checked</strong>
-                <p>Payer, provider, place of service, contract terms, coding, and the work performed may differ. The price difference is not confirmed savings until those details are reviewed.</p>
+                <strong>Who could save money?</strong>
+                <p>The {formatOptionalCurrency(savingsAmount)} figure is a difference in the insurance-recognized price. It is not automatically a saving for this patient. The payer could only reduce spend if a review finds a correctable billing or contract difference, or uses a lower-priced option for a future comparable service.</p>
               </div>
+            </div>
+            <div className="price-review-steps">
+              <h4>What has to happen before this could become a real saving</h4>
+              <ol>
+                <li><strong>Confirm the two claims are genuinely comparable.</strong> Check the billing code, modifiers, units, diagnosis details, provider, and service location. If they are not comparable, stop; the difference is expected.</li>
+                <li><strong>Check the plan and contract terms.</strong> Confirm the patient’s plan, network status, benefit rules, and contracted rate on the date of service. A different contract can fully explain the {formatOptionalCurrency(savingsAmount)} difference.</li>
+                <li><strong>Review the submitted bill for a documented error.</strong> Check for a duplicate claim, incorrect units, modifier, code, or place of service. Correct only an error supported by the claim record and payer rules.</li>
+                <li><strong>Use the comparison for future planning when permitted.</strong> For a future comparable service, the plan may be able to use an in-network option with a lower agreed price. This does not change this completed claim by itself.</li>
+              </ol>
+              <p><strong>Result:</strong> until one of these checks identifies a supported correction or future lower-price option, the confirmed saving is unknown. It may be less than {formatOptionalCurrency(savingsAmount)} or zero.</p>
             </div>
           </div>
 
@@ -2190,38 +2444,40 @@ function OrganSystemComparativeSavingsCard({ scenario, facts }) {
   )
 }
 
-function PredictionScenarioMap({ scenario }) {
+function PredictionScenarioMap({ scenario, valueBasedCase: loadedValueBasedCase }) {
   const facts = scenario.actual_claim_facts
   const summary = scenario.supported_money_summary
   const snapshot = scenario.financial_prediction_snapshot
+  const payerSavings = scenario.payer_savings_prediction
+  const valueBasedCase = loadedValueBasedCase || scenario.value_based_case
   const historicalPeerCount = snapshot.peer_sample_size ?? scenario.historical_comparison?.sample_size ?? 0
   const suggestedReviewLabel = summary.best_action?.type === 'patient_balance'
     ? 'Patient balance and payment plan'
     : summary.top_supported_opportunity?.label || 'Current claim amount'
   const topMetrics = [
     {
-      label: 'Amount ready for review',
+      label: 'Money to check now',
       value: formatOptionalCurrency(summary.recoverable_now),
-      note: 'A recorded current-claim amount that must be confirmed before follow-up.',
+      note: 'This number is in the bill and needs a person to check it.',
       tone: 'green',
       icon: DollarSign,
-      help: 'This is not a forecast. It is the current amount supported by the workbook for staff review.',
+      help: 'This is a real number written in this bill. Someone still needs to check it.',
     },
     {
-      label: 'Potential savings if a repeat is avoided',
+      label: 'Possible future cost',
       value: formatOptionalCurrency(snapshot.predicted_avoidable_spend.value),
-      note: 'Average three-month model estimate per similar case; not guaranteed savings.',
+      note: 'A computer guess about another related bill in the next three months.',
       tone: 'purple',
       icon: TrendingDown,
-      help: 'This combines the chance of another related claim, the share with avoidability evidence, and an estimated extra cost.',
+      help: 'This is a guess. It is not money already saved.',
     },
     {
-      label: 'Money at risk if insurance denies the claim',
+      label: 'Money insurance might not pay',
       value: formatOptionalCurrency(summary.future_denial_exposure),
-      note: `${formatProbability(snapshot.denial_probability)} estimated denial chance; not a confirmed loss.`,
+      note: `${formatProbability(snapshot.denial_probability)} chance in the computer’s guess; this has not happened.`,
       tone: 'red',
       icon: ShieldAlert,
-      help: 'This is the estimated denial chance multiplied by the estimated provider payment.',
+      help: 'This is a computer guess about money that insurance might not pay.',
     },
   ]
 
@@ -2229,12 +2485,28 @@ function PredictionScenarioMap({ scenario }) {
     <Card className="provider-forecast-detail">
       <header className="provider-forecast-heading">
         <div className="forecast-title-group">
-          <span className="forecast-kicker">Prediction for one recorded visit</span>
+          <span className="forecast-kicker">About this one visit</span>
           <h1>{facts.diagnosis_description}</h1>
           <p className="forecast-meta">{facts.provider} · {facts.payer} · claim {scenario.claim_id} · tracking ID {scenario.episode_id}</p>
         </div>
-        <span className="priority-chip">Suggested review: {suggestedReviewLabel}</span>
+        <span className="priority-chip">First thing to check: {suggestedReviewLabel}</span>
       </header>
+
+      {payerSavings?.available === false ? (
+        <aside className="payer-savings-availability" role="status">
+          <ShieldAlert size={22} />
+          <div>
+            <span>Comparing this bill with another person’s bill</span>
+            <h2>We could not find a fair bill to compare</h2>
+            <p>{payerSavings.reason}</p>
+            <small>This does not mean there is no saving. It means we do not have a fair comparison yet.</small>
+          </div>
+        </aside>
+      ) : null}
+
+      <ValueBasedRectificationCase valueBasedCase={valueBasedCase} />
+
+      <PayerProcedureComparison payerSavings={payerSavings} />
 
       <PlainLanguageClaimNarrative
         scenario={scenario}
@@ -2256,14 +2528,14 @@ function PredictionScenarioMap({ scenario }) {
 
       <aside className="prediction-secondary-context">
         <div>
-          <PlainTooltip text="The amount the provider may receive, estimated from earlier matched claim payments."><span>Estimated provider payment</span></PlainTooltip>
+          <PlainTooltip text="A computer guess of what the hospital may be paid, based on older bills."><span>Computer’s payment guess</span></PlainTooltip>
           <strong>{formatOptionalCurrency(snapshot.predicted_provider_payment.value)}</strong>
-          <small>Based on {historicalPeerCount} earlier matched claims</small>
+          <small>Based on {historicalPeerCount} older bills</small>
         </div>
         <div>
-          <PlainTooltip text="This score describes the amount and quality of matching evidence. It is not the chance that the prediction is correct."><span>How confident we are</span></PlainTooltip>
+          <PlainTooltip text="This says how much the computer trusts its own guess. It is not a promise."><span>How sure the computer is</span></PlainTooltip>
           <strong>{snapshot.confidence.level} ({formatProbability(snapshot.confidence.score)})</strong>
-          <small>Treat a low score as a guide that requires review</small>
+          <small>Low means a person should look carefully.</small>
         </div>
       </aside>
 
@@ -2281,7 +2553,7 @@ function PredictionScenarioMap({ scenario }) {
       />
 
       <details className="scenario-technical-details">
-        <summary>Show technical calculation and evidence details</summary>
+        <summary>Show hard words, codes, and detailed math</summary>
         <div className="scenario-pathway">
           {scenario.scenario_map.sections.map((section) => <ScenarioMapSection key={section.step} section={section} />)}
         </div>
@@ -3753,7 +4025,7 @@ function ProviderLlmPanel({ claim, onCasePrediction }) {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
-  const predictionReady = Boolean(result?.benchmark_summary)
+  const predictionReady = Boolean(result && (result.benchmark_summary || result.available === false))
 
   useEffect(() => {
     setResult(null)
@@ -3798,7 +4070,7 @@ function ProviderLlmPanel({ claim, onCasePrediction }) {
         <div className="llm-intro">These views use different methods and their dollar amounts should not be compared as if they were the same prediction.</div>
       ) : null}
       {error ? <div className="llm-config-note error">{error}</div> : null}
-      {predictionReady ? <div className="llm-intro">Payer savings prediction ready for {result.target?.selected_claim_id}. Open it to review the cohort benchmark, calculation and supporting evidence.</div> : null}
+      {predictionReady ? <div className="llm-intro">Payer savings prediction ready for {result.target?.claim_id}. Open it to review the cohort benchmark, calculation and supporting evidence.</div> : null}
       {predictionReady ? <button className="llm-secondary-button" type="button" onClick={() => setModalOpen(true)}>Open Payer Savings Prediction</button> : null}
       {modalOpen ? <ProviderLlmModal claim={claim} result={result} loading={loading} error={error} onClose={() => setModalOpen(false)} onRetry={generatePrediction} onOpenProviderForecast={onCasePrediction} /> : null}
     </Card>
@@ -3824,15 +4096,16 @@ function ProviderLlmModal({ claim, result, loading, error, onClose, onRetry, onO
           <div>
             <h2 id="provider-llm-modal-title">Value-Based Intelligence</h2>
             <p>Historical comparison against clinically relevant member cohorts</p>
-            {result?.member ? <small>Member: {result.member.member_id} · Condition: {result.member.condition?.icd10} · Observation Period: {result.observation?.days} days ({payerDate(result.observation?.start_date)} – {payerDate(result.observation?.end_date)})</small> : null}
+            {result?.target ? <small>Member: {result.target.member_id} · ICD-10 family: {result.target.diagnosis_family} · Episode: {payerDate(result.target.episode_start)} – {payerDate(result.target.episode_end)}</small> : null}
           </div>
           <button className="provider-llm-close" type="button" aria-label="Close Prediction" onClick={onClose}><X size={20} /></button>
         </header>
         <div className="provider-llm-modal-body">
           {loading ? <div className="llm-modal-state"><RefreshCw className="spin" size={22} /> Building the observation window and matched cohort…</div> : null}
           {!loading && error ? <div className="llm-config-note error"><span>{error}</span><button className="llm-primary-button" type="button" onClick={onRetry}>Retry prediction</button></div> : null}
-          {!loading && (result?.benchmark_summary ? <ClaimPayerPredictionResult result={result} /> : result?.historical_cohort ? <ClaimPayerPredictionResult result={result} /> : null)}
-          {!loading && !error && result && !result?.historical_cohort ? (
+          {!loading && result?.benchmark_summary ? <ClaimPayerPredictionResult result={result} /> : null}
+          {!loading && result?.available === false ? <ClaimPayerPredictionResult result={result} /> : null}
+          {!loading && !error && result && result.available !== false && !result?.benchmark_summary ? (
             <div className="llm-modal-state provider-response-error">
               The prediction service returned an unsupported response. Please retry after the deployment finishes.
             </div>
@@ -3840,7 +4113,7 @@ function ProviderLlmModal({ claim, result, loading, error, onClose, onRetry, onO
         </div>
         <footer className="payer-cohort-modal-footer">
           <button className="payer-secondary-button" type="button" onClick={onClose}>Close</button>
-          {result?.historical_cohort ? <button className="payer-secondary-button" type="button" onClick={onOpenProviderForecast}>Open Separate Provider Forecast</button> : null}
+          {result?.benchmark_summary ? <button className="payer-secondary-button" type="button" onClick={onOpenProviderForecast}>Open Separate Provider Forecast</button> : null}
         </footer>
       </div>
     </div>,
@@ -3848,8 +4121,108 @@ function ProviderLlmModal({ claim, result, loading, error, onClose, onRetry, onO
   )
 }
 
-function ClaimPayerPredictionResult({ result }) {
+function CanonicalClaimPayerPredictionResult({ result }) {
   const [showAllEvidence, setShowAllEvidence] = useState(false)
+  const target = result.target || {}
+  if (result.available === false) {
+    const scenarios = result.scenario_selection || {}
+    return (
+      <div className="payer-result claim-payer-result">
+        <p className="payer-evidence-trace"><strong>Payer perspective · Rule-based:</strong> no money is shown when there is no eligible different-member comparison.</p>
+        <div className="payer-result-section" role="status">
+          <h3>No cross-member benchmark is available</h3>
+          <p>{result.reason}</p>
+          <dl className="payer-summary-meta">
+            <div><dt>Selected claim</dt><dd>{target.claim_id}</dd></div>
+            <div><dt>Target member</dt><dd>{target.member_id}</dd></div>
+            <div><dt>ICD-10 family</dt><dd>{target.diagnosis_family}</dd></div>
+            <div><dt>Target episode dates</dt><dd>{payerDate(target.episode_start)} – {payerDate(target.episode_end)}</dd></div>
+            <div><dt>Target related claims</dt><dd>{payerNumber(target.claim_count)}</dd></div>
+            <div><dt>Target payer spend</dt><dd>{payerCurrency(target.payer_spend)}</dd></div>
+          </dl>
+          <ul className="payer-evidence-trace">
+            {[1, 2, 3].map((number) => <li key={number}>Scenario {number}: {scenarios[`scenario_${number}`]?.reason}</li>)}
+          </ul>
+          <p className="payer-evidence-trace">This is not a zero-savings result. The claim remains available for review, but no payer-savings estimate can be supported from the current peer evidence.</p>
+        </div>
+      </div>
+    )
+  }
+  const scenario = result.scenario_selection?.selected || {}
+  const benchmark = result.benchmark_summary || {}
+  const calculation = result.calculation_summary || {}
+  const range = calculation.range || {}
+  const confidence = calculation.confidence || {}
+  const peers = result.peer_members_used || []
+  const evidence = result.supporting_evidence || []
+  const visibleEvidence = showAllEvidence ? evidence : evidence.slice(0, 10)
+
+  return (
+    <div className="payer-result claim-payer-result">
+      <p className="payer-evidence-trace"><strong>Payer perspective · Rule-based:</strong> this uses Paid_Amount peer-episode benchmarks only. It does not use or modify the separate provider forecast.</p>
+      <section className="payer-result-section">
+        <h3>Benchmark Summary</h3>
+        <dl className="payer-summary-meta">
+          <div><dt>Selected scenario</dt><dd>Scenario {scenario.number} — {scenario.name}</dd></div>
+          <div><dt>Target member</dt><dd>{target.member_id}</dd></div>
+          <div><dt>Selected claim</dt><dd>{target.claim_id}</dd></div>
+          <div><dt>ICD-10 family</dt><dd>{target.diagnosis_family}</dd></div>
+          <div><dt>Target episode dates</dt><dd>{payerDate(target.episode_start)} – {payerDate(target.episode_end)}</dd></div>
+          <div><dt>Target related claims</dt><dd>{payerNumber(target.claim_count)}</dd></div>
+          <div><dt>Target payer spend</dt><dd>{payerCurrency(target.payer_spend)}</dd></div>
+          <div><dt>Typical peer spend</dt><dd>{payerCurrency(benchmark.typical_peer_spend)}</dd></div>
+          <div><dt>Lower-utilisation benchmark</dt><dd>{payerNumber(benchmark.utilisation_benchmark_claim_count)} claims</dd></div>
+          <div><dt>Lower-spend opportunity benchmark</dt><dd>{payerCurrencyOrDash(benchmark.lower_spend_benchmark)}</dd></div>
+          <div><dt>External peer members</dt><dd>{payerNumber(benchmark.peer_member_count)}</dd></div>
+          <div><dt>Peer episodes / claims</dt><dd>{payerNumber(benchmark.peer_episode_count)} / {payerNumber(benchmark.peer_claim_count)}</dd></div>
+          <div><dt>Benchmark method</dt><dd>{benchmark.benchmark_method}</dd></div>
+          <div><dt>Confidence</dt><dd>{confidence.score}% · {confidence.level}</dd></div>
+        </dl>
+        <p className="payer-evidence-trace">{scenario.reason}</p>
+      </section>
+
+      <section className="payer-result-section">
+        <h3>Peer Members Used</h3>
+        <div className="payer-table-wrap"><table><thead><tr><th>Member ID</th><th>ICD family</th><th>Exact ICD</th><th>Payer</th><th>Provider</th><th>CPT</th><th>POS</th><th>Units</th><th>Peer episodes</th><th>Peer claims</th><th>Payer spend range</th><th>Benchmark role</th></tr></thead><tbody>
+          {peers.map((peer) => <tr key={peer.member_id}>
+            <td>{peer.member_id}</td><td>{peer.diagnosis_family}</td><td>{peer.exact_icd_match}</td><td>{peer.payer_match}</td><td>{peer.provider_match}</td><td>{peer.cpt_match}</td><td>{peer.pos_match}</td><td>{peer.units_match}</td><td>{payerNumber(peer.peer_episode_count)}</td><td>{payerNumber(peer.peer_claim_count)}</td><td>{payerCurrency(peer.payer_spend_range?.low)} – {payerCurrency(peer.payer_spend_range?.high)}</td><td>{peer.benchmark_role}</td>
+          </tr>)}
+        </tbody></table></div>
+        {peers.map((peer) => (
+          <details className="box-provenance-explainer" key={`${peer.member_id}-episodes`}>
+            <summary>{peer.member_id}: show {peer.peer_episode_count} peer episode{peer.peer_episode_count === 1 ? '' : 's'}</summary>
+            <div className="payer-table-wrap"><table><thead><tr><th>Episode</th><th>Dates</th><th>Claims</th><th>Payer spend</th><th>Claim IDs</th></tr></thead><tbody>{(peer.episodes || []).map((episode) => <tr key={episode.peer_episode_id}><td>{episode.peer_episode_id}</td><td>{payerDate(episode.episode_start)} – {payerDate(episode.episode_end)}</td><td>{payerNumber(episode.claim_count)}</td><td>{payerCurrency(episode.total_paid)}</td><td>{episode.claim_ids.join(', ')}</td></tr>)}</tbody></table></div>
+          </details>
+        ))}
+      </section>
+
+      <section className="payer-result-section">
+        <h3>Prediction Range / Calculation Summary</h3>
+        <div className="payer-calculation-overview"><div><span>Target episode payer spend</span><strong>{payerCurrency(target.payer_spend)}</strong></div><div><span>Target related claims</span><strong>{payerNumber(target.claim_count)}</strong></div><div><span>Utilisation benchmark claims</span><strong>{payerNumber(benchmark.utilisation_benchmark_claim_count)}</strong></div><div><span>Excess claims</span><strong>{payerNumber(calculation.excess_claim_count)}</strong></div></div>
+        <div className="payer-formulas">
+          <article><h4>Utilisation reduction opportunity</h4><p>{payerNumber(calculation.excess_claim_count)} excess claims × {payerCurrency(calculation.median_peer_paid_per_claim)} = <strong>{payerCurrency(calculation.utilisation_reduction_opportunity)}</strong></p><small>Uses the median Paid_Amount per claim from the selected-scenario peer episodes.</small></article>
+          <article><h4>Typical peer spend</h4><p>Median of all selected-scenario peer episodes = <strong>{payerCurrency(calculation.typical_peer_spend)}</strong></p><small>This is the neutral comparison, separate from the lower-spend opportunity benchmark.</small></article>
+          <article><h4>Lower-spend opportunity benchmark</h4><p>{benchmark.lower_spend_benchmark_detail?.method} = <strong>{payerCurrencyOrDash(calculation.lower_spend_benchmark)}</strong></p><small>It intentionally uses the lower-cost part of the selected peer cohort.</small></article>
+          <article><h4>Payer spend reduction opportunity</h4><p>{payerCurrency(target.payer_spend)} − {payerCurrencyOrDash(calculation.lower_spend_benchmark)} = <strong>{payerCurrency(calculation.payer_spend_reduction_opportunity)}</strong></p><small>Target payer spend minus the lower-spend opportunity benchmark.</small></article>
+        </div>
+        <div className="payer-final-value"><span>Predicted payer avoidable spend</span><strong>{payerCurrency(calculation.predicted_payer_avoidable_spend)}</strong><small>Uses the stronger of the two non-duplicated opportunities, capped at the target episode's Paid_Amount spend.</small>{calculation.zero_reason ? <p><b>Reason:</b> {calculation.zero_reason}</p> : null}</div>
+        <div className="payer-range"><div><span>Benchmark-Based Estimate Range</span><strong>{payerCurrency(range.low)} – {payerCurrency(range.high)}</strong></div><dl><div><dt>Q25 peer episode spend</dt><dd>{payerCurrency(range.q25_peer_episode_spend)}</dd></div><div><dt>Median peer episode spend</dt><dd>{payerCurrency(range.median_peer_episode_spend)}</dd></div><div><dt>Q75 peer episode spend</dt><dd>{payerCurrency(range.q75_peer_episode_spend)}</dd></div><div><dt>Selected claim attributed saving</dt><dd>{payerCurrency(calculation.claim_attributed_payer_avoidable_spend)}</dd></div></dl></div>
+        <p className={`payer-confidence ${confidence.level?.toLowerCase()}`}>Confidence: {confidence.score}% · {confidence.level}</p>
+      </section>
+
+      <section className="payer-result-section">
+        <h3>Supporting Evidence</h3>
+        <div className="payer-table-wrap evidence"><table><thead><tr><th>Claim ID</th><th>Member ID</th><th>Service date</th><th>ICD-10</th><th>Family</th><th>CPT</th><th>Payer</th><th>Provider</th><th>POS</th><th>Units</th><th>Paid Amount</th><th>Historical reference</th><th>Evidence role</th></tr></thead><tbody>{visibleEvidence.map((row, index) => <tr key={`${row.claim_id}-${index}`}><td>{row.claim_id}</td><td>{row.member_id}</td><td>{payerDate(row.service_date)}</td><td>{row.icd10}</td><td>{row.icd10_family}</td><td>{row.cpt}</td><td>{row.payer_name || row.payer}</td><td>{row.provider_name || row.provider}</td><td>{row.pos}</td><td>{payerNumber(row.units)}</td><td>{payerCurrency(row.paid_amount)}</td><td>{row.is_historical_reference ? 'Yes' : 'No'}</td><td>{row.evidence_role}</td></tr>)}</tbody></table></div>
+        {!showAllEvidence && evidence.length > visibleEvidence.length ? <button className="payer-evidence-button" type="button" onClick={() => setShowAllEvidence(true)}>View all supporting evidence</button> : null}
+        <p className="payer-evidence-trace">All payer savings values above were calculated by the backend from workbook Paid_Amount values. This comparison does not make a clinical determination.</p>
+      </section>
+    </div>
+  )
+}
+
+function LegacyClaimPayerPredictionResult({ result }) {
+  const [showAllEvidence, setShowAllEvidence] = useState(false)
+  if (result.scenario_selection) return <CanonicalClaimPayerPredictionResult result={result} />
   const member = result.member || {}
   const observation = result.observation || {}
   const target = result.target || {}
@@ -4011,6 +4384,10 @@ function ClaimPayerPredictionResult({ result }) {
       </section>
     </div>
   )
+}
+
+function ClaimPayerPredictionResult({ result }) {
+  return <CanonicalClaimPayerPredictionResult result={result} />
 }
 
 function ProviderRenderPredictionResult({ result }) {

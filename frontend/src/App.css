@@ -2364,6 +2364,541 @@ button {
   gap: 16px;
 }
 
+.payer-savings-availability {
+  display: flex;
+  gap: 12px;
+  margin: 0 0 20px;
+  padding: 16px 18px;
+  border: 1px solid #fbbf24;
+  border-left: 5px solid #d97706;
+  border-radius: 12px;
+  background: #fffbeb;
+  color: #78350f;
+}
+
+.payer-savings-availability > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.payer-savings-availability span,
+.payer-savings-availability small {
+  display: block;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.payer-savings-availability span {
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.payer-savings-availability h2 {
+  margin: 3px 0 6px;
+  color: #78350f;
+  font-size: 18px;
+}
+
+.payer-savings-availability p {
+  margin: 0 0 6px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.value-based-case {
+  margin: 0 0 20px;
+  padding: 22px;
+  border: 1px solid #bbf7d0;
+  border-radius: 14px;
+  background: #f7fdf9;
+}
+
+.value-based-case > header > span {
+  display: block;
+  color: #047857;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.value-based-case > header h2 {
+  margin: 5px 0 7px;
+  color: #0f172a;
+  font-size: 21px;
+}
+
+.value-based-case > header p,
+.value-based-calculation-note {
+  margin: 0;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.value-based-status {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 16px 0;
+  padding: 12px 14px;
+  border-left: 4px solid #059669;
+  border-radius: 8px;
+  background: #ecfdf5;
+  color: #065f46;
+}
+
+.value-based-status > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.value-based-status strong,
+.value-based-status span {
+  display: block;
+}
+
+.value-based-status strong {
+  font-size: 13px;
+}
+
+.value-based-status span {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.value-based-claim-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.value-based-claim-grid article {
+  padding: 17px;
+  border: 1px solid #d1fae5;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.value-based-claim-grid article > span,
+.value-based-improvement span {
+  display: block;
+  color: #047857;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.value-based-later-claim {
+  border-top: 4px solid #0ea5e9 !important;
+}
+
+.value-based-later-claim > span {
+  color: #0369a1 !important;
+}
+
+.value-based-claim-grid h3 {
+  margin: 7px 0 4px;
+  color: #0f172a;
+  font-size: 17px;
+}
+
+.value-based-claim-grid p {
+  min-height: 38px;
+  margin: 0 0 13px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.value-based-claim-grid dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.value-based-claim-grid dl div {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #ecfdf5;
+}
+
+.value-based-claim-grid dt {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.value-based-claim-grid dd {
+  margin: 0;
+  color: #1e293b;
+  font-size: 12px;
+  font-weight: 650;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.value-based-reason,
+.value-based-improvement {
+  margin-top: 15px;
+  padding: 13px 14px;
+  border-radius: 9px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.value-based-reason {
+  border-left: 4px solid #0ea5e9;
+  background: #f0f9ff;
+  color: #0c4a6e;
+}
+
+.value-based-improvement {
+  display: grid;
+  grid-template-columns: minmax(180px, .8fr) minmax(0, 1.2fr);
+  gap: 14px;
+  border: 1px solid #a7f3d0;
+  background: #ecfdf5;
+  color: #065f46;
+}
+
+.value-based-improvement strong {
+  display: block;
+  margin-top: 5px;
+  color: #064e3b;
+  font-size: 14px;
+}
+
+.value-based-improvement p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.value-based-financials {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 15px;
+}
+
+.value-based-financials-single {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.value-based-financials > div {
+  padding: 13px;
+  border: 1px solid #d1fae5;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.value-based-financials span,
+.value-based-financials small {
+  display: block;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.value-based-financials strong {
+  display: block;
+  margin: 5px 0;
+  color: #0f172a;
+  font-size: 20px;
+}
+
+.value-based-financials .value-based-total {
+  border-color: #6ee7b7;
+  background: #ecfdf5;
+}
+
+.value-based-financials .value-based-total strong {
+  color: #047857;
+}
+
+.value-based-calculation-note {
+  margin-top: 10px;
+}
+
+.value-based-repeat-list {
+  margin-top: 15px;
+  padding-top: 14px;
+  border-top: 1px solid #d1fae5;
+}
+
+.value-based-repeat-list h3 {
+  margin: 0 0 8px;
+  color: #065f46;
+  font-size: 13px;
+}
+
+.value-based-repeat-list ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.value-based-repeat-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 10px;
+  border-radius: 7px;
+  background: #fff;
+  color: #334155;
+  font-size: 12px;
+}
+
+.value-based-repeat-list li > div {
+  min-width: 0;
+}
+
+.value-based-repeat-list li span,
+.value-based-repeat-list li small {
+  display: block;
+}
+
+.value-based-repeat-list li small {
+  margin-top: 3px;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.value-based-repeat-list strong {
+  color: #047857;
+  white-space: nowrap;
+}
+
+.value-based-limitations {
+  margin-top: 15px;
+  color: #78350f;
+  font-size: 12px;
+}
+
+.value-based-limitations summary {
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.value-based-limitations ul {
+  margin: 9px 0 0;
+  padding-left: 18px;
+  line-height: 1.5;
+}
+
+@media (max-width: 760px) {
+  .value-based-claim-grid,
+  .value-based-financials,
+  .value-based-improvement {
+    grid-template-columns: 1fr;
+  }
+
+  .value-based-claim-grid dl div {
+    grid-template-columns: 1fr;
+  }
+
+  .value-based-claim-grid dd {
+    text-align: left;
+  }
+}
+
+.payer-procedure-comparison {
+  margin: 0 0 20px;
+  padding: 22px;
+  border: 1px solid #bfdbfe;
+  border-radius: 14px;
+  background: #f8fbff;
+}
+
+.payer-procedure-comparison > header > span,
+.payer-procedure-kicker {
+  display: block;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.payer-procedure-comparison > header h2 {
+  margin: 5px 0 7px;
+  color: #0f172a;
+  font-size: 21px;
+}
+
+.payer-procedure-comparison > header p,
+.payer-procedure-limit {
+  margin: 0;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.payer-procedure-why {
+  margin: 16px 0;
+  padding: 13px 14px;
+  border-left: 4px solid #2563eb;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #1e3a8a;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.payer-procedure-match-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.payer-procedure-match-list span {
+  padding: 4px 8px;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  background: #fff;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.payer-procedure-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.payer-procedure-grid > article,
+.payer-procedure-single-visit {
+  padding: 17px;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.payer-procedure-single-visit {
+  margin-top: 16px;
+}
+
+.payer-procedure-kicker.peer {
+  color: #047857;
+}
+
+.payer-procedure-grid h3,
+.payer-procedure-single-visit h3 {
+  margin: 7px 0 13px;
+  color: #0f172a;
+  font-size: 17px;
+}
+
+.payer-procedure-grid dl,
+.payer-procedure-single-visit dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.payer-procedure-grid dl div,
+.payer-procedure-single-visit dl div {
+  display: grid;
+  grid-template-columns: 116px minmax(0, 1fr);
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #eef2f7;
+}
+
+.payer-procedure-grid dt {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.payer-procedure-grid dd {
+  margin: 0;
+  color: #1e293b;
+  font-size: 12px;
+  font-weight: 650;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.recorded-services-before-visit {
+  margin-top: 15px;
+  padding-top: 14px;
+  border-top: 1px solid #dbeafe;
+}
+
+.recorded-services-before-visit h4 {
+  margin: 0 0 9px;
+  color: #1e3a8a;
+  font-size: 12px;
+}
+
+.recorded-services-before-visit ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recorded-services-before-visit li {
+  display: grid;
+  gap: 2px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.recorded-services-before-visit li strong {
+  color: #1d4ed8;
+}
+
+.recorded-services-before-visit li small,
+.recorded-services-before-visit p {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.recorded-services-before-visit p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.payer-procedure-limit {
+  margin-top: 16px;
+  padding: 11px 13px;
+  border-radius: 8px;
+  background: #fffbeb;
+  color: #78350f;
+}
+
+@media (max-width: 760px) {
+  .payer-procedure-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .payer-procedure-grid dl div,
+  .payer-procedure-single-visit dl div {
+    grid-template-columns: 1fr;
+  }
+
+  .payer-procedure-grid dd,
+  .payer-procedure-single-visit dd {
+    text-align: left;
+  }
+}
+
 .plain-claim-narrative > header > span {
   display: block;
   margin-bottom: 4px;
@@ -6326,6 +6861,47 @@ button {
   margin: 0;
   font-weight: 600;
 }
+
+.billed-price-explainer {
+  width: 100%;
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid #bbf7d0;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #166534;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.price-review-steps {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  background: #f8fbff;
+  color: #334155;
+}
+
+.price-review-steps h4 {
+  margin: 0 0 10px;
+  color: #1e40af;
+  font-size: 14px;
+}
+
+.price-review-steps ol {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.price-review-steps li,
+.price-review-steps p {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.price-review-steps p { margin-bottom: 0; }
 
 .savings-split-pills {
   display: flex;

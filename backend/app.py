@@ -25,7 +25,9 @@ try:
         build_payer_prediction,
         build_payer_prediction_for_claim,
         build_payer_prediction_options,
+        run_payer_temporal_backtest,
     )
+    from .value_based_case import build_value_based_case_for_claim
     from .provider_prediction import build_provider_prediction_payload, find_case
     from .workbook_enrichment import load_workbook_database, read_savings_workbook
     from .workbook_llm import generate_workbook_chat_answer, generate_workbook_prediction_explanation
@@ -51,7 +53,9 @@ except ImportError:
         build_payer_prediction,
         build_payer_prediction_for_claim,
         build_payer_prediction_options,
+        run_payer_temporal_backtest,
     )
+    from value_based_case import build_value_based_case_for_claim
     from provider_prediction import build_provider_prediction_payload, find_case
     from workbook_enrichment import load_workbook_database, read_savings_workbook
     from workbook_llm import generate_workbook_chat_answer, generate_workbook_prediction_explanation
@@ -115,6 +119,24 @@ def configured_workbook_database():
 def workbook_prediction_with_rag(database, claim_number):
     result = build_financial_result(database, claim_number)
     try:
+        payer_savings_prediction = build_payer_prediction_for_claim(
+            database,
+            claim_number,
+        )
+    except ValueError as error:
+        payer_savings_prediction = {
+            "available": False,
+            "reason": str(error),
+        }
+    try:
+        value_based_case = build_value_based_case_for_claim(database, claim_number)
+    except (KeyError, ValueError) as error:
+        value_based_case = {
+            "available": False,
+            "status": "No claims-based rectification scenario",
+            "reason": str(error),
+        }
+    try:
         rag = retrieve_evidence(
             database,
             result,
@@ -122,6 +144,8 @@ def workbook_prediction_with_rag(database, claim_number):
         )
         return {
             **result,
+            "payer_savings_prediction": payer_savings_prediction,
+            "value_based_case": value_based_case,
             "rag": rag,
             "rag_evidence": rag["retrieved_documents"],
             "prediction_available": True,
@@ -132,6 +156,8 @@ def workbook_prediction_with_rag(database, claim_number):
     except (RuntimeError, OllamaError) as error:
         return {
             **result,
+            "payer_savings_prediction": payer_savings_prediction,
+            "value_based_case": value_based_case,
             "rag": {
                 "ready": False,
                 "retrieved_documents": [],
@@ -660,8 +686,21 @@ def generate_claim_anchored_payer_prediction(claim_number):
     if not database:
         return json_response({"message": "Configured workbook is required."}, 409)
     try:
-        from backend.prediction_engine_v2 import build_payer_prediction_for_claim_v2
-        return json_response(build_payer_prediction_for_claim_v2(database, claim_number))
+        return json_response(build_payer_prediction_for_claim(database, claim_number))
+    except KeyError as error:
+        return json_response({"message": str(error)}, 404)
+    except ValueError as error:
+        return json_response({"message": str(error)}, 422)
+
+
+@app.get("/api/predictions/value-based-case/<claim_number>")
+def get_value_based_case(claim_number):
+    """Return the claims-only rectification scenario for one selected claim."""
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Configured workbook is required."}, 409)
+    try:
+        return json_response(build_value_based_case_for_claim(database, claim_number))
     except KeyError as error:
         return json_response({"message": str(error)}, 404)
     except ValueError as error:
@@ -670,27 +709,22 @@ def generate_claim_anchored_payer_prediction(claim_number):
 
 @app.get("/api/payer-prediction/<member_id>")
 def get_payer_member_prediction(member_id):
-    """Phase 9 member-level payer savings prediction for a target member."""
+    """Compatibility route backed by the authoritative payer rule engine."""
     database = configured_workbook_database()
     if not database:
         return json_response({"message": "Configured workbook is required."}, 409)
     try:
-        from backend.prediction_engine_v2 import build_member_payer_prediction
-
-        observation = request.args.get("window")
-        observation_days = int(observation) if observation and observation.isdigit() else None
-        return json_response(build_member_payer_prediction(database, member_id, observation_days))
+        return json_response(build_member_payer_cohort_summary(database, member_id))
     except ValueError as error:
         return json_response({"message": str(error)}, 422)
 
 
 @app.get("/api/payer-prediction/validation")
 def get_payer_prediction_validation():
-    """Phase 11 temporal backtest summary for payer savings benchmarks."""
+    """Historical validation of the authoritative Paid_Amount payer rule model."""
     database = configured_workbook_database()
     if not database:
         return json_response({"message": "Configured workbook is required."}, 409)
-    from backend.prediction_engine_v2 import run_payer_temporal_backtest
     return json_response(run_payer_temporal_backtest(database))
 
 

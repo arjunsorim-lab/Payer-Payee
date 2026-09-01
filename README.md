@@ -217,7 +217,6 @@ The workbook financial engine also supplies claim-specific adjudication reasons 
 | `shared/predictionEngine.js` | Shared JavaScript prediction utilities used by older/fallback paths |
 | `data/claims-demo.xlsx` | Bundled demonstration workbook |
 | `payer_payee_mongodb/` | Isolated local MongoDB utility project on port 27018 |
-| `prediction_llm/` | Standalone local member/claim analytics service on port 8765 |
 | `render.yaml` | Render build, start, and environment configuration |
 
 ## Prerequisites
@@ -468,10 +467,6 @@ Two self-contained helpers live in the repository but are not required to start 
 
 [`payer_payee_mongodb/`](payer_payee_mongodb/) runs a separate local MongoDB instance on `127.0.0.1:27018`. It preserves raw workbook headings in `payer_payee.837_claims` and includes validation and connection scripts. Its database is intentionally separate from the main application's default port 27017 database.
 
-### Standalone Prediction LLM
-
-[`prediction_llm/`](prediction_llm/) is a local service on port 8765 for claim/member summaries and evidence-grounded questions over the isolated MongoDB dataset. It uses deterministic analytics first and a local Ollama model only for explanation.
-
 ## Troubleshooting
 
 ### The frontend loads but API calls fail
@@ -527,4 +522,3 @@ Restart the backend after replacing the workbook. The loader keys its cache by t
 - [OLLAMA_RAG_SETUP.md](OLLAMA_RAG_SETUP.md) — local Ollama and FAISS setup.
 - [PROVIDER_LLM.md](PROVIDER_LLM.md) — provider prediction/explanation implementation notes, including legacy compatibility details.
 - [payer_payee_mongodb/README.md](payer_payee_mongodb/README.md) — isolated MongoDB helper.
-- [prediction_llm/README.md](prediction_llm/README.md) — standalone local analytics service.

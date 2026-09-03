@@ -17,6 +17,18 @@ VBC_REFERENCE_LOOKBACK_DAYS = int(os.getenv("VBC_REFERENCE_LOOKBACK_DAYS", "120"
 VBC_REPETITIVE_CLAIM_DAYS = int(os.getenv("VBC_REPETITIVE_CLAIM_DAYS", "120"))
 VBC_RECENT_OFFICE_TO_TEST_DAYS = int(os.getenv("VBC_RECENT_OFFICE_TO_TEST_DAYS", "14"))
 
+# This is deliberately small. It supports the urinary sequence used in the
+# demonstration dataset without treating every diagnosis in the same ICD-10
+# chapter as related. A clinician must approve or replace this list before
+# production use.
+VBC_REVIEW_CODE_GROUPS = (
+    {
+        "id": "urinary_infection_review_group",
+        "label": "urinary-infection review group",
+        "code_prefixes": ("N30", "N39.0", "N11"),
+    },
+)
+
 
 def _field(claim, name, canonical=None, default=""):
     value = claim.get("workbookFields", {}).get(name)
@@ -68,10 +80,28 @@ def _family(claim):
     return explicit or diagnosis.split(".")[0][:3]
 
 
-def _chapter(claim):
-    """Return the first ICD-10 character, only for a cautious fallback rule."""
-    diagnosis = _text(_field(claim, "ICD10_Diagnosis_Code", "diagnosisCode"))
-    return diagnosis[:1].upper()
+def _diagnosis_code(claim):
+    return _text(_field(claim, "ICD10_Diagnosis_Code", "diagnosisCode")).upper()
+
+
+def _review_group_for_pair(left_claim, right_claim):
+    """Return the configured review group shared by two claims, if any."""
+    left_code = _diagnosis_code(left_claim)
+    right_code = _diagnosis_code(right_claim)
+    for group in VBC_REVIEW_CODE_GROUPS:
+        prefixes = group["code_prefixes"]
+        if any(left_code.startswith(prefix) for prefix in prefixes) and any(
+            right_code.startswith(prefix) for prefix in prefixes
+        ):
+            return group
+    return None
+
+
+def _is_in_review_group(claim, group):
+    return bool(group) and any(
+        _diagnosis_code(claim).startswith(prefix)
+        for prefix in group["code_prefixes"]
+    )
 
 
 def _payer_id(claim):
@@ -133,13 +163,13 @@ def _reference_candidates(database, prediction_claim):
 
     Same-member references are preferred. Exact ICD-10-family matches are the
     normal rule. A limited fallback identifies a *recent office-to-test
-    sequence* for the same person, payer, provider, and ICD-10 chapter. It is
-    deliberately labelled as a data pattern, not a clinical pathway.
+    sequence* for the same person, payer, provider, and a configured review
+    group. It is deliberately labelled as a data pattern, not a clinical
+    pathway.
     """
     prediction_date = _day(_field(prediction_claim, "Service_Date_From", "dos"))
     prediction_member = _member_id(prediction_claim)
     prediction_family = _family(prediction_claim)
-    prediction_chapter = _chapter(prediction_claim)
     prediction_payer = _payer_id(prediction_claim)
     prediction_provider = _provider_npi(prediction_claim)
     cutoff = prediction_date - timedelta(days=VBC_REFERENCE_LOOKBACK_DAYS)
@@ -158,14 +188,13 @@ def _reference_candidates(database, prediction_claim):
         same_member = _member_id(row) == prediction_member
         same_family = bool(prediction_family) and _family(row) == prediction_family
         days_before_prediction = (prediction_date - row_date).days
-        same_chapter = bool(prediction_chapter) and _chapter(row) == prediction_chapter
+        review_group = _review_group_for_pair(row, prediction_claim)
         same_payer = bool(prediction_payer) and _payer_id(row) == prediction_payer
         same_provider = bool(prediction_provider) and _provider_npi(row) == prediction_provider
         recent_office_to_test_pattern = (
             same_member
             and 1 <= days_before_prediction <= VBC_RECENT_OFFICE_TO_TEST_DAYS
-            and prediction_chapter != "Z"
-            and same_chapter
+            and review_group is not None
             and same_payer
             and same_provider
             and _is_office_or_evaluation_claim(row)
@@ -175,13 +204,15 @@ def _reference_candidates(database, prediction_claim):
             continue
 
         if recent_office_to_test_pattern:
-            relationship = "recent office visit followed by a test in the same ICD-10 chapter"
+            relationship = (
+                f"recent office visit followed by a test in the same {review_group['label']}"
+            )
             method = "recent_same_member_office_to_test_pattern"
             evidence = [
                 "same member",
                 "same payer",
                 "same billing provider",
-                "same ICD-10 chapter",
+                "same configured review group",
                 "older office visit followed by a billed test",
             ]
         else:
@@ -195,6 +226,7 @@ def _reference_candidates(database, prediction_claim):
             "relationship": relationship,
             "method": method,
             "evidence": evidence,
+            "review_group": review_group,
         })
 
     def rank(candidate):
@@ -213,12 +245,11 @@ def _reference_candidates(database, prediction_claim):
     return sorted(candidates, key=rank, reverse=True)
 
 
-def _later_related_claims(database, prediction_claim, relationship_scope):
+def _later_related_claims(database, prediction_claim, relationship_scope, review_group=None):
     """Find later bills in the same transparent, non-clinical pattern scope."""
     prediction_date = _day(_field(prediction_claim, "Service_Date_From", "dos"))
     prediction_member = _member_id(prediction_claim)
     prediction_family = _family(prediction_claim)
-    prediction_chapter = _chapter(prediction_claim)
     prediction_payer = _payer_id(prediction_claim)
     prediction_provider = _provider_npi(prediction_claim)
     end_date = prediction_date + timedelta(days=VBC_REPETITIVE_CLAIM_DAYS)
@@ -233,8 +264,7 @@ def _later_related_claims(database, prediction_claim, relationship_scope):
             related = _family(row) == prediction_family
         else:
             related = (
-                prediction_chapter
-                and _chapter(row) == prediction_chapter
+                _is_in_review_group(row, review_group)
                 and _payer_id(row) == prediction_payer
                 and _provider_npi(row) == prediction_provider
             )
@@ -296,7 +326,13 @@ def build_value_based_case_for_claim(database, claim_number):
     reference = _claim_summary(reference_claim)
     days_between = (prediction_date - _day(_field(reference_claim, "Service_Date_From", "dos"))).days
     relationship_scope = reference_detail["method"]
-    repeats = _later_related_claims(database, prediction_claim, relationship_scope)
+    review_group = reference_detail.get("review_group")
+    repeats = _later_related_claims(
+        database,
+        prediction_claim,
+        relationship_scope,
+        review_group,
+    )
     repetitive_claims = []
     for row in repeats:
         item = _claim_summary(row)
@@ -307,7 +343,7 @@ def build_value_based_case_for_claim(database, claim_number):
             )
         else:
             inclusion_reason = (
-                "This later bill is for the same person, payer, provider, and ICD-10 chapter "
+                "This later bill is for the same person, payer, provider, and configured review group "
                 "as the short office-to-test pattern. It is included once for review."
             )
         item["inclusion_reason"] = (
@@ -322,7 +358,7 @@ def build_value_based_case_for_claim(database, claim_number):
     if relationship_scope == "recent_same_member_office_to_test_pattern":
         reference_reason = (
             f"This is an office visit for the same person, payer, and provider, {days_between} day(s) before the billed test. "
-            "The diagnosis codes share an ICD-10 chapter. This is a timing pattern to review, not proof of a clinical connection."
+            f"Both codes are in the {review_group['label']}. This is a timing pattern to review, not proof of a clinical connection."
         )
     else:
         reference_reason = (
@@ -335,19 +371,25 @@ def build_value_based_case_for_claim(database, claim_number):
     ]
     if relationship_scope == "recent_same_member_office_to_test_pattern":
         limitations.append(
-            "This broader connection is based only on timing, billing fields, and an ICD-10 chapter. It is weaker than an exact diagnosis-family match."
+            f"The {review_group['label']} is a provisional rules list for this demo and needs clinician approval. It is weaker than an exact diagnosis-family match."
         )
     if synthetic_outcomes:
         limitations.append(
             "This workbook labels its outcome and intervention fields as synthetic/illustrative, so they are not used to confirm rectification or savings."
         )
 
+    prediction_inclusion_reason = (
+        f"This bill happened {days_between} day(s) after the older bill and uses the same kind of problem code. "
+        "It is included once in the possible amount."
+        if relationship_scope == "same_icd10_family"
+        else (
+            f"This test happened {days_between} day(s) after the older office visit and is in the {review_group['label']}. "
+            "It is included once for review."
+        )
+    )
     claims_included = [{
         **prediction,
-        "inclusion_reason": (
-            f"This bill happened {days_between} day(s) after the older bill and uses the same kind of problem code. "
-            "It is included once in the possible amount."
-        ),
+        "inclusion_reason": prediction_inclusion_reason,
     }, *repetitive_claims]
     return {
         "available": True,

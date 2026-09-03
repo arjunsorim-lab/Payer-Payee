@@ -614,26 +614,27 @@ def _procedure_comparison_claim(claim):
         "cpt": _text(_field(claim, "CPT_Code", "cptCode")),
         "procedure_description": _text(_field(claim, "CPT_Description", "cptDescription")),
         "units": _number(_field(claim, "Units", "units")),
+        "paid_amount": _money(_number(_field(claim, "Paid_Amount", "paid"))),
         "payer_id": _text(_field(claim, "Payer_ID", "payerId")),
         "provider_npi": _text(_field(claim, "Billing_Provider_NPI", "billingProviderNpi")),
         "pos": _text(_field(claim, "Place_of_Service_Code", "placeOfServiceCode")),
+        "is_historical_reference": _is_historical_reference(claim),
     }
 
 
-def _prior_recorded_services(database, member_id, before_date, *, include_historical):
-    """List services billed in the 90 days before a comparison visit.
+def _prior_recorded_services(database, member_id, before_date, diagnosis_family):
+    """List only earlier bills in the comparison visit's diagnosis family.
 
-    These are claim records, not clinical conclusions.  The target member is
-    limited to selectable claims, so historical-reference rows never inflate
-    current member context.  Peer history may include reference rows because
-    those are allowed as external evidence by the payer benchmark rules.
+    Showing every bill in a 90-day window made unrelated care look like part
+    of the comparison. Historical-reference rows are also excluded because
+    they are synthetic comparators in this workbook, not the member's care
+    history.
     """
     start_date = before_date - timedelta(days=PAYER_COHORT_EPISODE_DAYS)
-    source = database.claims if include_historical else database.selectable_claims
     rows = [
-        row for row in source
+        row for row in database.selectable_claims
         if _member_id(row) == member_id
-        and (include_historical or not _is_historical_reference(row))
+        and _family(row) == diagnosis_family
         and (service_date := _day(_field(row, "Service_Date_From", "dos")))
         and start_date <= service_date < before_date
     ]
@@ -697,14 +698,16 @@ def _representative_peer_claim(target, peer_episode):
 def _build_procedure_comparison(database, target, selected_claim, peers, scenario_number):
     """Build an evidence-only, different-member procedure comparison for the UI."""
     target_claim = _procedure_comparison_claim(selected_claim)
+    target_prior_services = _prior_recorded_services(
+        database,
+        target["member_id"],
+        target["selected_date"],
+        target["diagnosis_family"],
+    )
     target_context = {
         "claim": target_claim,
-        "prior_services": _prior_recorded_services(
-            database,
-            target["member_id"],
-            target["selected_date"],
-            include_historical=False,
-        ),
+        "prior_services": target_prior_services,
+        "prior_services_total_paid": _money(sum(row["paid_amount"] for row in target_prior_services)),
     }
     if not peers:
         return {
@@ -727,6 +730,46 @@ def _build_procedure_comparison(database, target, selected_claim, peers, scenari
     )
     peer_claim = _representative_peer_claim(target, peer_episode)
     peer_claim_payload = _procedure_comparison_claim(peer_claim)
+    peer_prior_services = _prior_recorded_services(
+        database,
+        peer_episode["member_id"],
+        _day(_field(peer_claim, "Service_Date_From", "dos")),
+        target["diagnosis_family"],
+    )
+    target_paid = target_claim["paid_amount"]
+    peer_paid = peer_claim_payload["paid_amount"]
+    visit_payer_spend_difference = _money(max(target_paid - peer_paid, 0))
+    comparison_formula = (
+        f"${target_paid:,.2f} - ${peer_paid:,.2f} = ${visit_payer_spend_difference:,.2f}"
+        if target_paid >= peer_paid
+        else (
+            f"${target_paid:,.2f} is not more than ${peer_paid:,.2f}, "
+            "so the possible difference is $0.00"
+        )
+    )
+    # The selected peer may have no earlier bill inside the 90-day display
+    # window. Expose the other same-scenario rows used as evidence so the
+    # comparison is still inspectable, without pretending they are recent
+    # care history. Historical-reference rows remain clearly marked and are
+    # never counted as selectable/current member claims.
+    peer_comparison_records = []
+    seen_peer_claim_ids = {peer_claim_payload["claim_id"]}
+    for episode in sorted(
+        (episode for episode in peers if episode["member_id"] == peer_episode["member_id"]),
+        key=lambda episode: (episode["end_date"], episode["start_date"], episode["episode_id"]),
+        reverse=True,
+    ):
+        for row in sorted(
+            episode["rows"],
+            key=lambda row: (_day(_field(row, "Service_Date_From", "dos")) or date.min, _claim_id(row)),
+            reverse=True,
+        ):
+            record = _procedure_comparison_claim(row)
+            if record["claim_id"] in seen_peer_claim_ids:
+                continue
+            seen_peer_claim_ids.add(record["claim_id"])
+            peer_comparison_records.append(record)
+
     return {
         "available": True,
         "history_window_days": PAYER_COHORT_EPISODE_DAYS,
@@ -739,11 +782,35 @@ def _build_procedure_comparison(database, target, selected_claim, peers, scenari
             "episode_id": peer_episode["episode_id"],
             "claim_count": peer_episode["claim_count"],
             "claim": peer_claim_payload,
-            "prior_services": _prior_recorded_services(
-                database,
-                peer_episode["member_id"],
-                _day(_field(peer_claim, "Service_Date_From", "dos")),
-                include_historical=True,
+            "prior_services": peer_prior_services,
+            "prior_services_total_paid": _money(sum(row["paid_amount"] for row in peer_prior_services)),
+            "comparison_records": peer_comparison_records[:10],
+        },
+        "scenario_number": scenario_number,
+        "comparison_prediction": {
+            "basis": "Paid_Amount",
+            "target_visit_paid": target_paid,
+            "peer_visit_paid": peer_paid,
+            "possible_payer_spend_difference": visit_payer_spend_difference,
+            "confirmed_savings": 0.0,
+            "formula": comparison_formula,
+            "source_rows": [
+                {
+                    "role": "This person's visit",
+                    "claim_id": target_claim["claim_id"],
+                    "field": "Paid_Amount",
+                    "value": target_paid,
+                },
+                {
+                    "role": "Other person's matching visit",
+                    "claim_id": peer_claim_payload["claim_id"],
+                    "field": "Paid_Amount",
+                    "value": peer_paid,
+                },
+            ],
+            "reason": (
+                "This amount is the positive difference between the payer-paid amounts on the two displayed visits. "
+                "It is a comparison amount for review, not confirmed savings."
             ),
         },
         "matches": {

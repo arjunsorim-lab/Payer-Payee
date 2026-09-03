@@ -109,6 +109,7 @@ const CLAIMS_CACHE_PREFIX = 'payerpayee.claims.workbook.'
 const EMPTY_DATE_RANGE = { from: '', to: '' }
 const CLICKABLE_NAV_LABELS = new Set(['Patient 360', 'Predictions', 'Claims'])
 const VALID_VIEWS = new Set(['home', 'member', 'predictions', 'claims'])
+const FEATURED_DEMO_CLAIM_ID = 'CLM00000366'
 
 function buildDataModel(claimsData) {
   const defaultDateRange = getDateRange(claimsData)
@@ -1869,24 +1870,124 @@ function getOrganSystemInfo(icdCode = '', description = '') {
   }
 }
 
-function RecordedServicesBeforeVisit({ services, historyWindowDays }) {
+function RecordedServicesBeforeVisit({ services, historyWindowDays, totalPaid }) {
   return (
     <div className="recorded-services-before-visit">
-      <h4>Other bills in the {historyWindowDays} days before this visit</h4>
+      <h4>Earlier bills with the same recorded problem group (previous {historyWindowDays} days) · context only</h4>
       {services?.length ? (
-        <ul>
-          {services.map((service) => (
-            <li key={service.claim_id}>
-              <strong>{service.service_date}</strong>
-              <span>{service.procedure_description || 'Procedure description not recorded'} ({service.cpt || 'billing code not recorded'})</span>
-              <small>{service.diagnosis_description || 'Condition description not recorded'} ({service.icd10 || 'medical code not recorded'})</small>
-            </li>
-          ))}
-        </ul>
+        <>
+          <ul>
+            {services.map((service) => (
+              <li key={service.claim_id}>
+                <strong>{service.service_date}</strong>
+                <span>{service.procedure_description || 'Procedure description not recorded'} ({service.cpt || 'billing code not recorded'})</span>
+                <small>
+                  {service.diagnosis_description || 'Condition description not recorded'} ({service.icd10 || 'medical code not recorded'}) · Insurance paid {formatOptionalCurrency(service.paid_amount)}
+                </small>
+              </li>
+            ))}
+          </ul>
+          <div className="recorded-services-subtotal">
+            <span>Earlier-bill subtotal</span>
+            <strong>{formatOptionalCurrency(totalPaid)}</strong>
+            <small>Not included in the two-visit saving calculation.</small>
+          </div>
+        </>
       ) : (
-        <p>We did not find another bill in the {historyWindowDays} days before this visit.</p>
+        <p>We did not find an earlier bill with the same recorded problem group.</p>
       )}
     </div>
+  )
+}
+
+function ComparisonEvidenceRecords({ services }) {
+  if (!services?.length) return null
+
+  return (
+    <div className="recorded-services-before-visit comparison-evidence-records">
+      <h4>Other matching records used for this comparison</h4>
+      <p className="comparison-evidence-intro">
+        These records met the same comparison rule. They are shown so you can check the evidence, not to say they happened within the 90-day window above.
+      </p>
+      <ul>
+        {services.map((service) => (
+          <li key={service.claim_id}>
+            <strong>{service.service_date}</strong>
+            <span>{service.procedure_description || 'Procedure description not recorded'} ({service.cpt || 'billing code not recorded'})</span>
+            <small>
+              {service.diagnosis_description || 'Condition description not recorded'} ({service.icd10 || 'medical code not recorded'}) · Insurance paid {formatOptionalCurrency(service.paid_amount)}
+              {service.is_historical_reference ? ' · Reference-only record' : ''}
+            </small>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+function PeerComparisonPredictionSummary({ payerSavings }) {
+  const comparison = payerSavings?.procedure_comparison
+  const prediction = comparison?.comparison_prediction
+  if (!comparison?.available || !prediction) return null
+
+  const target = comparison.target?.claim || {}
+  const peer = comparison.peer?.claim || {}
+  const matchLabels = Object.values(comparison.matches || {}).filter(Boolean)
+  const sourceRows = prediction.source_rows || []
+
+  return (
+    <section className="peer-comparison-prediction" aria-labelledby="peer-comparison-prediction-heading">
+      <header>
+        <span>Payer comparison prediction</span>
+        <h2 id="peer-comparison-prediction-heading">Possible amount to save from two similar visits</h2>
+        <p>This amount uses only the two visits shown in the comparison below.</p>
+      </header>
+
+      <div className="peer-comparison-prediction-grid">
+        <div>
+          <span>This person’s visit</span>
+          <strong>{formatOptionalCurrency(prediction.target_visit_paid)}</strong>
+          <small>Recorded Paid_Amount on claim {target.claim_id} · {target.procedure_description || target.cpt}</small>
+        </div>
+        <div>
+          <span>Other person’s matching visit</span>
+          <strong>{formatOptionalCurrency(prediction.peer_visit_paid)}</strong>
+          <small>Recorded Paid_Amount on claim {peer.claim_id} · {peer.procedure_description || peer.cpt}</small>
+        </div>
+        <div className="peer-comparison-prediction-total">
+          <span>Possible payer amount to save</span>
+          <strong>{formatOptionalCurrency(prediction.possible_payer_spend_difference)}</strong>
+          <small>Needs a clinical and billing review</small>
+        </div>
+      </div>
+
+      <code className="peer-comparison-formula">{prediction.formula}</code>
+      <p className="peer-comparison-formula-note">
+        Only the two selected visits are used above. Earlier bills shown below are context and are not added to either visit amount.
+      </p>
+      {sourceRows.length ? (
+        <div className="peer-comparison-sources">
+          <strong>Where these numbers came from</strong>
+          <ul>
+            {sourceRows.map((source) => (
+              <li key={`${source.claim_id}-${source.role}`}>
+                {formatOptionalCurrency(source.value)} is the <code>{source.field}</code> recorded on claim <strong>{source.claim_id}</strong> ({source.role.toLowerCase()}).
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      <p className="peer-comparison-explanation">{prediction.reason}</p>
+      {matchLabels.length ? (
+        <div className="peer-comparison-basis" aria-label="Why these visits were compared">
+          <strong>Why these two visits were compared:</strong>
+          {matchLabels.map((label) => <span key={label}>{label}</span>)}
+        </div>
+      ) : null}
+      <p className="peer-comparison-confirmed">
+        Confirmed saved amount: {formatOptionalCurrency(prediction.confirmed_savings)} until a reviewer confirms that the difference was avoidable.
+      </p>
+    </section>
   )
 }
 
@@ -1899,8 +2000,8 @@ function ValueBasedRectificationCase({ valueBasedCase }) {
     return (
       <section className="value-based-case value-based-case-no-reference" aria-labelledby="value-based-case-heading">
         <header>
-          <span>Possible money-saving check</span>
-          <h2 id="value-based-case-heading">We could not find a good earlier bill to compare</h2>
+          <span>Separate same-person review</span>
+          <h2 id="value-based-case-heading">We could not find a good earlier bill in this person’s history</h2>
           <p>{valueBasedCase.reason}</p>
         </header>
         <div className="value-based-status" role="status">
@@ -1916,12 +2017,12 @@ function ValueBasedRectificationCase({ valueBasedCase }) {
             <strong>{formatOptionalCurrency(prediction.paid_amount)}</strong>
           </div>
           <div className="value-based-total">
-            <span>Possible money to save (needs checking)</span>
+            <span>Payer spending in this separate review</span>
             <strong>{formatOptionalCurrency(calculation.potential_payer_spend_for_review)}</strong>
             <small>{calculation.formula}</small>
           </div>
         </div>
-        <p className="value-based-calculation-note">{calculation.reason} This is not money we have definitely saved.</p>
+        <p className="value-based-calculation-note">{calculation.reason} This total is not the payer comparison prediction.</p>
       </section>
     )
   }
@@ -1943,10 +2044,10 @@ function ValueBasedRectificationCase({ valueBasedCase }) {
   return (
     <section className="value-based-case" aria-labelledby="value-based-case-heading">
       <header>
-        <span>Possible money-saving check</span>
-        <h2 id="value-based-case-heading">A short sequence of bills to check</h2>
+        <span>Separate same-person review</span>
+        <h2 id="value-based-case-heading">Later bills that may need clinical review</h2>
         <p>
-          We found these bills close together in this person's history. This does not prove that anyone missed care or that a later bill could have been stopped.
+          This list is separate from the two-person payer comparison above. It does not calculate the predicted saving.
         </p>
       </header>
 
@@ -2014,12 +2115,12 @@ function ValueBasedRectificationCase({ valueBasedCase }) {
           <strong>{formatOptionalCurrency(calculation.later_related_paid)}</strong>
         </div>
         <div className="value-based-total">
-          <span>Possible money to save (needs checking)</span>
+          <span>Total payer spending listed for review</span>
           <strong>{formatOptionalCurrency(calculation.potential_payer_spend_for_review)}</strong>
           <small>{calculation.formula}</small>
         </div>
       </div>
-      <p className="value-based-calculation-note">{calculation.reason} This is not money we have definitely saved.</p>
+      <p className="value-based-calculation-note">{calculation.reason} This total is not the predicted saving shown above.</p>
 
       {claimsIncluded.length ? (
         <div className="value-based-repeat-list">
@@ -2069,10 +2170,12 @@ function PayerProcedureComparison({ payerSavings }) {
             <div><dt>When</dt><dd>{target.service_date}</dd></div>
             <div><dt>Problem written on the bill</dt><dd>{target.diagnosis_description || 'Description not recorded'} ({target.icd10 || 'code not recorded'})</dd></div>
             <div><dt>Service written on the bill</dt><dd>{target.cpt || 'code not recorded'} · {target.units || 0} time{target.units === 1 ? '' : 's'}</dd></div>
+            <div><dt>Insurance paid (Paid_Amount)</dt><dd>{formatOptionalCurrency(target.paid_amount)}</dd></div>
           </dl>
           <RecordedServicesBeforeVisit
             services={comparison.target?.prior_services}
             historyWindowDays={comparison.history_window_days}
+            totalPaid={comparison.target?.prior_services_total_paid}
           />
         </article>
         <p className="payer-procedure-limit">
@@ -2091,7 +2194,7 @@ function PayerProcedureComparison({ payerSavings }) {
         <span>Looking at two similar visits</span>
         <h2 id="payer-procedure-heading">What bills came before each visit</h2>
         <p>
-          We look at this person’s visit and another person’s similar visit. The bills use the same kind of problem code.
+          We look at this person’s visit and another person’s similar visit. Under each visit, we show only earlier bills with the same recorded problem group.
         </p>
       </header>
 
@@ -2101,6 +2204,11 @@ function PayerProcedureComparison({ payerSavings }) {
           <div className="payer-procedure-match-list" aria-label="Recorded details compared">
             {matchLabels.map((label) => <span key={label}>{label}</span>)}
           </div>
+        ) : null}
+        {comparison.scenario_number === 3 ? (
+          <p className="payer-procedure-scenario-note">
+            This is the broadest allowed fallback: the two main visits share the recorded problem group, while the insurance company or provider may differ.
+          </p>
         ) : null}
       </div>
 
@@ -2113,10 +2221,12 @@ function PayerProcedureComparison({ payerSavings }) {
             <div><dt>When</dt><dd>{target.service_date}</dd></div>
             <div><dt>Problem written on the bill</dt><dd>{target.diagnosis_description || 'Description not recorded'} ({target.icd10 || 'code not recorded'})</dd></div>
             <div><dt>Service written on the bill</dt><dd>{target.cpt || 'code not recorded'} · {target.units || 0} time{target.units === 1 ? '' : 's'}</dd></div>
+            <div><dt>Insurance paid (Paid_Amount)</dt><dd>{formatOptionalCurrency(target.paid_amount)}</dd></div>
           </dl>
           <RecordedServicesBeforeVisit
             services={comparison.target?.prior_services}
             historyWindowDays={comparison.history_window_days}
+            totalPaid={comparison.target?.prior_services_total_paid}
           />
         </article>
 
@@ -2128,11 +2238,14 @@ function PayerProcedureComparison({ payerSavings }) {
             <div><dt>When</dt><dd>{peer.service_date}</dd></div>
             <div><dt>Problem written on the bill</dt><dd>{peer.diagnosis_description || 'Description not recorded'} ({peer.icd10 || 'code not recorded'})</dd></div>
             <div><dt>Service written on the bill</dt><dd>{peer.cpt || 'code not recorded'} · {peer.units || 0} time{peer.units === 1 ? '' : 's'}</dd></div>
+            <div><dt>Insurance paid (Paid_Amount)</dt><dd>{formatOptionalCurrency(peer.paid_amount)}</dd></div>
           </dl>
           <RecordedServicesBeforeVisit
             services={comparison.peer?.prior_services}
             historyWindowDays={comparison.history_window_days}
+            totalPaid={comparison.peer?.prior_services_total_paid}
           />
+          <ComparisonEvidenceRecords services={comparison.peer?.comparison_records} />
         </article>
       </div>
 
@@ -2518,9 +2631,9 @@ function PredictionScenarioMap({ scenario, valueBasedCase: loadedValueBasedCase 
         </aside>
       ) : null}
 
-      <ValueBasedRectificationCase valueBasedCase={valueBasedCase} />
-
+      <PeerComparisonPredictionSummary payerSavings={payerSavings} />
       <PayerProcedureComparison payerSavings={payerSavings} />
+      <ValueBasedRectificationCase valueBasedCase={valueBasedCase} />
 
       <PlainLanguageClaimNarrative
         scenario={scenario}
@@ -2678,11 +2791,22 @@ function EncounterSearch({ searchQuery, onSearchChange, onSelectMember, onOpenCl
       const matchesStatus = statusFilter === 'All Statuses' || claim.status === statusFilter
       return matchesSearch && matchesStatus
     }), [claimsData, normalizedQuery, statusFilter])
-  const pageCount = Math.max(1, Math.ceil(filteredEncounters.length / pageSize))
+  const featuredEncounterFirst = useMemo(() => (
+    [...filteredEncounters].sort((left, right) => {
+      const leftIsFeaturedClaim = left.claimId === FEATURED_DEMO_CLAIM_ID
+      const rightIsFeaturedClaim = right.claimId === FEATURED_DEMO_CLAIM_ID
+      if (leftIsFeaturedClaim !== rightIsFeaturedClaim) {
+        return leftIsFeaturedClaim ? -1 : 1
+      }
+
+      return right.dos.localeCompare(left.dos) || right.number.localeCompare(left.number)
+    })
+  ), [filteredEncounters])
+  const pageCount = Math.max(1, Math.ceil(featuredEncounterFirst.length / pageSize))
   const safePage = Math.min(currentPage, pageCount)
   const pagedEncounters = useMemo(
-    () => filteredEncounters.slice((safePage - 1) * pageSize, safePage * pageSize),
-    [filteredEncounters, safePage],
+    () => featuredEncounterFirst.slice((safePage - 1) * pageSize, safePage * pageSize),
+    [featuredEncounterFirst, safePage],
   )
 
   useEffect(() => {
@@ -2847,6 +2971,7 @@ function DiseaseOverviewTable({ conditions, totalClaimsCount, onOpenPrediction, 
 
   const totalAllowedSum = conditions.reduce((acc, c) => acc + c.totalAllowed, 0);
   const riskLevel = totalAllowedSum > 50000 || totalConditions >= 4 ? 'High' : (totalAllowedSum > 15000 || totalConditions >= 2 ? 'Medium' : 'Low');
+  const featuredDemoClaim = memberClaims.find((claim) => claim.claimId === FEATURED_DEMO_CLAIM_ID);
 
   // Helper for sparklines based on real claim allowed amounts
   const generateSparkline = (item) => {
@@ -2879,6 +3004,19 @@ function DiseaseOverviewTable({ conditions, totalClaimsCount, onOpenPrediction, 
           <button type="button" className="disease-export-btn"><Download size={14}/> Export</button>
         </div>
       </div>
+
+      {featuredDemoClaim ? (
+        <div className="disease-walkthrough-card">
+          <div>
+            <span>Start the demo here</span>
+            <h3>Open the Psychotherapy 60 min claim from 14 Jul 2025</h3>
+            <p>This opens claim {featuredDemoClaim.number} and its different-member comparison, including the recorded Paid_Amount values and the possible payer-spending difference.</p>
+          </div>
+          <button type="button" onClick={() => onOpenPrediction(featuredDemoClaim)}>
+            Open this example <ArrowRight size={16} />
+          </button>
+        </div>
+      ) : null}
 
       <div className="disease-table-wrapper">
         <table className="disease-table">

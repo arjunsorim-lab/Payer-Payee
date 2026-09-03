@@ -94,9 +94,9 @@ class AuthoritativePayerEngineTests(unittest.TestCase):
             [
                 claim("TARGET_PRIOR", "M1", "2026-04-15", 100),
                 claim("TARGET", "M1", "2026-05-01", 300),
+                claim("PEER_PRIOR", "M2", "2026-03-15", 90),
             ],
             [
-                claim("PEER_PRIOR", "M2", "2026-03-15", 90, historical=True),
                 claim("PEER_VISIT", "M2", "2026-04-01", 100, historical=True),
             ],
         )
@@ -116,11 +116,41 @@ class AuthoritativePayerEngineTests(unittest.TestCase):
             [item["claim_id"] for item in comparison["target"]["prior_services"]],
             ["TARGET_PRIOR"],
         )
+        self.assertEqual(comparison["target"]["prior_services_total_paid"], 100.0)
         self.assertEqual(
             [item["claim_id"] for item in comparison["peer"]["prior_services"]],
             ["PEER_PRIOR"],
         )
+        self.assertEqual(comparison["peer"]["prior_services_total_paid"], 90.0)
+        self.assertEqual(
+            [item["claim_id"] for item in comparison["peer"]["comparison_records"]],
+            ["PEER_PRIOR"],
+        )
+        self.assertEqual(comparison["peer"]["claim"]["paid_amount"], 100.0)
         self.assertIn("Exact billing-code match", comparison["matches"]["procedure"])
+
+    def test_procedure_comparison_excludes_unrelated_prior_bills(self):
+        database = Database(
+            [
+                claim("TARGET_PRIOR", "M1", "2026-04-15", 100, family="N39"),
+                claim("TARGET", "M1", "2026-05-01", 300, family="N39"),
+                claim("TARGET_UNRELATED", "M1", "2026-04-20", 500, family="I10", cpt="90853"),
+                claim("PEER_PRIOR", "M2", "2026-03-15", 90, family="N39"),
+                claim("PEER_UNRELATED", "M2", "2026-03-20", 25, family="E11", cpt="80053"),
+            ],
+            [claim("PEER_VISIT", "M2", "2026-04-01", 100, family="N39", historical=True)],
+        )
+
+        comparison = build_payer_prediction_for_claim(database, "TARGET")["procedure_comparison"]
+
+        self.assertEqual(
+            [item["claim_id"] for item in comparison["target"]["prior_services"]],
+            ["TARGET_PRIOR"],
+        )
+        self.assertEqual(
+            [item["claim_id"] for item in comparison["peer"]["prior_services"]],
+            ["PEER_PRIOR"],
+        )
 
     def test_exactly_one_scenario_controls_peer_evidence(self):
         database = Database(
@@ -145,6 +175,29 @@ class AuthoritativePayerEngineTests(unittest.TestCase):
         self.assertEqual(calculation["utilisation_reduction_opportunity"], 0.0)
         self.assertEqual(calculation["payer_spend_reduction_opportunity"], 200.0)
         self.assertEqual(calculation["predicted_payer_avoidable_spend"], 200.0)
+
+    def test_two_visit_comparison_amount_uses_only_displayed_paid_amounts(self):
+        database = Database(
+            [claim("TARGET", "M1", "2026-05-01", 300)],
+            [claim("PEER", "M2", "2026-04-01", 100, historical=True)],
+        )
+
+        comparison = build_payer_prediction_for_claim(database, "TARGET")["procedure_comparison"]
+        prediction = comparison["comparison_prediction"]
+
+        self.assertEqual(prediction["basis"], "Paid_Amount")
+        self.assertEqual(prediction["target_visit_paid"], 300.0)
+        self.assertEqual(prediction["peer_visit_paid"], 100.0)
+        self.assertEqual(prediction["possible_payer_spend_difference"], 200.0)
+        self.assertEqual(prediction["confirmed_savings"], 0.0)
+        self.assertEqual(prediction["formula"], "$300.00 - $100.00 = $200.00")
+        self.assertEqual(
+            prediction["source_rows"],
+            [
+                {"role": "This person's visit", "claim_id": "TARGET", "field": "Paid_Amount", "value": 300.0},
+                {"role": "Other person's matching visit", "claim_id": "PEER", "field": "Paid_Amount", "value": 100.0},
+            ],
+        )
 
     def test_multi_claim_episode_uses_proportional_claim_attribution(self):
         database = Database(

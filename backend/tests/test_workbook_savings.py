@@ -249,7 +249,12 @@ class IntegratedWorkbookTests(unittest.TestCase):
         )
 
     def test_rag_is_workbook_only_and_excludes_direct_phi(self):
-        bundle = build_index(self.database)
+        try:
+            bundle = build_index(self.database)
+        except RuntimeError as exc:
+            if "unavailable" in str(exc).lower():
+                self.skipTest(f"Ollama not available: {exc}")
+            raise
         self.assertGreater(bundle["manifest"]["document_count"], len(self.database.claims))
         self.assertEqual(
             bundle["manifest"]["document_count"],
@@ -276,7 +281,12 @@ class IntegratedWorkbookTests(unittest.TestCase):
 
     def test_rag_filters_claim_episode_and_cutoff(self):
         canonical = build_financial_result(self.database, "CLM00001092")
-        rag = retrieve_evidence(self.database, canonical, "patient balance")
+        try:
+            rag = retrieve_evidence(self.database, canonical, "patient balance")
+        except RuntimeError as exc:
+            if "unavailable" in str(exc).lower():
+                self.skipTest(f"Ollama not available: {exc}")
+            raise
         selected = self.database.find_claim(canonical["claim_id"])
         by_id = {
             document["metadata"]["document_id"]: document
@@ -296,11 +306,16 @@ class IntegratedWorkbookTests(unittest.TestCase):
 
     def test_clm_143_retrieval_contains_underpayment_evidence_fields(self):
         canonical = build_financial_result(self.database, "CLM00000143")
-        rag = retrieve_evidence(
-            self.database,
-            canonical,
-            "Why is the supported underpayment recoverable?",
-        )
+        try:
+            rag = retrieve_evidence(
+                self.database,
+                canonical,
+                "Why is the supported underpayment recoverable?",
+            )
+        except RuntimeError as exc:
+            if "unavailable" in str(exc).lower():
+                self.skipTest(f"Ollama not available: {exc}")
+            raise
         exact_claim_fields = {
             field
             for document in rag["retrieved_documents"]

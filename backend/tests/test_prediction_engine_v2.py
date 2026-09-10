@@ -1,6 +1,7 @@
 """Focused regressions for the one authoritative payer savings engine."""
 
 import unittest
+from uuid import uuid4
 
 from backend.payer_prediction import (
     build_payer_prediction_for_claim,
@@ -9,7 +10,7 @@ from backend.payer_prediction import (
 from backend.prediction_engine_v2 import build_payer_prediction_for_claim_v2
 
 
-def claim(claim_id, member_id, service_date, paid, *, allowed=None, family="E11", payer="P1",
+def claim(claim_id, member_id, service_date, paid, *, allowed=None, charge=None, family="E11", payer="P1",
           provider="NPI1", pos="11", cpt="99214", units=1, historical=False):
     return {
         "workbookFields": {
@@ -19,6 +20,7 @@ def claim(claim_id, member_id, service_date, paid, *, allowed=None, family="E11"
             "ICD10_Family": family,
             "ICD10_Diagnosis_Code": f"{family}.9",
             "Paid_Amount": paid,
+            "Charge_Amount": paid if charge is None else charge,
             "Allowed_Amount": paid if allowed is None else allowed,
             "Payer_ID": payer,
             "Payer_Name": payer,
@@ -34,7 +36,7 @@ def claim(claim_id, member_id, service_date, paid, *, allowed=None, family="E11"
 
 class Database:
     def __init__(self, selectable, historical=()):
-        self.workbook_hash = f"authoritative-{id(self)}"
+        self.workbook_hash = f"authoritative-{uuid4()}"
         self.selectable_claims = tuple(selectable)
         self.claims = (*self.selectable_claims, *historical)
 
@@ -198,6 +200,69 @@ class AuthoritativePayerEngineTests(unittest.TestCase):
                 {"role": "Other person's matching visit", "claim_id": "PEER", "field": "Paid_Amount", "value": 100.0},
             ],
         )
+
+    def test_claim_anchored_ui_comparison_exposes_recorded_billed_amounts(self):
+        database = Database(
+            [claim("TARGET", "M1", "2026-05-01", 300, charge=900)],
+            [claim("PEER", "M2", "2026-04-01", 100, charge=250, historical=True)],
+        )
+
+        comparison = build_payer_prediction_for_claim(database, "TARGET")["procedure_comparison"]["billed_comparison"]
+
+        self.assertEqual(comparison["basis"], "Charge_Amount")
+        self.assertEqual(comparison["target_visit_billed"], 900.0)
+        self.assertEqual(comparison["peer_visit_billed"], 250.0)
+        self.assertEqual(comparison["possible_billed_difference"], 650.0)
+        self.assertEqual(comparison["formula"], "$900.00 - $250.00 = $650.00")
+        self.assertTrue(comparison["supports_billed_difference"])
+        self.assertFalse(comparison["supports_savings"])
+        self.assertEqual(comparison["evidence_strength"], "strong")
+        self.assertEqual(comparison["source_rows"][0]["field"], "Charge_Amount")
+        self.assertEqual(comparison["source_rows"][0]["claim_id"], "TARGET")
+        self.assertEqual(comparison["source_rows"][0]["value"], 900.0)
+        self.assertEqual(comparison["source_rows"][1]["claim_id"], "PEER")
+        self.assertEqual(comparison["source_rows"][1]["value"], 250.0)
+        self.assertTrue(all(check["matches"] for check in comparison["match_checks"]))
+        audit = comparison["selection_audit"]
+        self.assertEqual(audit["selected_claim_id"], "PEER")
+        self.assertEqual(audit["eligible_episode_count"], 1)
+        self.assertEqual(audit["eligible_claim_count"], 1)
+        self.assertEqual(audit["exact_procedure_episode_count"], 1)
+        self.assertFalse(audit["amounts_used_for_selection"])
+        self.assertIn("Neither billed amount nor paid amount", audit["selection_guardrail"])
+        self.assertEqual(len(audit["plain_language_steps"]), 4)
+        self.assertTrue(audit["episode_candidates"][0]["selected"])
+        self.assertTrue(audit["claim_candidates"][0]["selected"])
+
+    def test_billed_comparison_marks_different_procedure_and_units_as_limited(self):
+        database = Database(
+            [claim("TARGET", "M1", "2026-05-01", 300, charge=900, cpt="96127", units=4)],
+            [claim("PEER", "M2", "2026-04-01", 100, charge=250, cpt="90853", units=1, historical=True)],
+        )
+
+        comparison = build_payer_prediction_for_claim(database, "TARGET")["procedure_comparison"]["billed_comparison"]
+        checks = {check["label"]: check for check in comparison["match_checks"]}
+
+        self.assertEqual(comparison["evidence_strength"], "limited")
+        self.assertFalse(comparison["supports_savings"])
+        self.assertFalse(checks["Procedure code"]["matches"])
+        self.assertFalse(checks["Units"]["matches"])
+        self.assertIn("not strong enough to support a savings conclusion", comparison["limitation"])
+        self.assertIn("No eligible episode contained exact CPT 96127", comparison["selection_audit"]["procedure_filter_reason"])
+
+    def test_peer_selection_does_not_use_billed_or_paid_amount(self):
+        database = Database(
+            [claim("TARGET", "M1", "2026-05-01", 300, charge=900)],
+            [
+                claim("OLDER_CHEAP", "M2", "2026-04-01", 1, charge=1, historical=True),
+                claim("NEWER_EXPENSIVE", "M3", "2026-04-15", 9999, charge=9999, historical=True),
+            ],
+        )
+
+        comparison = build_payer_prediction_for_claim(database, "TARGET")["procedure_comparison"]["billed_comparison"]
+
+        self.assertEqual(comparison["selection_audit"]["selected_claim_id"], "NEWER_EXPENSIVE")
+        self.assertFalse(comparison["selection_audit"]["amounts_used_for_selection"])
 
     def test_multi_claim_episode_uses_proportional_claim_attribution(self):
         database = Database(

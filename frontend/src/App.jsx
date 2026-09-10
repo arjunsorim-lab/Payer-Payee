@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   formatFinancialOpportunityPurpose,
@@ -6,9 +6,11 @@ import {
   formatPredictionRange,
   formatProbability,
 } from './providerLlmFormat.js'
+import { CrossPatientComparatorContent } from './CrossPatientComparator.jsx'
 import {
   Activity,
   ArrowLeft,
+  ArrowLeftRight,
   ArrowRight,
   ArrowUpRight,
   Banknote,
@@ -63,6 +65,7 @@ const navSections = [
     items: [
       { label: 'Patient 360', icon: Users, view: 'member' },
       { label: 'Predictions', icon: TrendingUp, view: 'predictions' },
+      { label: 'Patient Comparison', icon: ArrowLeftRight, view: 'compare' },
       { label: 'Encounters', icon: CalendarDays, view: 'member' },
       { label: 'Claims', icon: FileText, view: 'claims' },
       { label: 'Payments', icon: CircleDollarSign, view: 'member' },
@@ -107,9 +110,12 @@ const LOCAL_API_BASE_URL = 'http://127.0.0.1:4000'
 const RENDER_API_BASE_URL = 'https://payer-payee.onrender.com'
 const CLAIMS_CACHE_PREFIX = 'payerpayee.claims.workbook.'
 const EMPTY_DATE_RANGE = { from: '', to: '' }
-const CLICKABLE_NAV_LABELS = new Set(['Patient 360', 'Predictions', 'Claims'])
-const VALID_VIEWS = new Set(['home', 'member', 'predictions', 'claims'])
-const FEATURED_DEMO_CLAIM_ID = 'CLM00000366'
+const CLICKABLE_NAV_LABELS = new Set(['Patient 360', 'Predictions', 'Claims', 'Patient Comparison'])
+const VALID_VIEWS = new Set(['home', 'member', 'predictions', 'claims', 'compare'])
+const isReferenceClaim = (claim) => Boolean(
+  claim.workbookFields?.Reference_Claim_Flag
+  ?? claim.workbookFields?.reference_claim_flag,
+)
 
 function buildDataModel(claimsData) {
   const defaultDateRange = getDateRange(claimsData)
@@ -196,6 +202,7 @@ function getNavForView(view) {
   if (view === 'member') return 'Patient 360'
   if (view === 'predictions') return 'Predictions'
   if (view === 'claims') return 'Claims'
+  if (view === 'compare') return 'Patient Comparison'
   return 'home'
 }
 
@@ -263,10 +270,6 @@ function formatCompactCurrency(value) {
 
 function formatPercent(value) {
   return `${Number.isFinite(value) ? value.toFixed(1) : '0.0'}%`
-}
-
-function formatRange(range) {
-  return `${formatCurrency(range.low)} - ${formatCurrency(range.high)}`
 }
 
 function formatDate(value) {
@@ -473,7 +476,6 @@ function App() {
   const [workbookSource, setWorkbookSource] = useState(null)
   const [dataLoading, setDataLoading] = useState(true)
   const [dataError, setDataError] = useState('')
-  const dataModel = useMemo(() => ({ ...buildDataModel(claimsData), workbookSource }), [claimsData, workbookSource])
   const routeInitializedRef = useRef(false)
 
   const setRouteState = (route, historyMode = 'push') => {
@@ -627,13 +629,15 @@ function App() {
     })
   }
 
-  const navigate = (view, navKey = view) => {
+  const navigate = useCallback((view, navKey = view) => {
     if (!VALID_VIEWS.has(view)) return
     setRouteState({
       activeView: view,
       activeNav: navKey,
     })
-  }
+  }, [])
+
+  const dataModel = useMemo(() => ({ ...buildDataModel(claimsData), workbookSource, onNavigate: navigate }), [claimsData, workbookSource, navigate])
 
   return (
     <DataContext.Provider value={dataModel}>
@@ -674,6 +678,11 @@ function App() {
               searchQuery={searchQuery}
               onSearchChange={updateSearchQuery}
               onOpenClaim={openClaimDetail}
+            />
+          ) : activeView === 'compare' ? (
+            <CrossPatientComparatorWorkspace
+              onOpenClaim={openClaimDetail}
+              onSelectMember={openMemberDetail}
             />
           ) : (
             <PatientWorkspace
@@ -742,6 +751,7 @@ function Sidebar({ activeNav, onNavigate }) {
 }
 
 function TopBar() {
+  const { onNavigate } = useAppData()
   return (
     <header className="topbar">
       <div className="topbar-welcome">
@@ -749,6 +759,15 @@ function TopBar() {
         <strong>Alex Admin</strong>
       </div>
       <div className="topbar-actions">
+        <button
+          className="topbar-comparator-button"
+          type="button"
+          onClick={() => onNavigate ? onNavigate('compare', 'Patient Comparison') : null}
+          title="Cross-Patient Disease & Spend Comparator"
+        >
+          <ArrowLeftRight size={15} />
+          <span>Compare Patients</span>
+        </button>
         <button className="icon-button has-alert" type="button" aria-label="Notifications">
           <Bell size={19} />
           <span>3</span>
@@ -1152,9 +1171,52 @@ function PayerPredictionModal({ onClose, onOpenProviderForecast }) {
   )
 }
 
-function PayerPredictionResult({ result, evidence, evidenceCount, showAllEvidence, onShowAllEvidence }) {
+function PayerPredictionResult({ result, evidence: _evidence, evidenceCount: _evidenceCount, showAllEvidence: _showAllEvidence, onShowAllEvidence: _onShowAllEvidence }) {
   return <CanonicalClaimPayerPredictionResult result={result} />
 }
+
+function CrossPatientComparatorWorkspace({ onOpenClaim, onSelectMember }) {
+  return (
+    <>
+      <TopBar />
+      <section className="comparator-workspace-page">
+        <CrossPatientComparatorContent
+          onOpenClaim={onOpenClaim}
+          onSelectMember={onSelectMember}
+        />
+      </section>
+    </>
+  )
+}
+
+// eslint-disable-next-line no-unused-vars
+function DualPatientComparatorModal({ onClose, onOpenClaim, onSelectMember }) {
+  useEffect(() => {
+    const onKeyDown = (event) => { if (event.key === 'Escape') onClose?.() }
+    document.addEventListener('keydown', onKeyDown)
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = previousOverflow
+    }
+  }, [onClose])
+
+  return createPortal(
+    <div className="payer-modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose?.() }}>
+      <section className="payer-prediction-modal comparator-modal-container" role="dialog" aria-modal="true">
+        <CrossPatientComparatorContent
+          modalMode
+          onClose={onClose}
+          onOpenClaim={onOpenClaim}
+          onSelectMember={onSelectMember}
+        />
+      </section>
+    </div>,
+    document.body,
+  )
+}
+
 
 function PredictionDetailPage({ claim, onBackToPredictions }) {
   const [scenario, setScenario] = useState(null)
@@ -1215,7 +1277,12 @@ function PredictionDetailPage({ claim, onBackToPredictions }) {
           <RefreshCw size={15} />
         </div>
       </div>
-      <PredictionScenarioMap scenario={scenario} valueBasedCase={valueBasedCase} />
+      <PredictionScenarioMap
+        scenario={scenario}
+        valueBasedCase={valueBasedCase}
+        initialMemberId={claim.memberId}
+        initialDiagnosisCode={claim.diagnosisCode || scenario.actual_claim_facts?.diagnosis_code}
+      />
     </>
   )
 }
@@ -1927,55 +1994,162 @@ function ComparisonEvidenceRecords({ services }) {
 
 function PeerComparisonPredictionSummary({ payerSavings }) {
   const comparison = payerSavings?.procedure_comparison
-  const prediction = comparison?.comparison_prediction
+  const prediction = comparison?.billed_comparison
   if (!comparison?.available || !prediction) return null
 
   const target = comparison.target?.claim || {}
   const peer = comparison.peer?.claim || {}
   const matchLabels = Object.values(comparison.matches || {}).filter(Boolean)
   const sourceRows = prediction.source_rows || []
+  const evidenceChecks = prediction.match_checks || []
+  const selectionAudit = prediction.selection_audit
+  const source = prediction.source || {}
+  const evidenceIsLimited = prediction.evidence_strength === 'limited'
+  const displayEvidenceValue = (value) => value === null || value === undefined || value === '' ? 'Not recorded' : String(value)
 
   return (
     <section className="peer-comparison-prediction" aria-labelledby="peer-comparison-prediction-heading">
       <header>
-        <span>Payer comparison prediction</span>
-        <h2 id="peer-comparison-prediction-heading">Possible amount to save from two similar visits</h2>
-        <p>This amount uses only the two visits shown in the comparison below.</p>
+        <span>Claim-anchored billed comparison</span>
+        <h2 id="peer-comparison-prediction-heading">Billed amount comparison for this visit</h2>
+        <p>This is the only patient comparison shown on this page. It is anchored to the selected claim and one eligible matching visit.</p>
       </header>
 
       <div className="peer-comparison-prediction-grid">
         <div>
           <span>This person’s visit</span>
-          <strong>{formatOptionalCurrency(prediction.target_visit_paid)}</strong>
-          <small>Recorded Paid_Amount on claim {target.claim_id} · {target.procedure_description || target.cpt}</small>
+          <strong>{formatOptionalCurrency(prediction.target_visit_billed)}</strong>
+          <small>Recorded Charge_Amount on claim {target.claim_id} · {target.procedure_description || target.cpt}</small>
         </div>
         <div>
           <span>Other person’s matching visit</span>
-          <strong>{formatOptionalCurrency(prediction.peer_visit_paid)}</strong>
-          <small>Recorded Paid_Amount on claim {peer.claim_id} · {peer.procedure_description || peer.cpt}</small>
+          <strong>{formatOptionalCurrency(prediction.peer_visit_billed)}</strong>
+          <small>Recorded Charge_Amount on claim {peer.claim_id} · {peer.procedure_description || peer.cpt}</small>
         </div>
         <div className="peer-comparison-prediction-total">
-          <span>Possible payer amount to save</span>
-          <strong>{formatOptionalCurrency(prediction.possible_payer_spend_difference)}</strong>
-          <small>Needs a clinical and billing review</small>
+          <span>Predicted payment savings</span>
+          <strong>{formatOptionalCurrency(prediction.possible_billed_difference)}</strong>
+          <small>Estimated from the billed-amount difference between these two visits</small>
         </div>
       </div>
 
       <code className="peer-comparison-formula">{prediction.formula}</code>
       <p className="peer-comparison-formula-note">
-        Only the two selected visits are used above. Earlier bills shown below are context and are not added to either visit amount.
+        This formula verifies the arithmetic only. The evidence below verifies the source fields and whether the visits are sufficiently alike.
       </p>
+      <div className={`comparison-evidence-status ${evidenceIsLimited ? 'limited' : 'strong'}`} role="status">
+        <strong>{evidenceIsLimited ? 'Limited comparison evidence — not a savings result' : 'Source-backed billed comparison'}</strong>
+        <p>{prediction.limitation}</p>
+        <span>
+          Billed difference supported: <strong>{prediction.supports_billed_difference ? 'Yes' : 'No'}</strong>
+          {' · '}Savings supported: <strong>{prediction.supports_savings ? 'Yes' : 'No'}</strong>
+        </span>
+      </div>
       {sourceRows.length ? (
         <div className="peer-comparison-sources">
-          <strong>Where these numbers came from</strong>
-          <ul>
-            {sourceRows.map((source) => (
-              <li key={`${source.claim_id}-${source.role}`}>
-                {formatOptionalCurrency(source.value)} is the <code>{source.field}</code> recorded on claim <strong>{source.claim_id}</strong> ({source.role.toLowerCase()}).
-              </li>
-            ))}
-          </ul>
+          <div className="peer-comparison-source-heading">
+            <div>
+              <strong>Exact source rows used in the calculation</strong>
+              <p>Each amount below is read directly from the named field on the named claim.</p>
+            </div>
+            <small>
+              Workbook: <strong>{source.workbook_name || 'Current claims workbook'}</strong>
+              {source.workbook_hash_short ? <> · hash <code>{source.workbook_hash_short}</code></> : null}
+            </small>
+          </div>
+          <div className="comparison-evidence-table-wrap">
+            <table className="comparison-evidence-table">
+              <thead>
+                <tr><th>Role</th><th>Claim / service date</th><th>Diagnosis</th><th>Procedure / units</th><th>Payer / provider / POS</th><th>Source field</th><th>Billed amount used</th></tr>
+              </thead>
+              <tbody>
+                {sourceRows.map((row) => (
+                  <tr key={`${row.claim_id}-${row.role}`}>
+                    <td><strong>{row.role}</strong>{row.historical_reference ? <small>Historical reference</small> : <small>Selected claim</small>}</td>
+                    <td><strong>{row.claim_id}</strong><small>{formatDate(row.service_date)} · member {row.member_id}</small></td>
+                    <td><strong>{displayEvidenceValue(row.diagnosis_code)}</strong></td>
+                    <td><strong>{displayEvidenceValue(row.procedure_code)} · {displayEvidenceValue(row.units)} unit(s)</strong><small>{row.procedure_description || 'No description recorded'}</small></td>
+                    <td><strong>{displayEvidenceValue(row.payer_id)}</strong><small>Provider {displayEvidenceValue(row.provider_npi)} · POS {displayEvidenceValue(row.place_of_service)}</small></td>
+                    <td><code>{row.field}</code></td>
+                    <td><strong>{formatOptionalCurrency(row.value)}</strong></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
+      ) : null}
+      {evidenceChecks.length ? (
+        <div className="peer-comparison-checks">
+          <strong>Do the comparison fields actually match?</strong>
+          <div className="comparison-evidence-table-wrap">
+            <table className="comparison-evidence-table comparison-match-table">
+              <thead><tr><th>Evidence check</th><th>This claim</th><th>Peer claim</th><th>Result</th></tr></thead>
+              <tbody>
+                {evidenceChecks.map((check) => (
+                  <tr key={check.label}>
+                    <td>{check.label}</td><td>{displayEvidenceValue(check.target)}</td><td>{displayEvidenceValue(check.peer)}</td>
+                    <td><span className={`comparison-match-result ${check.matches ? 'match' : 'different'}`}>{check.matches ? 'Match' : 'Different'}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+      {selectionAudit ? (
+        <section className="peer-selection-audit" aria-labelledby="peer-selection-audit-heading">
+          <div className="peer-selection-audit-heading">
+            <div><span>Peer selection audit</span><h3 id="peer-selection-audit-heading">Why this claim was chosen instead of the other claims</h3></div>
+            <strong>Selected: {selectionAudit.selected_claim_id}</strong>
+          </div>
+          <div className="peer-selection-summary">
+            <div><span>Comparison rule</span><strong>Scenario {selectionAudit.scenario_number}: {selectionAudit.scenario_name}</strong></div>
+            <div><span>Eligible candidate pool</span><strong>{selectionAudit.eligible_episode_count} episodes · {selectionAudit.eligible_claim_count} claims</strong></div>
+            <div><span>Exact CPT candidates</span><strong>{selectionAudit.exact_procedure_episode_count}</strong></div>
+          </div>
+          <ol className="peer-selection-plain-language">
+            {(selectionAudit.plain_language_steps || []).map((step, index) => (
+              <li key={step.title}><span>{index + 1}</span><div><strong>{step.title}</strong><p>{step.text}</p></div></li>
+            ))}
+          </ol>
+          <div className="peer-selection-guardrail"><strong>The price did not choose the peer</strong><p>{selectionAudit.selection_guardrail}</p></div>
+          <div className={`peer-selection-bottom-line ${evidenceIsLimited ? 'limited' : ''}`}>
+            <strong>Bottom line</strong>
+            <p>{evidenceIsLimited
+              ? `${selectionAudit.selected_claim_id} is the closest available peer under the chosen rule, but it is not an exact equivalent. Use the billed difference only as a review flag—not as savings.`
+              : `${selectionAudit.selected_claim_id} is the highest-ranked eligible peer. Review is still required before treating the billed difference as savings.`}</p>
+          </div>
+          <details>
+            <summary>View full episode ranking</summary>
+            <p className="peer-selection-priority"><strong>Ranking order:</strong> {selectionAudit.episode_ranking_priority}</p>
+            <div className="comparison-evidence-table-wrap"><table className="comparison-evidence-table peer-selection-table">
+              <thead><tr><th>Rank</th><th>Episode / representative claim</th><th>Period</th><th>Similarity</th><th>Exact diagnosis</th><th>Procedure</th><th>Similar units present</th><th>Decision</th></tr></thead>
+              <tbody>{(selectionAudit.episode_candidates || []).map((candidate) => (
+                <tr key={candidate.episode_id} className={candidate.selected ? 'selected-candidate' : ''}>
+                  <td>#{candidate.rank}</td><td><strong>{candidate.representative_claim_id}</strong><small>{candidate.episode_id}</small></td>
+                  <td>{formatDate(candidate.episode_start)}–{formatDate(candidate.episode_end)}</td><td><strong>{candidate.similarity_score}%</strong></td>
+                  <td>{candidate.exact_diagnosis_match ? 'Yes' : 'No'}</td><td>{candidate.exact_or_family_procedure_match ? 'Match' : 'Different'}</td>
+                  <td>{candidate.similar_units_present ? 'Yes' : 'No'}</td><td><span className={`comparison-match-result ${candidate.selected ? 'match' : 'different'}`}>{candidate.selected ? 'Selected episode' : 'Ranked lower'}</span></td>
+                </tr>
+              ))}</tbody>
+            </table></div>
+          </details>
+          <details>
+            <summary>View full claim ranking</summary>
+            <p className="peer-selection-priority"><strong>Ranking order:</strong> {selectionAudit.claim_ranking_priority}</p>
+            <div className="comparison-evidence-table-wrap"><table className="comparison-evidence-table peer-selection-table">
+              <thead><tr><th>Rank</th><th>Claim / date</th><th>ICD-10</th><th>CPT</th><th>Units</th><th>Billed</th><th>Decision</th></tr></thead>
+              <tbody>{(selectionAudit.claim_candidates || []).map((candidate) => (
+                <tr key={candidate.claim_id} className={candidate.selected ? 'selected-candidate' : ''}>
+                  <td>#{candidate.rank}</td><td><strong>{candidate.claim_id}</strong><small>{formatDate(candidate.service_date)}</small></td>
+                  <td>{candidate.diagnosis_code}</td><td>{candidate.procedure_code}</td><td>{candidate.units}</td><td>{formatOptionalCurrency(candidate.billed_amount)}</td>
+                  <td><strong>{candidate.selected ? 'Selected' : 'Not selected'}</strong><small>{candidate.decision}</small></td>
+                </tr>
+              ))}</tbody>
+            </table></div>
+          </details>
+        </section>
       ) : null}
       <p className="peer-comparison-explanation">{prediction.reason}</p>
       {matchLabels.length ? (
@@ -1984,13 +2158,12 @@ function PeerComparisonPredictionSummary({ payerSavings }) {
           {matchLabels.map((label) => <span key={label}>{label}</span>)}
         </div>
       ) : null}
-      <p className="peer-comparison-confirmed">
-        Confirmed saved amount: {formatOptionalCurrency(prediction.confirmed_savings)} until a reviewer confirms that the difference was avoidable.
-      </p>
+      <p className="peer-comparison-confirmed">This predicted payment savings amount is based on the billed-amount difference between the selected claim and its comparison visit.</p>
     </section>
   )
 }
 
+// eslint-disable-next-line no-unused-vars
 function ValueBasedRectificationCase({ valueBasedCase }) {
   if (!valueBasedCase) return null
 
@@ -2032,6 +2205,8 @@ function ValueBasedRectificationCase({ valueBasedCase }) {
   const improved = valueBasedCase.improved_claim || prediction
   const calculation = valueBasedCase.calculation || {}
   const claimsIncluded = valueBasedCase.claims_included || []
+  // Potentially avoidable repeat spend exposure is intentionally shown only
+  // through the canonical calculation fields in the rendered case summary.
   const patternClues = (valueBasedCase.reference_selection?.evidence || []).map((clue) => ({
     'same member': 'The bills are for the same person.',
     'same payer': 'The same insurance company is involved.',
@@ -2149,6 +2324,7 @@ function ValueBasedRectificationCase({ valueBasedCase }) {
   )
 }
 
+// eslint-disable-next-line no-unused-vars
 function PayerProcedureComparison({ payerSavings }) {
   const comparison = payerSavings?.procedure_comparison
   if (!comparison) return null
@@ -2256,6 +2432,7 @@ function PayerProcedureComparison({ payerSavings }) {
   )
 }
 
+// eslint-disable-next-line no-unused-vars
 function OrganSystemComparativeSavingsCard({ scenario, facts }) {
   const targetOrgan = getOrganSystemInfo(facts.diagnosis_code, facts.diagnosis_description)
 
@@ -2571,12 +2748,11 @@ function OrganSystemComparativeSavingsCard({ scenario, facts }) {
   )
 }
 
-function PredictionScenarioMap({ scenario, valueBasedCase: loadedValueBasedCase }) {
+function PredictionScenarioMap({ scenario }) {
   const facts = scenario.actual_claim_facts
   const summary = scenario.supported_money_summary
   const snapshot = scenario.financial_prediction_snapshot
   const payerSavings = scenario.payer_savings_prediction
-  const valueBasedCase = loadedValueBasedCase || scenario.value_based_case
   const historicalPeerCount = snapshot.peer_sample_size ?? scenario.historical_comparison?.sample_size ?? 0
   const suggestedReviewLabel = summary.best_action?.type === 'patient_balance'
     ? 'Patient balance and payment plan'
@@ -2619,7 +2795,7 @@ function PredictionScenarioMap({ scenario, valueBasedCase: loadedValueBasedCase 
         <span className="priority-chip">First thing to check: {suggestedReviewLabel}</span>
       </header>
 
-      {payerSavings?.available === false ? (
+      {payerSavings?.available === false && !payerSavings?.procedure_comparison?.available ? (
         <aside className="payer-savings-availability" role="status">
           <ShieldAlert size={22} />
           <div>
@@ -2632,8 +2808,6 @@ function PredictionScenarioMap({ scenario, valueBasedCase: loadedValueBasedCase 
       ) : null}
 
       <PeerComparisonPredictionSummary payerSavings={payerSavings} />
-      <PayerProcedureComparison payerSavings={payerSavings} />
-      <ValueBasedRectificationCase valueBasedCase={valueBasedCase} />
 
       <PlainLanguageClaimNarrative
         scenario={scenario}
@@ -2776,7 +2950,7 @@ function WorkbookFinancialPredictionCard({ claim }) {
   )
 }
 
-function EncounterSearch({ searchQuery, onSearchChange, onSelectMember, onOpenClaim }) {
+function EncounterSearch({ searchQuery, onSearchChange, onSelectMember: _onSelectMember, onOpenClaim: _onOpenClaim }) {
   const { claimsData } = useAppData()
   const [statusFilter, setStatusFilter] = useState('All Statuses')
   const [currentPage, setCurrentPage] = useState(1)
@@ -2793,8 +2967,8 @@ function EncounterSearch({ searchQuery, onSearchChange, onSelectMember, onOpenCl
     }), [claimsData, normalizedQuery, statusFilter])
   const featuredEncounterFirst = useMemo(() => (
     [...filteredEncounters].sort((left, right) => {
-      const leftIsFeaturedClaim = left.claimId === FEATURED_DEMO_CLAIM_ID
-      const rightIsFeaturedClaim = right.claimId === FEATURED_DEMO_CLAIM_ID
+      const leftIsFeaturedClaim = isReferenceClaim(left)
+      const rightIsFeaturedClaim = isReferenceClaim(right)
       if (leftIsFeaturedClaim !== rightIsFeaturedClaim) {
         return leftIsFeaturedClaim ? -1 : 1
       }
@@ -2971,7 +3145,7 @@ function DiseaseOverviewTable({ conditions, totalClaimsCount, onOpenPrediction, 
 
   const totalAllowedSum = conditions.reduce((acc, c) => acc + c.totalAllowed, 0);
   const riskLevel = totalAllowedSum > 50000 || totalConditions >= 4 ? 'High' : (totalAllowedSum > 15000 || totalConditions >= 2 ? 'Medium' : 'Low');
-  const featuredDemoClaim = memberClaims.find((claim) => claim.claimId === FEATURED_DEMO_CLAIM_ID);
+  const featuredDemoClaim = memberClaims.find(isReferenceClaim);
 
   // Helper for sparklines based on real claim allowed amounts
   const generateSparkline = (item) => {
@@ -3123,6 +3297,7 @@ function DiseaseOverviewTable({ conditions, totalClaimsCount, onOpenPrediction, 
   )
 }
 
+// eslint-disable-next-line no-unused-vars
 function MemberFinancialPredictionSidebar({ member, latestClaim, payerCohortSavings, onOpenPrediction, onBackToEncounters, onOpenClaim }) {
   const [windowDays, setWindowDays] = useState(365)
   const [prediction, setPrediction] = useState(null)
@@ -3144,9 +3319,12 @@ function MemberFinancialPredictionSidebar({ member, latestClaim, payerCohortSavi
     }
   }
 
+  // This legacy sidebar is not mounted by the active routes.
+  /* oxlint-disable react-hooks/exhaustive-deps */
   useEffect(() => {
     loadPrediction(windowDays)
   }, [member.memberId, windowDays])
+  /* oxlint-enable react-hooks/exhaustive-deps */
 
   const forecast = prediction?.forecast || {}
   const historicalCohort = prediction?.historical_cohort || {}
@@ -3475,7 +3653,7 @@ function MemberFinancialPredictionSidebar({ member, latestClaim, payerCohortSavi
   )
 }
 
-function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMember, onOpenClaim, onOpenPrediction }) {
+function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMember: _onSelectMember, onOpenClaim: _onOpenClaim, onOpenPrediction }) {
   const { defaultDateRange } = useAppData()
   const latestClaim = selectedClaim || member.latestClaim
   const [memberMoney, setMemberMoney] = useState(null)
@@ -3498,19 +3676,7 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
   }, [member.claims, selectedCondition])
 
   const memberEncountersPageCount = Math.max(1, Math.ceil(filteredMemberClaims.length / memberEncountersPageSize))
-  const safeMemberEncountersPage = Math.min(memberEncountersPage, memberEncountersPageCount)
-  const memberClaimsPage = useMemo(
-    () => (selectedCondition
-      ? filteredMemberClaims.slice(
-        (safeMemberEncountersPage - 1) * memberEncountersPageSize,
-        safeMemberEncountersPage * memberEncountersPageSize,
-      )
-      : member.claims.slice(
-        (safeMemberEncountersPage - 1) * memberEncountersPageSize,
-        safeMemberEncountersPage * memberEncountersPageSize,
-      )),
-    [member.claims, filteredMemberClaims, selectedCondition, safeMemberEncountersPage],
-  )
+  const _safeMemberEncountersPage = Math.min(memberEncountersPage, memberEncountersPageCount)
   const memberStats = buildMemberStats(member, memberMoney, payerCohortSavings)
 
   useEffect(() => {
@@ -3541,8 +3707,6 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
       })
     return () => { active = false }
   }, [member.memberId, member.supportedMoneySummary])
-
-  const activeConditionObj = memberConditions.find((c) => c.key === selectedCondition)
 
   return (
     <div className="patient-360-container">
@@ -3807,6 +3971,7 @@ function SectionTitle({ title, action, onAction }) {
   )
 }
 
+// eslint-disable-next-line no-unused-vars
 function MetricCard({ label, value, delta, dir = 'up', note, compact = false }) {
   const TrendIcon = dir === 'down' ? TrendingDown : TrendingUp
 
@@ -4073,6 +4238,7 @@ function RecentEncounters({
   )
 }
 
+// eslint-disable-next-line no-unused-vars
 function ClaimTimeline({ claim }) {
   const steps = [
     [formatDate(claim.dos), 'Encounter', claim.placeOfService, 'done'],
@@ -4100,6 +4266,7 @@ function ClaimTimeline({ claim }) {
   )
 }
 
+// eslint-disable-next-line no-unused-vars
 function ProviderInformation({ claim }) {
   const providerRows = [
     { icon: Hospital, title: 'Billing Provider', value: claim.billingProvider, note: `NPI ${claim.billingProviderNpi}` },
@@ -4143,6 +4310,7 @@ function ProviderInformation({ claim }) {
   )
 }
 
+// eslint-disable-next-line no-unused-vars
 function ProviderKpis({ claim }) {
   const { claimsData } = useAppData()
   const providerKpis = buildProviderKpis(claim, claimsData)
@@ -4166,6 +4334,7 @@ function ProviderKpis({ claim }) {
   )
 }
 
+// eslint-disable-next-line no-unused-vars
 function ProviderLlmPanel({ claim, onCasePrediction }) {
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
@@ -4223,7 +4392,9 @@ function ProviderLlmPanel({ claim, onCasePrediction }) {
   )
 }
 
-function ProviderLlmModal({ claim, result, loading, error, onClose, onRetry, onOpenProviderForecast }) {
+function ProviderLlmModal({ claim: _claim, result, loading, error, onClose, onRetry, onOpenProviderForecast }) {
+  // This component is legacy and not mounted in the active routes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const onKeyDown = (event) => { if (event.key === 'Escape') onClose() }
     document.addEventListener('keydown', onKeyDown)
@@ -4366,6 +4537,7 @@ function CanonicalClaimPayerPredictionResult({ result }) {
   )
 }
 
+// eslint-disable-next-line no-unused-vars
 function LegacyClaimPayerPredictionResult({ result }) {
   const [showAllEvidence, setShowAllEvidence] = useState(false)
   if (result.scenario_selection) return <CanonicalClaimPayerPredictionResult result={result} />
@@ -4374,7 +4546,7 @@ function LegacyClaimPayerPredictionResult({ result }) {
   const target = result.target || {}
   const cohort = result.historical_cohort || {}
   const quality = result.cohort_quality || {}
-  const utilization = result.utilization || {}
+  const _utilization = result.utilization || {}
   const cptAnalysis = result.cpt_analysis || []
   const savings = result.potential_savings || {}
   const evidence = result.evidence || []
@@ -4536,6 +4708,7 @@ function ClaimPayerPredictionResult({ result }) {
   return <CanonicalClaimPayerPredictionResult result={result} />
 }
 
+// eslint-disable-next-line no-unused-vars
 function ProviderRenderPredictionResult({ result }) {
   const forecast = result.forecast || {}
   const facts = result.actual_claim_facts || {}
@@ -5728,6 +5901,7 @@ function PredictionMethodPanel({ totalCount, scenarioCount, model }) {
   )
 }
 
+// eslint-disable-next-line no-unused-vars
 function RiskBadge({ level, score }) {
   return (
     <span className={`risk-badge ${level.toLowerCase()}`}>

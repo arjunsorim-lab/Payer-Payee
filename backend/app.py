@@ -28,6 +28,7 @@ try:
         run_payer_temporal_backtest,
     )
     from .value_based_case import build_value_based_case_for_claim
+    from .patient_comparison import build_same_patient_billed_intervention_savings, compare_patients, discover_comparable_pairs
     from .provider_prediction import build_provider_prediction_payload, find_case
     from .workbook_enrichment import load_workbook_database, read_savings_workbook
     from .workbook_llm import generate_workbook_chat_answer, generate_workbook_prediction_explanation
@@ -56,6 +57,7 @@ except ImportError:
         run_payer_temporal_backtest,
     )
     from value_based_case import build_value_based_case_for_claim
+    from patient_comparison import build_same_patient_billed_intervention_savings, compare_patients, discover_comparable_pairs
     from provider_prediction import build_provider_prediction_payload, find_case
     from workbook_enrichment import load_workbook_database, read_savings_workbook
     from workbook_llm import generate_workbook_chat_answer, generate_workbook_prediction_explanation
@@ -695,7 +697,7 @@ def generate_claim_anchored_payer_prediction(claim_number):
 
 @app.get("/api/predictions/value-based-case/<claim_number>")
 def get_value_based_case(claim_number):
-    """Return the claims-only rectification scenario for one selected claim."""
+    """Evaluate a reference anchor or later claim using the configured workbook."""
     database = configured_workbook_database()
     if not database:
         return json_response({"message": "Configured workbook is required."}, 409)
@@ -705,6 +707,47 @@ def get_value_based_case(claim_number):
         return json_response({"message": str(error)}, 404)
     except ValueError as error:
         return json_response({"message": str(error)}, 422)
+
+
+@app.get("/api/claims/comparable-pairs")
+def get_comparable_pairs():
+    """Discover patients that share a disease family for cross-patient comparison."""
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Configured workbook is required."}, 409)
+    return json_response(discover_comparable_pairs(database))
+
+
+@app.get("/api/claims/compare-patients")
+def get_compare_patients():
+    """Compare two patients with the same disease family and return savings."""
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Configured workbook is required."}, 409)
+    member_1 = request.args.get("member_id_1", "").strip()
+    member_2 = request.args.get("member_id_2", "").strip()
+    family = request.args.get("diagnosis_family", "").strip()
+    if not member_1 or not member_2 or not family:
+        return json_response({"message": "member_id_1, member_id_2, and diagnosis_family are required."}, 400)
+    try:
+        return json_response(compare_patients(database, member_1, member_2, family))
+    except KeyError as error:
+        return json_response({"message": str(error)}, 404)
+    except ValueError as error:
+        return json_response({"message": str(error)}, 422)
+
+
+@app.get("/api/claims/same-patient-billed-savings")
+def get_same_patient_billed_savings():
+    """Evaluate the UTI culture scenario using same-patient episode billed charges."""
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Configured workbook is required."}, 409)
+    member_id = request.args.get("member_id", "").strip()
+    family = request.args.get("diagnosis_family", "").strip()
+    if not member_id or not family:
+        return json_response({"message": "member_id and diagnosis_family are required."}, 400)
+    return json_response(build_same_patient_billed_intervention_savings(database, member_id, family))
 
 
 @app.get("/api/payer-prediction/<member_id>")

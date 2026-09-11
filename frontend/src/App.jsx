@@ -6,7 +6,7 @@ import {
   formatPredictionRange,
   formatProbability,
 } from './providerLlmFormat.js'
-import { CrossPatientComparatorContent } from './CrossPatientComparator.jsx'
+import { CrossPatientComparatorContent, SamePatientBilledSavings } from './CrossPatientComparator.jsx'
 import {
   Activity,
   ArrowLeft,
@@ -512,9 +512,17 @@ function App() {
     // prediction engine. Detailed financial calculations remain available from
     // the member, claim, and prediction endpoints when the user opens a record.
     fetchJson('/api/claims?limit=2000&includeFinancial=false&compact=true')
-      .then((payload) => {
+      .then(async (payload) => {
         if (!active) return
-        const items = payload.items || []
+        const firstPageItems = payload.items || []
+        const remaining = Math.max(0, Number(payload.total || 0) - firstPageItems.length)
+        const additionalPages = remaining
+          ? await Promise.all(Array.from({ length: Math.ceil(remaining / 2000) }, (_, index) => (
+            fetchJson(`/api/claims?page=${index + 2}&limit=2000&includeFinancial=false&compact=true`)
+          )))
+          : []
+        if (!active) return
+        const items = [...firstPageItems, ...additionalPages.flatMap((page) => page.items || [])]
         const source = payload.source || null
         setClaimsData(items)
         setWorkbookSource(source)
@@ -1992,6 +2000,7 @@ function ComparisonEvidenceRecords({ services }) {
   )
 }
 
+// eslint-disable-next-line no-unused-vars
 function PeerComparisonPredictionSummary({ payerSavings }) {
   const comparison = payerSavings?.procedure_comparison
   const prediction = comparison?.billed_comparison
@@ -2010,10 +2019,17 @@ function PeerComparisonPredictionSummary({ payerSavings }) {
   return (
     <section className="peer-comparison-prediction" aria-labelledby="peer-comparison-prediction-heading">
       <header>
-        <span>Claim-anchored billed comparison</span>
-        <h2 id="peer-comparison-prediction-heading">Billed amount comparison for this visit</h2>
-        <p>This is the only patient comparison shown on this page. It is anchored to the selected claim and one eligible matching visit.</p>
+        <span>Optional different-member peer check</span>
+        <h2 id="peer-comparison-prediction-heading">Other-person billed comparison</h2>
+        <small>Billed amount comparison for this visit</small>
+        <p>This applies the spreadsheet review structure to the selected claim: identify the anchored episode, select the closest related episode from the evidence pool, use only each claim’s recorded billed amount, and show the evidence before displaying the difference.</p>
       </header>
+
+      <div className="claim-template-steps" aria-label="Spreadsheet template steps">
+        <div><strong>1</strong><span><b>Anchor</b>{target.claim_id || 'Selected claim'}<small>Selected claim and billed amount</small></span></div>
+        <div><strong>2</strong><span><b>Related claim</b>{peer.claim_id || 'Evidence-ranked peer'}<small>Chosen from the eligible comparison pool</small></span></div>
+        <div><strong>3</strong><span><b>Calculate</b>Recorded billed amounts<small>Difference shown only after source evidence</small></span></div>
+      </div>
 
       <div className="peer-comparison-prediction-grid">
         <div>
@@ -2033,12 +2049,13 @@ function PeerComparisonPredictionSummary({ payerSavings }) {
         </div>
       </div>
 
+      <div className="claim-template-formula-label">Template calculation used for this claim</div>
       <code className="peer-comparison-formula">{prediction.formula}</code>
       <p className="peer-comparison-formula-note">
-        This formula verifies the arithmetic only. The evidence below verifies the source fields and whether the visits are sufficiently alike.
+        The formula verifies the arithmetic only. The evidence below verifies the source fields, why this claim was selected, and whether the visits are sufficiently alike. A billed difference is not automatically a quality improvement or confirmed savings.
       </p>
       <div className={`comparison-evidence-status ${evidenceIsLimited ? 'limited' : 'strong'}`} role="status">
-        <strong>{evidenceIsLimited ? 'Limited comparison evidence — not a savings result' : 'Source-backed billed comparison'}</strong>
+        <strong>{evidenceIsLimited ? 'Not an accurate comparison — review-only estimate' : 'Source-backed billed comparison'}</strong>
         <p>{prediction.limitation}</p>
         <span>
           Billed difference supported: <strong>{prediction.supports_billed_difference ? 'Yes' : 'No'}</strong>
@@ -2748,7 +2765,7 @@ function OrganSystemComparativeSavingsCard({ scenario, facts }) {
   )
 }
 
-function PredictionScenarioMap({ scenario }) {
+function PredictionScenarioMap({ scenario, initialMemberId, initialDiagnosisCode }) {
   const facts = scenario.actual_claim_facts
   const summary = scenario.supported_money_summary
   const snapshot = scenario.financial_prediction_snapshot
@@ -2807,8 +2824,14 @@ function PredictionScenarioMap({ scenario }) {
         </aside>
       ) : null}
 
-      <PeerComparisonPredictionSummary payerSavings={payerSavings} />
-
+      <section aria-label="Claim-anchored billed comparison">
+        <SamePatientBilledSavings
+          memberId={initialMemberId || facts.member_id || scenario.member_id}
+          diagnosisCode={initialDiagnosisCode || facts.diagnosis_code}
+          claimId={scenario.claim_id}
+          claimAnchored
+        />
+      </section>
       <PlainLanguageClaimNarrative
         scenario={scenario}
         facts={facts}
@@ -2950,7 +2973,7 @@ function WorkbookFinancialPredictionCard({ claim }) {
   )
 }
 
-function EncounterSearch({ searchQuery, onSearchChange, onSelectMember: _onSelectMember, onOpenClaim: _onOpenClaim }) {
+function EncounterSearch({ searchQuery, onSearchChange, onSelectMember, onOpenClaim }) {
   const { claimsData } = useAppData()
   const [statusFilter, setStatusFilter] = useState('All Statuses')
   const [currentPage, setCurrentPage] = useState(1)

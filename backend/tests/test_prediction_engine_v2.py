@@ -234,7 +234,7 @@ class AuthoritativePayerEngineTests(unittest.TestCase):
         self.assertTrue(audit["episode_candidates"][0]["selected"])
         self.assertTrue(audit["claim_candidates"][0]["selected"])
 
-    def test_billed_comparison_marks_different_procedure_and_units_as_limited(self):
+    def test_billed_comparison_discloses_when_procedure_and_units_differ(self):
         database = Database(
             [claim("TARGET", "M1", "2026-05-01", 300, charge=900, cpt="96127", units=4)],
             [claim("PEER", "M2", "2026-04-01", 100, charge=250, cpt="90853", units=1, historical=True)],
@@ -247,8 +247,7 @@ class AuthoritativePayerEngineTests(unittest.TestCase):
         self.assertFalse(comparison["supports_savings"])
         self.assertFalse(checks["Procedure code"]["matches"])
         self.assertFalse(checks["Units"]["matches"])
-        self.assertIn("not strong enough to support a savings conclusion", comparison["limitation"])
-        self.assertIn("No eligible episode contained exact CPT 96127", comparison["selection_audit"]["procedure_filter_reason"])
+        self.assertIn("not an accurate comparison", comparison["limitation"])
 
     def test_peer_selection_does_not_use_billed_or_paid_amount(self):
         database = Database(

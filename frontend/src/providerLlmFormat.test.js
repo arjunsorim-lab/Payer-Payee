@@ -111,7 +111,7 @@ test('provider forecast shows one claim-anchored billed comparison', () => {
   assert.match(app, /prediction\.match_checks/)
   assert.match(app, /prediction\.limitation/)
   assert.match(app, /Savings supported:/)
-  assert.match(app, /Limited comparison evidence — not a savings result/)
+  assert.match(app, /Not an accurate comparison — review-only estimate/)
   assert.match(app, /Predicted payment savings/)
   assert.match(app, /predicted payment savings amount is based on the billed-amount difference/)
   assert.match(app, /Peer selection audit/)

@@ -246,7 +246,10 @@ def discover_comparable_pairs(database):
     Returns a structure grouped by organ system and then by disease family,
     with each family listing the members that have episodes for it.
     """
-    claims = [c for c in database.selectable_claims if not _is_historical_reference(c)]
+    # The selector is an evidence directory: include every member with this
+    # disease family, including historical-reference records. The response
+    # identifies those rows so reviewers can distinguish reference evidence.
+    claims = list(database.claims)
     episodes = _build_episodes(claims)
 
     # Group episodes by family
@@ -286,6 +289,11 @@ def discover_comparable_pairs(database):
                 "total_paid": _money(sum(ep["total_paid"] for ep in member_episodes)),
                 "total_billed": _money(sum(ep["total_billed"] for ep in member_episodes)),
                 "claim_count": sum(ep["claim_count"] for ep in member_episodes),
+                "historical_reference_claim_count": sum(
+                    int(_is_historical_reference(original))
+                    for original in claims
+                    if _member_id(original) == mid and _family(original) == fam
+                ),
             })
         organ_groups[organ].append({
             "diagnosis_family": fam,
@@ -319,7 +327,7 @@ def compare_patients(database, member_id_1, member_id_2, diagnosis_family):
     if member_id_1 == member_id_2:
         raise ValueError("The two patients must be different members.")
 
-    claims = [c for c in database.selectable_claims if not _is_historical_reference(c)]
+    claims = list(database.claims)
     episodes = _build_episodes(claims)
 
     # Find episodes for each member in this disease family
@@ -401,7 +409,7 @@ def compare_patients(database, member_id_1, member_id_2, diagnosis_family):
         },
         "service_divergence": divergence,
         "clinical_review_required": True,
-        "disclaimer": "This comparison shows claims-based cost differences between two patients with the same condition. Differences may reflect clinical necessity, severity variation, or care pathway choices. Clinical review is required before attributing savings.",
+        "disclaimer": "This comparison shows claims-based billed-cost differences between two patients with the same condition. Historical-reference claims may be included when they are the only available evidence. Differences may reflect clinical necessity, severity variation, or care pathway choices. Clinical review is required before attributing savings.",
         "source": database.source_banner(),
     }
 
@@ -419,7 +427,55 @@ def _is_uti_culture_line(claim_summary):
     )
 
 
-def build_same_patient_billed_intervention_savings(database, member_id, diagnosis_family):
+_TEMPLATE_INTERVENTION_TERMS = (
+    "culture", "specimen", "imaging", "scan", "x-ray", "ultrasound", "mri", "ct ",
+    "laboratory", "lab ", "test", "screening", "therapy", "injection", "infusion",
+    "procedure", "surgery", "medication", "counsel", "follow-up", "follow up", "evaluation",
+)
+
+
+def _is_template_intervention_line(line, earlier_lines):
+    """Apply the spreadsheet pattern to a distinct, reviewable later service line."""
+    cpt = _text(line.get("cpt"))
+    description = _text(line.get("procedure_description")).lower()
+    earlier_keys = {(_text(item.get("cpt")), _text(item.get("procedure_description")).lower()) for item in earlier_lines}
+    if (cpt, description) in earlier_keys:
+        return False
+    return bool(cpt or description) and any(term in description for term in _TEMPLATE_INTERVENTION_TERMS)
+
+
+def _incremental_unit_intervention_lines(earlier, later):
+    """Return separately billed additional units when no new CPT line exists."""
+    derived = []
+    earlier_by_cpt = defaultdict(list)
+    for line in earlier["claims"]:
+        earlier_by_cpt[_text(line.get("cpt"))].append(line)
+    for line in later["claims"]:
+        cpt = _text(line.get("cpt"))
+        candidates = earlier_by_cpt.get(cpt, [])
+        if not cpt or not candidates:
+            continue
+        previous = sorted(candidates, key=lambda item: (item.get("service_date", ""), item.get("claim_id", "")))[-1]
+        later_units = _number(line.get("units"))
+        earlier_units = _number(previous.get("units"))
+        extra_units = later_units - earlier_units
+        if extra_units <= 0 or later_units <= 0 or _number(line.get("billed_amount")) <= 0:
+            continue
+        amount = _money((_number(line.get("billed_amount")) / later_units) * extra_units)
+        derived.append({
+            **line,
+            "procedure_description": f"Additional {line.get('procedure_description') or cpt} unit(s)",
+            "units": extra_units,
+            "billed_amount": amount,
+            "derived_from_units": True,
+            "observed_later_units": later_units,
+            "earlier_units": earlier_units,
+            "source_earlier_claim_id": previous.get("claim_id"),
+        })
+    return derived
+
+
+def build_same_patient_billed_intervention_savings(database, member_id, diagnosis_family, anchor_claim_id=""):
     """Build the workbook-required same-patient UTI culture counterfactual.
 
     The result compares the observed billed cost of two episodes with a hypothetical
@@ -427,33 +483,43 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
     amounts in the later episode. It deliberately does not claim clinical causation.
     """
     family = _text(diagnosis_family).upper()
-    if not family.startswith(("N30", "N39")):
-        return {
-            "available": False,
-            "member_id": member_id,
-            "diagnosis_family": family,
-            "reason": "The supplied requirement is specific to UTI/cystitis episodes (N30 or N39).",
-        }
+    if not family:
+        return {"available": False, "member_id": member_id, "diagnosis_family": family, "reason": "No diagnosis family was supplied."}
 
     claims = [c for c in database.selectable_claims if not _is_historical_reference(c)]
+    # The workbook treats each encounter date as one episode. Do not chain
+    # several visits together through the broader 90-day comparison window.
     episodes = sorted(
         (
-            episode for episode in _build_episodes(claims)
+            episode for episode in _build_episodes(claims, window_days=0)
             if episode["member_id"] == member_id and episode["diagnosis_family"] == family
         ),
         key=lambda episode: (episode["start_date"], episode["end_date"]),
     )
 
+    normalized_anchor = _text(anchor_claim_id).replace("-", "")
+    anchor_episode_indexes = {
+        index for index, episode in enumerate(episodes)
+        if any(_text(line.get("claim_id")).replace("-", "") == normalized_anchor for line in episode["claims"])
+    } if normalized_anchor else set()
+
     selected_pair = None
     for later_index in range(1, len(episodes)):
-        later = episodes[later_index]
-        add_on_lines = [line for line in later["claims"] if _is_uti_culture_line(line)]
-        if not add_on_lines:
+        if anchor_episode_indexes and later_index not in anchor_episode_indexes:
             continue
+        later = episodes[later_index]
         for earlier in reversed(episodes[:later_index]):
-            if any(_is_uti_culture_line(line) for line in earlier["claims"]):
+            if family.startswith(("N30", "N39")):
+                add_on_lines = [line for line in later["claims"] if _is_uti_culture_line(line)]
+                if any(_is_uti_culture_line(line) for line in earlier["claims"]):
+                    continue
+            else:
+                add_on_lines = [line for line in later["claims"] if _is_template_intervention_line(line, earlier["claims"])]
+                if not add_on_lines:
+                    add_on_lines = _incremental_unit_intervention_lines(earlier, later)
+            if not add_on_lines:
                 continue
-            selected_pair = (earlier, later, add_on_lines)
+            selected_pair = (earlier, later, add_on_lines, later_index)
             break
         if selected_pair:
             break
@@ -463,10 +529,11 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
             "available": False,
             "member_id": member_id,
             "diagnosis_family": family,
-            "reason": "No earlier UTI episode without culture followed by a later UTI episode with recorded culture/specimen billed lines was found.",
+            "anchor_claim_id": anchor_claim_id or None,
+            "reason": "No earlier related episode without an intervention followed by a later related episode with a separately identifiable billed intervention line was found in this member's data.",
         }
 
-    earlier, later, add_on_lines = selected_pair
+    earlier, later, add_on_lines, later_index = selected_pair
     earlier_billed = _money(earlier["total_billed"])
     later_billed = _money(later["total_billed"])
     add_on_billed = _money(sum(line["billed_amount"] for line in add_on_lines))
@@ -477,16 +544,66 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
     earlier_end = _day(earlier["end_date"])
     later_start = _day(later["start_date"])
     days_between = (later_start - earlier_end).days if earlier_end and later_start else None
+    anchor_line = next(
+        (line for line in later["claims"] if _text(line.get("claim_id")).replace("-", "") == normalized_anchor),
+        later["claims"][0] if later["claims"] else {},
+    )
+    earlier_line = earlier["claims"][-1] if earlier["claims"] else {}
+    exact_diagnosis_match = bool(
+        _text(anchor_line.get("icd10"))
+        and _text(anchor_line.get("icd10")) == _text(earlier_line.get("icd10"))
+    )
+    same_procedure = bool(
+        _text(anchor_line.get("cpt"))
+        and _text(anchor_line.get("cpt")) == _text(earlier_line.get("cpt"))
+    )
+    candidate_visits = []
+    for rank, candidate in enumerate(reversed(episodes[:later_index]), start=1):
+        candidate_line = candidate["claims"][-1] if candidate["claims"] else {}
+        selected = candidate is earlier
+        candidate_visits.append({
+            "rank": rank,
+            "claim_id": candidate_line.get("claim_id"),
+            "service_date": candidate.get("end_date"),
+            "diagnosis_code": candidate_line.get("icd10"),
+            "procedure_code": candidate_line.get("cpt"),
+            "units": candidate_line.get("units"),
+            "billed_amount": _money(candidate.get("total_billed")),
+            "selected": selected,
+            "decision": "Selected: closest earlier visit meeting the same-member and diagnosis-family rule." if selected else "Ranked lower because another eligible visit occurred more recently.",
+        })
+    intervention_reason = (
+        f"The anchored later claim records {add_on_lines[0].get('observed_later_units'):g} unit(s), while the selected earlier claim records {add_on_lines[0].get('earlier_units'):g}. The additional {add_on_lines[0].get('units'):g} unit(s) are separately priced from the later claim's billed amount."
+        if add_on_lines and add_on_lines[0].get("derived_from_units")
+        else "These billed service lines appear on the later visit and do not appear on the selected earlier visit."
+    )
 
     return {
         "available": True,
         "member_id": member_id,
         "diagnosis_family": family,
+        "anchor_claim_id": anchor_claim_id or None,
+        "template_logic": {
+            "earlier_episode_without_intervention": True,
+            "later_related_episode_with_intervention": True,
+            "billed_intervention_lines_added_to_earlier": True,
+            "intervention_scope": "UTI culture/specimen bundle" if family.startswith(("N30", "N39")) else "Distinct later diagnostic, treatment, procedure, or follow-up service lines identified from this member's claims",
+        },
+        "selection_audit": {
+            "rule": "Anchor the selected later claim, keep the same member and ICD-10 diagnosis family, then choose the closest qualifying earlier visit. Billed amount does not choose the visit.",
+            "anchor_reason": f"{anchor_line.get('claim_id')} is used because it is the claim opened on this prediction page.",
+            "diagnosis_reason": f"Both visits are for ICD-10 family {family}." + (f" Both record the exact diagnosis {anchor_line.get('icd10')}." if exact_diagnosis_match else " The exact diagnosis codes differ within that family."),
+            "earlier_visit_reason": f"{earlier_line.get('claim_id')} is the most recent earlier visit for this member that satisfies the diagnosis-family and intervention-evidence rules.",
+            "procedure_reason": f"Both visits record procedure {anchor_line.get('cpt')}." if same_procedure else "The procedures differ, but the later visit contains a separately identifiable intervention line.",
+            "intervention_reason": intervention_reason,
+            "candidate_visits": candidate_visits,
+        },
         "calculation_basis": "billed_amount",
         "earlier_episode": _episode_summary(earlier),
         "later_episode": _episode_summary(later),
         "days_between_episodes": days_between,
         "culture_add_on_lines": add_on_lines,
+        "intervention_lines": add_on_lines,
         "calculation": {
             "earlier_episode_actual_billed": earlier_billed,
             "later_episode_actual_billed": later_billed,
@@ -494,7 +611,7 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
             "actual_two_episode_billed": actual_billed,
             "proposed_earlier_episode_with_add_on_billed": proposed_billed,
             "potential_billed_difference": billed_difference,
-            "formula": "actual two-episode billed amount - proposed earlier episode plus observed culture/specimen billed amount",
+            "formula": "actual earlier episode billed amount + actual later episode billed amount - (earlier episode billed amount + separately identifiable later intervention lines)",
         },
         "includes_all_later_episode_lines": True,
         "clinical_review_required": True,

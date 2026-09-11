@@ -8566,6 +8566,62 @@ button {
   border: 1px solid #9fe4bf;
   border-radius: 14px;
 }
+.same-patient-billed-card.unavailable { border-color: #d7dde7; background: #fafbfc; }
+.missing-template-evidence { margin: 14px 0; padding: 14px 16px; border-radius: 10px; background: #fff; border: 1px solid #e1e6ee; color: #475569; }
+.missing-template-evidence ol { margin: 8px 0 0; padding-left: 22px; line-height: 1.55; }
+.prediction-quality-care-section { margin-top: 24px; padding: 22px; border: 1px solid #cfe5dc; border-radius: 14px; background: #f8fffb; }
+.prediction-quality-care-heading h2 { margin: 6px 0 8px; color: #172033; }
+.prediction-quality-care-heading p { margin: 0 0 12px; color: #526078; line-height: 1.55; }
+.prediction-quality-care-section .same-patient-billed-card { margin-bottom: 0; padding: 0; border: 0; background: transparent; }
+
+.quality-of-care-note {
+  margin-top: 18px;
+  padding: 18px 20px;
+  border: 1px solid #b9e6d0;
+  border-left: 5px solid #2f8f68;
+  border-radius: 12px;
+  background: #f2fbf6;
+  color: #284c40;
+}
+
+.quality-of-care-note h2 { margin: 6px 0 10px; }
+.quality-of-care-note p { margin: 8px 0; line-height: 1.5; }
+.quality-of-care-kicker { color: #2f765b; font-size: 0.78rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.comparator-quality-note { margin-bottom: 18px; }
+.spreadsheet-template-status { margin: 18px 0; padding: 18px 20px; border: 1px solid #cbd9ee; border-left: 5px solid #3d6fe8; border-radius: 12px; background: #f5f8ff; color: #34445d; }
+.spreadsheet-template-status h2 { margin: 6px 0 8px; color: #1e3155; }
+.spreadsheet-template-status p { margin: 8px 0; line-height: 1.5; }
+.claim-template-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 18px 0; }
+.claim-template-steps > div { display: flex; gap: 10px; align-items: flex-start; padding: 13px; border: 1px solid #cfe1d8; border-radius: 10px; background: #f7fcf9; }
+.claim-template-steps > div > strong { display: grid; place-items: center; min-width: 25px; height: 25px; border-radius: 50%; background: #2f8f68; color: white; }
+.claim-template-steps span { display: flex; flex-direction: column; gap: 3px; color: #2b4f43; }
+.claim-template-steps small { color: #63786e; line-height: 1.35; }
+.claim-template-formula-label { margin-top: 14px; color: #2f765b; font-size: 0.8rem; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
+@media (max-width: 760px) { .claim-template-steps { grid-template-columns: 1fr; } }
+.member-template-results { margin: 18px 0; padding: 20px; border: 1px solid #d9e6e0; border-radius: 14px; background: #fff; }
+.member-template-results > header h2 { margin: 6px 0 8px; }
+.member-template-results > header p { margin: 0 0 16px; color: #60756e; line-height: 1.5; }
+.member-template-result-list { display: grid; gap: 14px; }
+.member-template-result { border-top: 1px solid #e1ece7; padding-top: 12px; }
+.member-template-result h3 { margin: 0 0 8px; color: #285e4a; }
+.member-template-result .same-patient-billed-card { margin-top: 0; }
+.calculation-explanation { margin: 16px 0; padding: 16px; border: 1px solid #d9e6df; border-radius: 10px; background: #fff; }
+.calculation-explanation h3 { margin: 0 0 8px; color: #285e4a; }
+.calculation-explanation ol { margin: 0; padding-left: 22px; color: #43556b; line-height: 1.6; }
+.intervention-selection-reason { margin: 16px 0; padding: 18px; border: 1px solid #b8d7ff; border-radius: 12px; background: #f5f9ff; }
+.intervention-selection-reason > span { color: #2457a6; font-size: 12px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.intervention-selection-reason h3 { margin: 6px 0 14px; color: #172f57; }
+.intervention-reason-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.intervention-reason-grid > div { padding: 13px; border: 1px solid #d7e6fb; border-radius: 9px; background: #fff; }
+.intervention-reason-grid p { margin: 5px 0 0; color: #4a5f7e; line-height: 1.45; }
+.intervention-selection-rule { margin: 12px 0; color: #344e72; line-height: 1.5; }
+@media (max-width: 760px) { .intervention-reason-grid { grid-template-columns: 1fr; } }
+.episode-evidence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.episode-evidence-grid > div { padding: 14px; background: #f8fafc; border-radius: 10px; }
+.episode-evidence-grid h4 { margin: 0 0 6px; color: #285e4a; }
+.episode-evidence-grid p { margin: 4px 0 8px; }
+.episode-evidence-grid ul, .same-patient-billed-card details ul { margin: 8px 0 0; padding-left: 18px; color: #526078; line-height: 1.5; }
+@media (max-width: 760px) { .episode-evidence-grid { grid-template-columns: 1fr; } }
 
 .same-patient-billed-card header span {
   color: #18724d;

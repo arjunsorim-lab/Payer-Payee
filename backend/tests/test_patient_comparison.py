@@ -172,6 +172,26 @@ class TestSamePatientBilledInterventionSavings(unittest.TestCase):
         result = build_same_patient_billed_intervention_savings(self.db, "PATIENT", "F41")
         self.assertFalse(result["available"])
 
+    def test_claim_anchor_uses_incremental_billed_units_for_other_families(self):
+        earlier = billed_claim("PREVENTIVE-EARLIER", "2024-01-01", 800.00, "99395", "Preventive Visit")
+        later = billed_claim("PREVENTIVE-LATER", "2024-06-01", 1600.00, "99395", "Preventive Visit")
+        for claim, units in ((earlier, 1), (later, 2)):
+            fields = claim["workbookFields"]
+            fields["Member_ID"] = "GENERAL-PATIENT"
+            fields["ICD10_Family"] = "Z01"
+            fields["ICD10_Diagnosis_Code"] = "Z01.419"
+            fields["Units"] = units
+        result = build_same_patient_billed_intervention_savings(
+            SyntheticDatabase([earlier, later]), "GENERAL-PATIENT", "Z01", "PREVENTIVE-LATER"
+        )
+        self.assertTrue(result["available"])
+        self.assertEqual(result["anchor_claim_id"], "PREVENTIVE-LATER")
+        self.assertEqual(result["calculation"]["culture_and_specimen_add_on_billed"], 800.00)
+        self.assertEqual(result["calculation"]["actual_two_episode_billed"], 2400.00)
+        self.assertEqual(result["calculation"]["proposed_earlier_episode_with_add_on_billed"], 1600.00)
+        self.assertEqual(result["calculation"]["potential_billed_difference"], 800.00)
+        self.assertTrue(result["intervention_lines"][0]["derived_from_units"])
+
 
 if __name__ == "__main__":
     unittest.main()

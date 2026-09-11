@@ -396,22 +396,18 @@ def _similar_units(target_units, peer_units):
 def _strict_peer_match(target, peer):
     selected = target["selected_identity"]
     for identity in peer["anchor_identities"]:
-        procedure_matches = (
-            selected["cpt"] == identity["cpt"]
-            or (
-                selected["procedure_family"]
-                and selected["procedure_family"] == identity["procedure_family"]
-            )
-        )
+        procedure_matches = bool(selected["cpt"] and selected["cpt"] == identity["cpt"])
         if (
-            selected["payer_id"]
+            selected["exact_icd"]
+            and selected["exact_icd"] == identity["exact_icd"]
+            and selected["payer_id"]
             and selected["payer_id"] == identity["payer_id"]
             and selected["provider"]
             and selected["provider"] == identity["provider"]
             and selected["pos"]
             and selected["pos"] == identity["pos"]
             and procedure_matches
-            and _similar_units(selected["units"], identity["units"])
+            and selected["units"] == identity["units"]
         ):
             return True
     return False
@@ -748,6 +744,9 @@ def _build_procedure_comparison(database, target, selected_claim, peers, scenari
     fallback_reason = ""
     selection_audit = None
     if not peers:
+        # Show the closest broad peer as an explicitly limited review aid when
+        # no strict peer exists. The UI exposes every mismatch and never calls
+        # this an accurate or savings-supported comparison.
         candidate_pool = [
             c for c in (getattr(database, "selectable_claims", None) or getattr(database, "claims", []))
             if _member_id(c) != target["member_id"]
@@ -756,7 +755,7 @@ def _build_procedure_comparison(database, target, selected_claim, peers, scenari
             return {
                 "available": False,
                 "history_window_days": PAYER_COHORT_EPISODE_DAYS,
-                "reason": "No eligible different-member peer episode was available, so there is no two-patient procedure comparison to show.",
+                "reason": "No different-member peer visit was available.",
                 "target": target_context,
             }
         target_family = target["diagnosis_family"]
@@ -797,7 +796,10 @@ def _build_procedure_comparison(database, target, selected_claim, peers, scenari
                 s += 5
             return s
 
-        best_peer_claim = max(chosen_claims, key=lambda c: (_score(c), _number(_field(c, "Paid_Amount", "paid"))))
+        best_peer_claim = max(
+            chosen_claims,
+            key=lambda c: (_score(c), _day(_field(c, "Service_Date_From", "dos")) or date.min, _claim_id(c)),
+        )
         peer_mid = _member_id(best_peer_claim)
         peer_fam = _family(best_peer_claim)
         peer_member_rows = [c for c in candidate_pool if _member_id(c) == peer_mid and _family(c) == peer_fam]
@@ -806,6 +808,69 @@ def _build_procedure_comparison(database, target, selected_claim, peers, scenari
         peer_episode = _episode(peer_member_rows)
         peer_episode["episode_id"] = f"PEER-{peer_mid}-{peer_fam}"
         peer_claim = best_peer_claim
+        ranked_fallback_claims = sorted(
+            chosen_claims,
+            key=lambda row: (_score(row), _day(_field(row, "Service_Date_From", "dos")) or date.min, _claim_id(row)),
+            reverse=True,
+        )
+        selected_details = _peer_claim_rank_details(target, peer_claim)
+        fallback_claim_candidates = []
+        for rank, row in enumerate(ranked_fallback_claims[:10], 1):
+            candidate = _procedure_comparison_claim(row)
+            details = _peer_claim_rank_details(target, row)
+            selected = candidate["claim_id"] == _claim_id(peer_claim)
+            fallback_claim_candidates.append({
+                "rank": rank,
+                "selected": selected,
+                "claim_id": candidate["claim_id"],
+                "member_id": candidate["member_id"],
+                "service_date": candidate["service_date"],
+                "diagnosis_code": candidate["icd10"],
+                "procedure_code": candidate["cpt"],
+                "units": candidate["units"],
+                "billed_amount": candidate["billed_amount"],
+                "checks": details["checks"],
+                "decision": "Selected by the broad fallback rule." if selected else f"Ranked lower because {_claim_rank_lower_reason(selected_details, details)}.",
+            })
+        selection_audit = {
+            "scenario_number": 0,
+            "scenario_name": f"Broad fallback: {fallback_match_type}",
+            "scenario_reason": "No strict eligible peer was available. This broader comparison is shown for transparency only and is not an accurate comparison.",
+            "eligible_episode_count": len({(_member_id(row), _family(row)) for row in chosen_claims}),
+            "eligible_claim_count": len(chosen_claims),
+            "exact_procedure_episode_count": sum(_text(_field(row, "CPT_Code", "cptCode")) == target_cpt for row in chosen_claims),
+            "procedure_filter_reason": f"The broad fallback considered {len(chosen_claims)} claim(s) with {fallback_match_type} evidence; it did not require every comparison field to match.",
+            "amounts_used_for_selection": False,
+            "plain_language_steps": [
+                {"title": "Check strict matching", "text": "No different-member claim matched every required diagnosis, procedure, units, payer, provider, and place-of-service field."},
+                {"title": "Choose the broadest relevant pool", "text": fallback_reason},
+                {"title": "Rank the available claims", "text": "Claims were ranked by matching procedure and payer identifiers, then recency and claim ID. Billed and paid amounts were excluded."},
+                {"title": "Show the limitation", "text": f"{_claim_id(peer_claim)} is the closest broad candidate, but the mismatch table below determines why this is not an accurate comparison."},
+            ],
+            "selection_guardrail": "Neither billed amount nor paid amount is used to choose the peer. Amounts are read only after selection to calculate the displayed difference.",
+            "episode_ranking_priority": "Broad clinical relevance, matching procedure and payer identifiers, recency, then claim ID. Dollar amounts are excluded.",
+            "claim_ranking_priority": "Matching procedure and payer identifiers, recency, then claim ID. Dollar amounts are excluded.",
+            "selected_episode_id": peer_episode["episode_id"],
+            "selected_claim_id": _claim_id(peer_claim),
+            "episode_candidates": [{
+                "rank": 1,
+                "selected": True,
+                "episode_id": peer_episode["episode_id"],
+                "representative_claim_id": _claim_id(peer_claim),
+                "member_id": peer_episode["member_id"],
+                "episode_start": peer_episode["start_date"],
+                "episode_end": peer_episode["end_date"],
+                "similarity_score": 0,
+                "claim_count": peer_episode["claim_count"],
+                "exact_diagnosis_match": False,
+                "exact_or_family_procedure_match": _text(_field(peer_claim, "CPT_Code", "cptCode")) == target_cpt,
+                "similar_units_present": False,
+                "payer_match": _text(_field(peer_claim, "Payer_ID", "payerId")) == target["selected_identity"].get("payer_id"),
+                "provider_match": False,
+                "place_of_service_match": False,
+            }],
+            "claim_candidates": fallback_claim_candidates,
+        }
     else:
         target_cpt = _text(_field(selected_claim, "CPT_Code", "cptCode"))
         exact_procedure_peers = [
@@ -1041,7 +1106,7 @@ def _build_procedure_comparison(database, target, selected_claim, peers, scenari
             "matches": bool(target_claim["pos"] and target_claim["pos"] == peer_claim_payload["pos"]),
         },
     }
-    exact_procedure_match = match_checks["procedure_code"]["matches"] and match_checks["units"]["matches"]
+    exact_comparison_match = all(check["matches"] for check in match_checks.values())
 
     return {
         "available": True,
@@ -1093,13 +1158,13 @@ def _build_procedure_comparison(database, target, selected_claim, peers, scenari
             "reason": "This is the positive difference between the recorded billed charges on the two displayed visits. It is a comparison amount for review, not confirmed savings.",
             "selection_reason": reason_str,
             "selection_audit": selection_audit,
-            "evidence_strength": "strong" if exact_procedure_match else "limited",
+            "evidence_strength": "strong" if exact_comparison_match else "limited",
             "supports_billed_difference": True,
             "supports_savings": False,
             "limitation": (
-                "The recorded procedure code and units match. Clinical and contract review is still required before treating the difference as savings."
-                if exact_procedure_match
-                else "The recorded procedure code or units differ. The source rows prove the billed amounts, but this pair is not strong enough to support a savings conclusion."
+                "All required comparison fields match. Clinical and contract review is still required before treating the difference as savings."
+                if exact_comparison_match
+                else "This is not an accurate comparison: one or more diagnosis, procedure, units, payer, provider, or place-of-service fields differ. The source rows prove the billed amounts only; do not use this as a savings result."
             ),
             "match_checks": list(match_checks.values()),
             "source_rows": [

@@ -64,9 +64,13 @@ class IntegratedWorkbookTests(unittest.TestCase):
         self.assertIn("Authorization_Valid_From", self.database.selectable_claims[0]["workbookFields"])
         self.assertIn("Remit_835_Received_Date", self.database.selectable_claims[0]["workbookFields"])
 
-    def test_historical_reference_rows_are_not_selectable_or_visible(self):
+    def test_historical_reference_rows_are_not_selectable_but_are_visible_for_audit(self):
         historical = self.database.historical_claims[0]
         self.assertIsNone(self.database.find_claim(historical["claimId"], selectable_only=True))
+        self.assertIsNotNone(self.database.find_claim(historical["claimId"], selectable_only=False))
+        response = self.client.get(f"/api/claims?search={historical['claimId']}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["total"], 1)
         response = self.client.get(
             f"/api/members/{historical['memberId']}/claims"
         )

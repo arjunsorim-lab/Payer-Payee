@@ -37,6 +37,7 @@ try:
         index_status,
         retrieve_evidence,
     )
+    from .uti_case_workbook import dataset_registry, load_uti_case_workbook
 except ImportError:
     from db import connect_mongo, get_mongo_config
     from financial_engine import build_financial_result, member_supported_summary
@@ -62,6 +63,7 @@ except ImportError:
     from workbook_enrichment import load_workbook_database, read_savings_workbook
     from workbook_llm import generate_workbook_chat_answer, generate_workbook_prediction_explanation
     from workbook_rag import build_index, index_status, retrieve_evidence
+    from uti_case_workbook import dataset_registry, load_uti_case_workbook
 
 FRONTEND_DIST_DIR = Path(__file__).resolve().parent.parent / "dist"
 BUNDLED_WORKBOOK_PATH = (
@@ -173,7 +175,10 @@ def workbook_prediction_with_rag(database, claim_number):
 
 
 def workbook_claims_for_request(database, args):
-    rows = list(database.selectable_claims)
+    # The encounter directory is an audit surface: show both current/selectable
+    # claims and historical-reference records. Prediction endpoints still use
+    # selectable claims only, so historical evidence can never become a target.
+    rows = list(database.claims)
     search = str(args.get("search", "") or "").strip().lower()
     if search:
         rows = [
@@ -213,7 +218,6 @@ def workbook_claim_for_api(database, claim, include_summary=True, compact=False)
             "calculationVersion",
             "predictionVersion",
             "ragIndexVersion",
-            "isHistoricalReference",
         ):
             payload.pop(key, None)
     if include_summary:
@@ -371,6 +375,7 @@ def health():
             "ok": True,
             "dataSource": "integrated-workbook",
             "workbook": database.source_banner(),
+            "datasets": dataset_registry(),
         })
     db = connect_mongo()
     db.command("ping")
@@ -389,7 +394,10 @@ def get_claims():
         member_summaries = (
             {
                 member_id: member_supported_summary(database, member_id)
-                for member_id in {claim["memberId"] for claim in page_rows}
+                for member_id in {
+                    claim["memberId"] for claim in page_rows
+                    if not claim.get("isHistoricalReference", False)
+                }
             }
             if include_financial
             else {}
@@ -403,7 +411,7 @@ def get_claims():
                     **workbook_claim_for_api(
                         database,
                         claim,
-                        include_summary=include_financial,
+                        include_summary=include_financial and not claim.get("isHistoricalReference", False),
                         compact=compact,
                     ),
                     **(
@@ -411,7 +419,7 @@ def get_claims():
                             "memberSupportedMoneySummary":
                                 member_summaries[claim["memberId"]]
                         }
-                        if include_financial
+                        if include_financial and not claim.get("isHistoricalReference", False)
                         else {}
                     ),
                 }
@@ -432,11 +440,15 @@ def get_claims():
 def get_claim(claim_number):
     database = configured_workbook_database()
     if database:
-        claim = database.find_claim(claim_number, selectable_only=True)
+        claim = database.find_claim(claim_number, selectable_only=False)
         if not claim:
-            return json_response({"message": "Selectable workbook claim not found"}, 404)
+            return json_response({"message": "Workbook claim not found"}, 404)
         return json_response({
-            "item": workbook_claim_for_api(database, claim),
+            "item": workbook_claim_for_api(
+                database,
+                claim,
+                include_summary=not claim.get("isHistoricalReference", False),
+            ),
             "source": database.source_banner(),
         })
     db = connect_mongo()
@@ -581,7 +593,9 @@ def get_prediction_scenarios():
     """Build provider-facing episode scenarios from the current database rows."""
     database = configured_workbook_database()
     if database:
-        rows = workbook_claims_for_request(database, request.args)
+        # Historical-reference rows are visible in the claims directory but
+        # cannot be prediction targets.
+        rows = list(database.selectable_claims)
         results = [build_financial_result(database, claim["claimId"]) for claim in rows]
         episode_avoidable = {}
         latest_episode_predictions = {}
@@ -709,6 +723,16 @@ def get_value_based_case(claim_number):
         return json_response({"message": str(error)}, 422)
 
 
+@app.get("/api/predictions/uti-case-workbook")
+def get_uti_case_workbook():
+    return json_response(load_uti_case_workbook())
+
+
+@app.get("/api/datasets")
+def get_datasets():
+    return json_response({"datasets": dataset_registry()})
+
+
 @app.get("/api/claims/comparable-pairs")
 def get_comparable_pairs():
     """Discover patients that share a disease family for cross-patient comparison."""
@@ -739,15 +763,16 @@ def get_compare_patients():
 
 @app.get("/api/claims/same-patient-billed-savings")
 def get_same_patient_billed_savings():
-    """Evaluate the UTI culture scenario using same-patient episode billed charges."""
+    """Apply the workbook intervention template using same-patient billed charges."""
     database = configured_workbook_database()
     if not database:
         return json_response({"message": "Configured workbook is required."}, 409)
     member_id = request.args.get("member_id", "").strip()
     family = request.args.get("diagnosis_family", "").strip()
+    anchor_claim_id = request.args.get("anchor_claim_id", "").strip()
     if not member_id or not family:
         return json_response({"message": "member_id and diagnosis_family are required."}, 400)
-    return json_response(build_same_patient_billed_intervention_savings(database, member_id, family))
+    return json_response(build_same_patient_billed_intervention_savings(database, member_id, family, anchor_claim_id))
 
 
 @app.get("/api/payer-prediction/<member_id>")

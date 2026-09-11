@@ -348,14 +348,17 @@ def _prediction(database, claim):
         "matching_dimensions": peer_basis["matching_dimensions"],
         "claim_ids_used": peer_basis["claim_ids_used"],
     }
-    for prediction_range, historical_rate in (
-        (predicted_allowed_range, allowed_rate),
-        (predicted_paid_range, paid_rate),
-        (predicted_patient_range, patient_rate),
-        (predicted_adjustment_range, 1 - allowed_rate),
+    for prediction_range, historical_rate, candidates in (
+        (predicted_allowed_range, allowed_rate, allowed_candidates),
+        (predicted_paid_range, paid_rate, paid_candidates),
+        (predicted_patient_range, patient_rate, patient_candidates),
+        (predicted_adjustment_range, 1 - allowed_rate, adjustment_candidates),
     ):
         prediction_range.update(common_evidence)
         prediction_range["historical_rate"] = round(historical_rate, 6)
+        prediction_range["candidate_values"] = sorted(
+            _money(value) for value in candidates
+        )
     predicted_allowed = predicted_allowed_range["value"]
     predicted_paid = predicted_paid_range["value"]
     predicted_patient = predicted_patient_range["value"]
@@ -470,6 +473,10 @@ def _patient_balance(claim):
     responsibility = _money(fields["Patient_Responsibility"])
     received = _money(fields["Patient_Payment_Received"])
     outstanding = _money(fields["Outstanding_Patient_Balance"])
+    deductible = _money(fields.get("Deductible_Amount"))
+    copay = _money(fields.get("Copay_Amount"))
+    coinsurance = _money(fields.get("Coinsurance_Amount"))
+    component_total = _money(deductible + copay + coinsurance)
     status = _lower(fields["Balance_Status"])
     days = int(_number(fields.get("Days_Outstanding"), 0))
     aging = _text(fields.get("Aging_Bucket"))
@@ -513,6 +520,15 @@ def _patient_balance(claim):
             "patient_responsibility": responsibility,
             "patient_payment_received": received,
             "outstanding_patient_balance": outstanding,
+            "deductible_amount": deductible,
+            "copay_amount": copay,
+            "coinsurance_amount": coinsurance,
+            "responsibility_component_total": component_total,
+            "workbook_sheet": "837_Claims",
+            "workbook_row": claim.get("workbookSourceRow"),
+            "patient_responsibility_source": "Recorded Patient_Responsibility claim field; not calculated by this app.",
+            "patient_payment_source": "Synthetic demonstration value in Patient_Payment_Received; replace with the real patient-billing or collections feed for production.",
+            "outstanding_balance_source": "Synthetic demonstration value in Outstanding_Patient_Balance; checked against Patient_Responsibility minus Patient_Payment_Received.",
             "actionable_signals": actionable_signals,
         },
     )
@@ -929,7 +945,7 @@ def _best_action(categories):
         "underpayment": ("Payment underpayment review", "Validate and pursue the supported payment variance.", "provider revenue integrity"),
         "correctable_denial": ("Correctable denial follow-up", "File or continue the supported appeal/resubmission workflow.", "denials management"),
         "excessive_adjustment": ("Contract adjustment review", "Reconcile the adjustment against the contract-allowed amount.", "contract management"),
-        "patient_balance": ("Patient-balance follow-up / broken payment-plan review", "Follow up the workbook-confirmed outstanding patient balance and payment-plan signal.", "patient financial services"),
+        "patient_balance": ("Patient-balance follow-up / broken payment-plan review", "Review the recorded outstanding patient balance and payment-plan signal, then confirm the balance before contacting the patient.", "patient financial services"),
         "duplicate_or_correction": ("Duplicate or corrected-claim review", "Reconcile the flagged claim and related payment.", "claims operations"),
         "authorization": ("Authorization correction", "Resolve the actionable authorization status before the next billing step.", "authorization team"),
         "referral": ("Referral correction", "Resolve the actionable referral status before the next billing step.", "referral team"),
@@ -1035,6 +1051,63 @@ def _scenario_map(claim, snapshot, categories, supported, summary, comparison, d
     fields = claim["workbookFields"]
     best = summary["best_action"]
     visible_categories = {name: category for name, category in categories.items() if name != "future_exposure"}
+    charge = _money(fields.get("Charge_Amount"))
+    allowed_forecast = snapshot["predicted_allowed"]
+    paid_forecast = snapshot["predicted_provider_payment"]
+    patient_forecast = snapshot["predicted_patient_responsibility"]
+    adjustment_forecast = snapshot["predicted_contractual_adjustment"]
+    denial_basis = snapshot["denial_prediction_basis"]
+    denial_probability = snapshot["denial_probability"]
+    repeat_basis = snapshot["avoidable_prediction_basis"]["repeat_probability"]
+    repeat_evidence = repeat_basis["evidence"]
+    avoidable_basis = snapshot["avoidable_prediction_basis"]["avoidable_probability"]
+    avoidable_evidence = avoidable_basis["evidence"]
+    repeat_cost = snapshot["avoidable_prediction_basis"]["repeat_cost"]
+    avoidable_spend = snapshot["predicted_avoidable_spend"]
+    avoidable_payment = snapshot["predicted_avoidable_provider_payment"]
+
+    def candidate_text(forecast):
+        values = forecast.get("candidate_values", [])
+        return ", ".join(f"${value:,.2f}" for value in values) or "No candidate values"
+
+    forecast_calculations = {
+        "predicted_allowed": {
+            "formula": f"${charge:,.2f} target charge × {allowed_forecast['historical_rate'] * 100:.2f}% median peer allowed-to-charge rate = ${allowed_forecast['value']:,.2f}",
+            "evidence": f"{allowed_forecast['peer_count']} earlier claims matched on {allowed_forecast['peer_level']}. Peer-based estimates: {candidate_text(allowed_forecast)}. Displayed range: ${allowed_forecast['low']:,.2f}–${allowed_forecast['high']:,.2f}.",
+        },
+        "predicted_provider_payment": {
+            "formula": f"Median of {paid_forecast['peer_count']} peer-based payment estimates = ${paid_forecast['value']:,.2f}",
+            "evidence": f"For each peer: ${charge:,.2f} target charge × that peer’s allowed/charge rate × that peer’s paid/allowed rate. Estimates: {candidate_text(paid_forecast)}. Displayed range: ${paid_forecast['low']:,.2f}–${paid_forecast['high']:,.2f}.",
+        },
+        "predicted_patient_responsibility": {
+            "formula": f"Median of {patient_forecast['peer_count']} peer-based patient-share estimates = ${patient_forecast['value']:,.2f}",
+            "evidence": f"For each peer: ${charge:,.2f} target charge × that peer’s allowed/charge rate × that peer’s patient-responsibility/allowed rate. Estimates: {candidate_text(patient_forecast)}. Displayed range: ${patient_forecast['low']:,.2f}–${patient_forecast['high']:,.2f}.",
+        },
+        "predicted_contractual_adjustment": {
+            "formula": f"Median of target charge minus each peer-based allowed estimate = ${adjustment_forecast['value']:,.2f}",
+            "evidence": f"For each peer: ${charge:,.2f} − its peer-based allowed estimate. Adjustment estimates: {candidate_text(adjustment_forecast)}. Displayed range: ${adjustment_forecast['low']:,.2f}–${adjustment_forecast['high']:,.2f}.",
+        },
+        "denial_probability": {
+            "formula": f"({denial_basis['local_numerator']} local denials + {denial_basis['prior_strength']:.0f} × {denial_basis['external_rate'] * 100:.2f}% peer denial rate) ÷ ({denial_basis['local_denominator']} local claims + {denial_basis['prior_strength']:.0f}) = {denial_probability * 100:.2f}%",
+            "evidence": f"Local evidence: {denial_basis['local_numerator']} denied among {denial_basis['local_denominator']} earlier same-member/procedure claims. External evidence: {denial_basis['external_numerator']} denied among {denial_basis['external_denominator']} {denial_basis['peer_level']} peers. Prior strength: {denial_basis['prior_strength']:.0f}.",
+        },
+        "future_denial_exposure": {
+            "formula": f"{denial_probability * 100:.2f}% denial chance × ${paid_forecast['value']:,.2f} predicted provider payment = ${snapshot['future_denial_exposure']['value']:,.2f}",
+            "evidence": "Uses the denial calculation and predicted provider-payment calculation shown in this step.",
+        },
+        "repeat_probability_90d": {
+            "formula": f"({repeat_evidence['local_numerator']} local repeats + {repeat_evidence['prior_strength']:.0f} × {repeat_evidence['external_rate'] * 100:.2f}% broader repeat rate) ÷ ({repeat_evidence['local_denominator']} local observations + {repeat_evidence['prior_strength']:.0f}) = {repeat_basis['probability_90d'] * 100:.2f}%",
+            "evidence": f"Local evidence: {repeat_evidence['local_numerator']} repeats among {repeat_evidence['local_denominator']} observation(s) at {repeat_basis['local_level']}. Broader evidence: {repeat_evidence['external_numerator']} repeats among {repeat_evidence['external_denominator']} observations at {repeat_basis['external_level']}. Prior strength: {repeat_evidence['prior_strength']:.0f}.",
+        },
+        "predicted_avoidable_spend": {
+            "formula": f"{avoidable_spend['repeat_probability_90d'] * 100:.2f}% repeat chance × {avoidable_spend['avoidable_given_repeat_probability'] * 100:.2f}% avoidable share × ${avoidable_spend['expected_extra_repeat_allowed_cost']:,.2f} extra allowed cost = ${avoidable_spend['value']:,.2f}",
+            "evidence": f"Avoidable-share evidence: {avoidable_evidence['external_numerator']} of {avoidable_evidence['external_denominator']} broader repeat observations, blended with {avoidable_evidence['local_numerator']} of {avoidable_evidence['local_denominator']} local observations and prior strength {avoidable_evidence['prior_strength']:.0f}. Cost evidence: {repeat_cost['peer_count']} episode(s) at {repeat_cost['peer_level']}; raw median ${repeat_cost['median_extra_allowed_cost']:,.2f}, capped at the ${allowed_forecast['value']:,.2f} predicted allowed amount.",
+        },
+        "predicted_avoidable_provider_payment": {
+            "formula": f"{avoidable_payment['repeat_probability_90d'] * 100:.2f}% repeat chance × {avoidable_payment['avoidable_given_repeat_probability'] * 100:.2f}% avoidable share × ${avoidable_payment['expected_extra_repeat_paid_cost']:,.2f} extra provider payment = ${avoidable_payment['value']:,.2f}",
+            "evidence": f"Uses the same repeat and avoidable-share evidence. Provider-payment cost evidence: {repeat_cost['peer_count']} episode(s) at {repeat_cost['peer_level']}; raw median ${repeat_cost['median_extra_paid_cost']:,.2f}, capped at the ${paid_forecast['value']:,.2f} predicted provider payment.",
+        },
+    }
     return {
         "sections": [
             {
@@ -1099,6 +1172,7 @@ def _scenario_map(claim, snapshot, categories, supported, summary, comparison, d
                         "predicted_avoidable_provider_payment"
                     ]["value"],
                 },
+                "calculations": forecast_calculations,
             },
             {
                 "step": 7,
@@ -1225,6 +1299,11 @@ def build_financial_result(database, claim_id):
             "contract_allowed": _money(fields.get("Contract_Allowed_Amount")),
             "patient_payment_received": _money(fields.get("Patient_Payment_Received")),
             "outstanding_patient_balance": _money(fields.get("Outstanding_Patient_Balance")),
+            "days_outstanding": int(_number(fields.get("Days_Outstanding"), 0)),
+            "aging_bucket": _text(fields.get("Aging_Bucket")),
+            "balance_status": _text(fields.get("Balance_Status")),
+            "payment_plan_status": _text(fields.get("Payment_Plan_Status")),
+            "collection_status": _text(fields.get("Collection_Status")),
             "recovered_amount": _money(fields.get("Recovered_Amount")),
             "claim_status": _text(fields.get("Claim_Status_Description")),
             "authorization_required": _yes(fields.get("Prior_Authorization_Required")),

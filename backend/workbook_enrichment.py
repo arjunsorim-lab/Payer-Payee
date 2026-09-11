@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from threading import RLock
 
 from openpyxl import load_workbook
+from openpyxl.utils.datetime import from_excel
 from dotenv import load_dotenv
 
 try:
@@ -57,14 +59,45 @@ def _clean_value(value):
     return value
 
 
-def _sheet_records(sheet):
+FIELD_ALIASES = {
+    "Service_Date_From": ("Service_Date", "Date_of_Service", "Date", "START"),
+    "Claim_ID": ("ClaimID", "CLAIMID", "SOURCE_CLAIM_ID"),
+    "Member_ID": ("MemberID", "PATIENTID", "PATIENT"),
+    "Encounter_ID": ("ENCOUNTER", "APPOINTMENTID", "encounterId"),
+    "ICD10_Diagnosis_Code": ("ICD10", "Diagnosis_Code"),
+    "ICD10_Diagnosis_Description": ("Diagnosis",),
+    "CPT_Code": ("CPT", "Procedure_Code", "PROCEDURECODE"),
+    "CPT_Description": ("Service", "Procedure_Description"),
+    "Reference_Claim_ID": ("Reference claim",),
+    "Proposed_Earlier_Action": ("Synthetic earlier action", "Earlier_Action"),
+}
+
+
+def _normalized_fields(record, epoch=None):
+    """Add canonical aliases without discarding source names or blank payments."""
+    result = dict(record)
+    for canonical, aliases in FIELD_ALIASES.items():
+        if result.get(canonical) in (None, ""):
+            for alias in aliases:
+                if result.get(alias) not in (None, ""):
+                    result[canonical] = result[alias]
+                    break
+    for name, value in list(result.items()):
+        if "date" in name.lower() and isinstance(value, (int, float)) and 1 <= value < 100000:
+            result[name] = _clean_value(from_excel(value, epoch=epoch)) if epoch else _clean_value(from_excel(value))
+    return result
+
+
+def _sheet_records(sheet, header_row=1):
     rows = sheet.iter_rows(values_only=True)
+    for _ in range(header_row - 1):
+        next(rows, ())
     try:
         headers = [str(value or "").strip() for value in next(rows)]
     except StopIteration:
         return [], []
     records = []
-    for source_row, row in enumerate(rows, start=2):
+    for source_row, row in enumerate(rows, start=header_row + 1):
         if not any(value not in (None, "") for value in row):
             continue
         record = {
@@ -75,6 +108,18 @@ def _sheet_records(sheet):
         record["_source_row"] = source_row
         records.append(record)
     return headers, records
+
+
+def _table_header(sheet):
+    """Recognize evidence tables, never narrative/verification/savings outputs."""
+    for index, values in enumerate(sheet.iter_rows(max_row=30, values_only=True), 1):
+        names = {str(value or "").strip() for value in values}
+        canonical = set(_normalized_fields(dict.fromkeys(names, "column")))
+        if "Claim_ID" in canonical or "Reference_Claim_ID" in canonical:
+            return index, canonical
+        if {"Member_ID", "Service_Date_From"} <= canonical or "Encounter_ID" in canonical:
+            return index, canonical
+    return None, set()
 
 
 def _canonical_json(value):
@@ -100,6 +145,8 @@ class WorkbookDatabase:
     field_dictionary_rows: tuple[dict, ...]
     data_notes_rows: tuple[dict, ...]
     report: dict
+    evidence_tables: dict = field(default_factory=dict)
+    value_based_config: dict = field(default_factory=dict)
 
     def __post_init__(self):
         object.__setattr__(
@@ -160,14 +207,13 @@ class WorkbookDatabase:
                         if character.isalpha()
                     ).upper()
                     == prefix
-                    and int(
+                    and (
                         "".join(
                             character
                             for character in normalize_claim_id(item.get("claimId"))
                             if character.isdigit()
                         )
-                    )
-                    == numeric_id
+                    ).lstrip("0") == str(numeric_id)
                 )
             ),
             None,
@@ -227,25 +273,79 @@ def _load(path):
     stat = workbook_path.stat()
     workbook_hash = sha256(workbook_path.read_bytes()).hexdigest()
     workbook = load_workbook(workbook_path, read_only=True, data_only=True)
-    missing = REQUIRED_SHEETS.difference(workbook.sheetnames)
-    if missing:
-        workbook.close()
-        raise ValueError(
-            "Configured workbook is missing required sheet(s): "
-            + ", ".join(sorted(missing))
-        )
+    claims_sheet = CLAIMS_SHEET
+    header_row = 1
+    if claims_sheet in workbook.sheetnames and claims_sheet == "837_Claims":
+        missing = REQUIRED_SHEETS.difference(workbook.sheetnames)
+        if missing:
+            workbook.close()
+            raise ValueError("Configured workbook is missing required sheet(s): " + ", ".join(sorted(missing)))
+    elif claims_sheet not in workbook.sheetnames:
+        candidates = []
+        for sheet in workbook:
+            start, columns = _table_header(sheet)
+            if {"Claim_ID", "Member_ID", "Service_Date_From", "CPT_Code"} <= columns:
+                candidates.append((sheet.title, start))
+        if len(candidates) != 1:
+            workbook.close()
+            raise ValueError("Configure CLAIMS_WORKSHEET_NAME or provide exactly one identifiable claims table.")
+        claims_sheet, header_row = candidates[0]
+    # Configured alternate sheets may also have a title block above their header.
+    header_row = _table_header(workbook[claims_sheet])[0] or header_row
+    headers, claim_rows = _sheet_records(workbook[claims_sheet], header_row)
+    claim_rows = [_normalized_fields(row, workbook.epoch) for row in claim_rows]
+    # An explicit source label enables demo flags but never precomputed YESs.
+    synthetic_label = bool(re.search(r"(^|[ _-])synthetic([ _.-]|$)", claims_sheet.lower()) or
+                           re.search(r"(^|[ _-])synthetic([ _.-]|$)", workbook_path.name.lower()))
 
-    headers, claim_rows = _sheet_records(workbook[CLAIMS_SHEET])
-    _, eligibility_rows = _sheet_records(workbook[ELIGIBILITY_SHEET])
-    _, reason_rows = _sheet_records(workbook[REASON_LEGEND_SHEET])
-    _, dictionary_rows = _sheet_records(workbook[FIELD_DICTIONARY_SHEET])
-    _, notes_rows = _sheet_records(workbook[DATA_NOTES_SHEET])
+    def optional_records(name):
+        return _sheet_records(workbook[name])[1] if name in workbook.sheetnames else []
+
+    eligibility_rows = optional_records(ELIGIBILITY_SHEET)
+    reason_rows = optional_records(REASON_LEGEND_SHEET)
+    dictionary_rows = optional_records(FIELD_DICTIONARY_SHEET)
+    notes_rows = optional_records(DATA_NOTES_SHEET)
+    evidence_tables = {}
+    for sheet in workbook:
+        if sheet.title == claims_sheet or sheet.title in REQUIRED_SHEETS:
+            continue
+        start, columns = _table_header(sheet)
+        title = sheet.title.lower()
+        # Only recognized source roles enter the engine; worksheet prose and
+        # precomputed requirement statuses are never executable rules/evidence.
+        role = next((role for role, tokens in (
+            ("remittances", ("remittance", "835")),
+            ("interventions", ("intervention map", "intervention mapping")),
+            ("conditions", ("condition",)),
+            ("medications", ("medication", "pharmacy")),
+            ("observations", ("observation",)),
+            ("labs", ("lab",)),
+            ("encounters", ("encounter",)),
+            ("claim_lines", ("claim line",)),
+            ("procedures", ("procedure", "care")),
+        ) if any(token in title for token in tokens)), None)
+        if not role or not start:
+            continue
+        records = _sheet_records(sheet, start)[1]
+        evidence_tables.setdefault(role, []).extend(
+            {**_normalized_fields(row, workbook.epoch), "_source_sheet": sheet.title}
+            for row in records
+        )
     workbook.close()
 
     claims = []
     for row in claim_rows:
         raw_fields = {key: value for key, value in row.items() if key != "_source_row"}
         claim = normalize_claim(raw_fields)
+        # The legacy EDI mapper accepts YYYYMMDD only. Workbook dates may be
+        # actual Excel dates or ISO timestamps; preserve their calendar date.
+        for raw_key, canonical in (("Service_Date_From", "dos"), ("Service_Date_To", "serviceEnd")):
+            value = str(raw_fields.get(raw_key) or "")
+            if not claim.get(canonical):
+                try:
+                    claim[canonical] = date.fromisoformat(value[:10]).isoformat()
+                except ValueError:
+                    pass
         if not claim.get("claimId") or not claim.get("memberId"):
             continue
         historical = _is_yes(raw_fields.get("Is_Historical_Reference_Record"))
@@ -279,7 +379,10 @@ def _load(path):
         "file_size": stat.st_size,
         "source_row_hash": source_row_hash,
         "import_time": datetime.now(timezone.utc).isoformat(),
-        "claims_sheet": CLAIMS_SHEET,
+        "claims_sheet": claims_sheet,
+        "claims_header_row": header_row,
+        "synthetic": synthetic_label or (all(_is_yes(row.get("Synthetic_Flag")) for row in claim_rows) if claim_rows else False),
+        "evidence_table_counts": {role: len(rows) for role, rows in evidence_tables.items()},
         "claim_columns": headers,
         "claim_column_count": len(headers),
         "total_claim_count": len(claims),
@@ -301,6 +404,7 @@ def _load(path):
         field_dictionary_rows=tuple(dictionary_rows),
         data_notes_rows=tuple(notes_rows),
         report=report,
+        evidence_tables={role: tuple(rows) for role, rows in evidence_tables.items()},
     )
 
 

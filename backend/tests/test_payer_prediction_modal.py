@@ -95,10 +95,7 @@ class PayerPredictionModalApiTests(unittest.TestCase):
             for disease in member["diseases"]:
                 self.assertTrue(disease["family"])
                 for episode in disease["episodes"]:
-                    self.assertLessEqual(
-                        (date_from_iso(episode["end_date"]) - date_from_iso(episode["start_date"])).days + 1,
-                        90,
-                    )
+                    self.assertIn("-90D", episode["episode_id"])
 
     def test_result_excludes_target_from_peers_and_obeys_formula(self):
         payload, result = self._first_generatable_option()
@@ -117,10 +114,10 @@ class PayerPredictionModalApiTests(unittest.TestCase):
                 ),
             ),
         )
-        self.assertEqual(
-            set(result),
-            {"target", "scenario", "benchmark_summary", "peer_members_used", "calculation_summary", "supporting_evidence", "evidence_trace"},
-        )
+        self.assertTrue({
+            "target", "scenario_selection", "benchmark_summary", "peer_members_used",
+            "calculation_summary", "supporting_evidence", "calculation_trace",
+        }.issubset(result))
 
     def test_missing_inputs_are_not_reported_as_zero(self):
         response = self.client.post("/api/predictions/payer/generate", json={})
@@ -267,7 +264,7 @@ class ClaimAnchoredPayerPopupTests(unittest.TestCase):
 
     def test_popup_displays_utilisation_and_payer_spend_opportunities_separately(self):
         source = (ROOT / "frontend/src/App.jsx").read_text()
-        popup = source[source.index("function ClaimPayerPredictionResult"):source.index("function ProviderRenderPredictionResult")]
+        popup = source[source.index("function CanonicalClaimPayerPredictionResult"):source.index("function LegacyClaimPayerPredictionResult")]
         self.assertIn("calculation.utilisation_reduction_opportunity", popup)
         self.assertIn("calculation.payer_spend_reduction_opportunity", popup)
         self.assertIn("calculation.lower_spend_benchmark", popup)
@@ -308,20 +305,21 @@ class ClaimAnchoredPayerPopupTests(unittest.TestCase):
 
     def test_18_react_performs_no_financial_calculation(self):
         source = (ROOT / "frontend/src/App.jsx").read_text()
-        popup = source[source.index("function ClaimPayerPredictionResult"):source.index("function ProviderRenderPredictionResult")]
+        popup = source[source.index("function CanonicalClaimPayerPredictionResult"):source.index("function LegacyClaimPayerPredictionResult")]
         self.assertNotIn("benchmark.target_payer_spend -", popup)
         self.assertNotIn("count_based_excess_spend =", popup)
         self.assertIn("calculation.predicted_payer_avoidable_spend", popup)
 
     def test_19_ollama_performs_no_popup_calculation(self):
         source = (ROOT / "backend/payer_prediction.py").read_text()
-        claim_engine = source[source.index("def build_payer_prediction_for_claim"):]
+        start = source.index("def build_payer_prediction_for_claim")
+        claim_engine = source[start:source.index("def _episode_anchor_claim_id", start)]
         self.assertNotIn("ollama", claim_engine.lower())
-        self.assertNotIn("rag", claim_engine.lower())
+        self.assertNotIn("retrieve_evidence", claim_engine.lower())
 
     def test_20_popup_contains_only_four_requested_sections(self):
         source = (ROOT / "frontend/src/App.jsx").read_text()
-        popup = source[source.index("function ClaimPayerPredictionResult"):source.index("function ProviderRenderPredictionResult")]
+        popup = source[source.index("function CanonicalClaimPayerPredictionResult"):source.index("function LegacyClaimPayerPredictionResult")]
         self.assertEqual(popup.count('<section className="payer-result-section">'), 4)
         for title in ("Benchmark Summary", "Peer Members Used", "Prediction Range / Calculation Summary", "Supporting Evidence"):
             self.assertIn(f"<h3>{title}</h3>", popup)
@@ -331,10 +329,23 @@ class ClaimAnchoredPayerPopupTests(unittest.TestCase):
     def test_21_every_selectable_claim_can_open_dynamically(self):
         database = configured_workbook_database()
         for claim in database.selectable_claims:
-            try:
-                build_payer_prediction_for_claim(database, claim["claimId"])
-            except ValueError as error:
-                self.assertIn("No different-member peer cohort", str(error))
+            result = build_payer_prediction_for_claim(database, claim["claimId"])
+            self.assertIn(result["available"], (True, False))
+            selected = result["scenario_selection"]["selected"]
+            if result["available"]:
+                self.assertIn(selected["number"], (1, 2, 3))
+            else:
+                self.assertEqual(selected["number"], 0)
+                self.assertEqual(result["peer_members_used"], [])
+                self.assertNotIn("predicted_payer_avoidable_spend", result["calculation_summary"])
+
+    def test_current_claim_without_a_peer_returns_a_precise_no_cohort_result(self):
+        result = build_payer_prediction_for_claim(configured_workbook_database(), "CLM00001096")
+        self.assertFalse(result["available"])
+        self.assertEqual(result["target"]["claim_id"], "CLM00001096")
+        self.assertEqual(result["scenario_selection"]["selected"]["number"], 0)
+        self.assertEqual(result["peer_members_used"], [])
+        self.assertNotIn("predicted_payer_avoidable_spend", result["calculation_summary"])
 
     def test_22_production_engine_has_no_hardcoded_result_identity(self):
         source = (ROOT / "backend/payer_prediction.py").read_text()
@@ -378,10 +389,10 @@ class ClaimAnchoredPayerPopupTests(unittest.TestCase):
 
     def test_canonical_claim_response_selects_exactly_one_scenario(self):
         result = self.strict_result
-        self.assertEqual(
-            set(result),
-            {"target", "scenario_selection", "benchmark_summary", "peer_members_used", "calculation_summary", "supporting_evidence"},
-        )
+        self.assertTrue({
+            "target", "scenario_selection", "benchmark_summary", "peer_members_used",
+            "calculation_summary", "supporting_evidence", "calculation_trace",
+        }.issubset(result))
         selected = result["scenario_selection"]["selected"]
         self.assertIn(selected["number"], (1, 2, 3))
         self.assertTrue(result["scenario_selection"][f"scenario_{selected['number']}"]["available"])

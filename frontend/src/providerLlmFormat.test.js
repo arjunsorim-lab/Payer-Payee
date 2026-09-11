@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 
 import {
   formatFinancialStatus,
+  formatFinancialOpportunityPurpose,
   formatOptionalCurrency,
   formatPredictionRange,
   formatProbability,
@@ -22,6 +23,26 @@ test('status-aware formatters preserve backend meaning', () => {
   assert.equal(formatFinancialStatus({ status: 'supported', amount: 16.42 }), '$16.42')
   assert.equal(formatFinancialStatus({ status: 'supported_zero', amount: 0 }), '$0.00 currently supported')
   assert.equal(formatFinancialStatus({ status: 'insufficient_source_fields', amount: 0 }), '')
+})
+
+test('financial opportunity purpose uses the canonical rendered opportunities', () => {
+  assert.equal(
+    formatFinancialOpportunityPurpose([
+      { type: 'patient_balance', label: 'Actionable patient balance', amount: 73.71 },
+    ]),
+    'Checks the current claim for money that may need follow-up. It found $73.71 from actionable patient balance.',
+  )
+  assert.equal(
+    formatFinancialOpportunityPurpose([
+      { type: 'potentially_avoidable_episode_spend', label: 'Potentially avoidable episode spend', amount: 138.38 },
+    ]),
+    'Checks the current claim for money that may need follow-up. The supported amount is $138.38.',
+  )
+  assert.equal(
+    formatFinancialOpportunityPurpose([]),
+    'Checks the current claim for money that may need follow-up. The available evidence supports no positive amount.',
+  )
+  assert.doesNotMatch(app, /\$22\.86 recoverable/)
 })
 
 test('provider prediction consumes one canonical backend result', () => {
@@ -67,17 +88,68 @@ test('claim-anchored payer popup displays canonical content instead of a blank m
   )
 })
 
-test('provider forecast and payer savings are clearly separated and centered', () => {
+test('provider forecast shows one claim-anchored billed comparison', () => {
   const providerView = app.slice(app.indexOf('function PredictionScenarioMap'), app.indexOf('function filterClaimsByTime'))
-  assert.match(providerView, /Provider perspective · Forecast/)
-  assert.match(providerView, /Expected avoidable repeat cost/)
-  assert.match(providerView, /It is not the rule-based payer cohort savings amount/)
+  assert.match(providerView, /Possible future cost/)
+  assert.match(providerView, /not money already saved/)
+  assert.match(app, /Do not add these numbers together/)
   assert.match(providerView, /scenario\.historical_comparison\?\.sample_size/)
   assert.doesNotMatch(providerView, /Provider case forecast/)
   assert.match(app, /Claim Financial Predictions/)
   assert.match(app, /Open Provider Forecast/)
   assert.match(app, /Open Payer Savings/)
+  assert.match(providerView, /We could not find a fair bill to compare/)
+  assert.match(providerView, /payerSavings\?\.available === false/)
+  assert.match(app, /scenario\.payer_savings_prediction/)
+  assert.match(app, /function PeerComparisonPredictionSummary/)
+  assert.match(app, /Claim-anchored billed comparison/)
+  assert.match(app, /Billed amount comparison for this visit/)
+  assert.match(app, /prediction\.possible_billed_difference/)
+  assert.match(app, /Recorded Charge_Amount on claim/)
+  assert.match(app, /Exact source rows used in the calculation/)
+  assert.match(app, /Billed amount used/)
+  assert.match(app, /prediction\.match_checks/)
+  assert.match(app, /prediction\.limitation/)
+  assert.match(app, /Savings supported:/)
+  assert.match(app, /Not an accurate comparison — review-only estimate/)
+  assert.match(app, /Predicted payment savings/)
+  assert.match(app, /predicted payment savings amount is based on the billed-amount difference/)
+  assert.match(app, /Peer selection audit/)
+  assert.match(app, /Why this claim was chosen instead of the other claims/)
+  assert.match(app, /selectionAudit\.plain_language_steps/)
+  assert.match(app, /selectionAudit\.selection_guardrail/)
+  assert.match(app, /selectionAudit\.episode_candidates/)
+  assert.match(app, /selectionAudit\.claim_candidates/)
+  assert.match(app, /The price did not choose the peer/)
+  assert.match(app, /Use the billed difference only as a review flag/)
+  assert.match(app, /View full episode ranking/)
+  assert.match(app, /View full claim ranking/)
+  assert.doesNotMatch(providerView, /<PayerProcedureComparison/)
+  assert.doesNotMatch(providerView, /<ValueBasedRectificationCase/)
+  assert.doesNotMatch(providerView, /Patient-specific comparison/)
+  assert.doesNotMatch(providerView, /<CrossPatientComparatorContent/)
   assert.match(styles, /\.provider-forecast-detail,\s*\.payer-cohort-modal \.claim-payer-result\s*\{[^}]*width:\s*min\(100%, 1480px\);[^}]*margin-inline:\s*auto;/s)
+})
+
+test('provider forecast explains the prediction for a reader without claims knowledge', () => {
+  assert.match(app, /function PlainLanguageClaimNarrative/)
+  assert.match(app, /A simple story about this visit/)
+  assert.match(app, /What happened/)
+  assert.match(app, /What the computer is guessing/)
+  assert.match(app, /What to do next/)
+  assert.match(app, /Do not add these numbers together/)
+  assert.match(app, /This is only a guess, not a promise/)
+  assert.match(app, /Tap here if a word is new/)
+  assert.match(app, /function PlainTooltip/)
+  assert.match(app, /Show hard words, codes, and detailed math/)
+  assert.match(app, /Show where these numbers came from/)
+  assert.match(app, /Billed-price difference for review/)
+  assert.match(app, /This is a charge difference, not payer savings/)
+  assert.match(app, /minus \{formatOptionalCurrency\(lowestPeerAllowed\)\} equals/)
+  assert.match(app, /What has to happen before this could become a real saving/)
+  assert.match(app, /until one of these checks identifies a supported correction or future lower-price option/)
+  assert.match(app, /showAllPeers \? orderedPeers : orderedPeers\.slice\(0, 3\)/)
+  assert.doesNotMatch(app, /Richard Johnson|CPT 99395/)
 })
 
 test('scenario map is a structured nine-step pathway', () => {
@@ -89,6 +161,17 @@ test('scenario map is a structured nine-step pathway', () => {
   assert.match(app, /scenario-calculations/)
   assert.match(app, /scenario-action-card/)
   assert.match(app, /items\.peer_claim_ids/)
+  assert.match(app, /What happened before this claim\?/)
+  assert.match(app, /What is recorded on this claim\?/)
+  assert.match(app, /Is there money to follow up now\?/)
+  assert.match(app, /Where did the evidence come from\?/)
+  assert.match(app, /WHERE IT COMES FROM:/)
+  assert.match(app, /WHAT IT MEANS:/)
+  assert.match(app, /Numbers and evidence used/)
+  assert.match(app, /Where the two input numbers come from/)
+  assert.match(app, /The app does not choose this number/)
+  assert.match(app, /Demo-data warning:/)
+  assert.doesNotMatch(app, /How \$138\.38 is Calculated|244-day aging|CPT 99395/)
   assert.doesNotMatch(app, /function ScenarioMapData/)
 })
 
@@ -161,36 +244,34 @@ test('Member 360 loads the canonical member money summary from the backend', () 
   assert.match(app, /fetchJson\(`\/api\/members\/\$\{encodeURIComponent\(member\.memberId\)\}`\)/)
   assert.match(app, /buildMemberStats\(member, memberMoney, payerCohortSavings\)/)
   assert.match(app, /payerCohortSavingsSummary/)
-  assert.match(app, /Predicted Payer Avoidable Spend — Cohort/)
+  assert.match(app, /MemberFinancialPredictionSidebar/)
   assert.doesNotMatch(app, /buildMemberStats\(member\)\s*$/m)
 })
 
-test('Member 360 paginates every member claim and adjudication explanations use information buttons', () => {
+test('Member 360 paginates member conditions and overview table properly', () => {
   assert.match(app, /const memberEncountersPageSize = 10/)
-  assert.match(app, /member\.claims\.slice\(/)
-  assert.match(app, /title="Member Encounters"/)
-  assert.match(app, /claims=\{memberClaimsPage\}/)
-  assert.match(app, /totalCount=\{member\.claims\.length\}/)
-  assert.match(app, /onPageChange=\{setMemberEncountersPage\}/)
-  assert.doesNotMatch(app, /member\.claims\.slice\(0,\s*8\)/)
+  assert.match(app, /DiseaseOverviewTable/)
+  assert.match(app, /memberConditions/)
+  assert.match(app, /totalClaimsCount=\{member\.claims\.length\}/)
+})
 
-  const reasons = app.slice(app.indexOf('function ClaimReasonCard'), app.indexOf('function RecentEncounters'))
-  assert.match(reasons, /<details className="reason-info">/)
-  assert.match(reasons, /aria-label=\{`Explain \$\{row\.field\}`\}/)
-  assert.match(reasons, /<dd>\{row\.source\}<\/dd>/)
-  assert.match(reasons, /<dd>\{row\.method\}<\/dd>/)
-  assert.doesNotMatch(reasons, /<p>\{row\.reason\}<\/p>\s*<\/div>\s*\)\)\}/)
+test('All Encounters features source-marked reference claims without a fixed identity', () => {
+  assert.match(app, /const isReferenceClaim = \(claim\)/)
+  assert.match(app, /claim\.workbookFields\?\.Reference_Claim_Flag/)
+  assert.match(app, /isReferenceClaim\(left\)/)
+  assert.doesNotMatch(app, /FEATURED_DEMO_CLAIM_ID|['"]CLM\d{5,}['"]/)
+  assert.match(app, /return right\.dos\.localeCompare\(left\.dos\)/)
+  assert.doesNotMatch(app, /The walkthrough example for MBR00006 is shown first/)
+  assert.doesNotMatch(app, /WALKTHROUGH_MEMBER_ID|WALKTHROUGH_CLAIM_ORDER/)
 })
 
 test('prediction UI keeps predicted and validated avoidable spend separate', () => {
   assert.match(app, /snapshot\.predicted_avoidable_spend\?\.value/)
   assert.match(app, /result\.validated_avoidable_spend\.value/)
-  assert.match(app, /<details className="validated-avoidable-detail">/)
-  assert.match(app, /Highest Predicted Avoidable Spend/)
-  assert.match(app, /scenario\.predicted_avoidable_spend\.value/)
-  assert.match(app, /Predicted Avoidable Spend — Next 90 Days/)
+  assert.match(app, /DetailedClaimFinancialBreakdown/)
   assert.match(app, /Expected avoidable repeat cost/)
   assert.match(app, /snapshot\.future_denial_exposure\?\.value/)
   assert.match(app, /denialDetail\.denial_probability/)
   assert.doesNotMatch(app, /repeat_probability_90d\s*\*\s*avoidable_given_repeat_probability/)
 })
+

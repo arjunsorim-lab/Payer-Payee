@@ -25,7 +25,10 @@ try:
         build_payer_prediction,
         build_payer_prediction_for_claim,
         build_payer_prediction_options,
+        run_payer_temporal_backtest,
     )
+    from .value_based_case import build_value_based_case_for_claim
+    from .patient_comparison import build_same_patient_billed_intervention_savings, compare_patients, discover_comparable_pairs
     from .provider_prediction import build_provider_prediction_payload, find_case
     from .workbook_enrichment import load_workbook_database, read_savings_workbook
     from .workbook_llm import generate_workbook_chat_answer, generate_workbook_prediction_explanation
@@ -34,6 +37,7 @@ try:
         index_status,
         retrieve_evidence,
     )
+    from .uti_case_workbook import dataset_registry, load_uti_case_workbook
 except ImportError:
     from db import connect_mongo, get_mongo_config
     from financial_engine import build_financial_result, member_supported_summary
@@ -51,11 +55,15 @@ except ImportError:
         build_payer_prediction,
         build_payer_prediction_for_claim,
         build_payer_prediction_options,
+        run_payer_temporal_backtest,
     )
+    from value_based_case import build_value_based_case_for_claim
+    from patient_comparison import build_same_patient_billed_intervention_savings, compare_patients, discover_comparable_pairs
     from provider_prediction import build_provider_prediction_payload, find_case
     from workbook_enrichment import load_workbook_database, read_savings_workbook
     from workbook_llm import generate_workbook_chat_answer, generate_workbook_prediction_explanation
     from workbook_rag import build_index, index_status, retrieve_evidence
+    from uti_case_workbook import dataset_registry, load_uti_case_workbook
 
 FRONTEND_DIST_DIR = Path(__file__).resolve().parent.parent / "dist"
 BUNDLED_WORKBOOK_PATH = (
@@ -115,6 +123,24 @@ def configured_workbook_database():
 def workbook_prediction_with_rag(database, claim_number):
     result = build_financial_result(database, claim_number)
     try:
+        payer_savings_prediction = build_payer_prediction_for_claim(
+            database,
+            claim_number,
+        )
+    except ValueError as error:
+        payer_savings_prediction = {
+            "available": False,
+            "reason": str(error),
+        }
+    try:
+        value_based_case = build_value_based_case_for_claim(database, claim_number)
+    except (KeyError, ValueError) as error:
+        value_based_case = {
+            "available": False,
+            "status": "No claims-based rectification scenario",
+            "reason": str(error),
+        }
+    try:
         rag = retrieve_evidence(
             database,
             result,
@@ -122,6 +148,8 @@ def workbook_prediction_with_rag(database, claim_number):
         )
         return {
             **result,
+            "payer_savings_prediction": payer_savings_prediction,
+            "value_based_case": value_based_case,
             "rag": rag,
             "rag_evidence": rag["retrieved_documents"],
             "prediction_available": True,
@@ -132,6 +160,8 @@ def workbook_prediction_with_rag(database, claim_number):
     except (RuntimeError, OllamaError) as error:
         return {
             **result,
+            "payer_savings_prediction": payer_savings_prediction,
+            "value_based_case": value_based_case,
             "rag": {
                 "ready": False,
                 "retrieved_documents": [],
@@ -145,7 +175,10 @@ def workbook_prediction_with_rag(database, claim_number):
 
 
 def workbook_claims_for_request(database, args):
-    rows = list(database.selectable_claims)
+    # The encounter directory is an audit surface: show both current/selectable
+    # claims and historical-reference records. Prediction endpoints still use
+    # selectable claims only, so historical evidence can never become a target.
+    rows = list(database.claims)
     search = str(args.get("search", "") or "").strip().lower()
     if search:
         rows = [
@@ -185,7 +218,6 @@ def workbook_claim_for_api(database, claim, include_summary=True, compact=False)
             "calculationVersion",
             "predictionVersion",
             "ragIndexVersion",
-            "isHistoricalReference",
         ):
             payload.pop(key, None)
     if include_summary:
@@ -343,6 +375,7 @@ def health():
             "ok": True,
             "dataSource": "integrated-workbook",
             "workbook": database.source_banner(),
+            "datasets": dataset_registry(),
         })
     db = connect_mongo()
     db.command("ping")
@@ -361,7 +394,10 @@ def get_claims():
         member_summaries = (
             {
                 member_id: member_supported_summary(database, member_id)
-                for member_id in {claim["memberId"] for claim in page_rows}
+                for member_id in {
+                    claim["memberId"] for claim in page_rows
+                    if not claim.get("isHistoricalReference", False)
+                }
             }
             if include_financial
             else {}
@@ -375,7 +411,7 @@ def get_claims():
                     **workbook_claim_for_api(
                         database,
                         claim,
-                        include_summary=include_financial,
+                        include_summary=include_financial and not claim.get("isHistoricalReference", False),
                         compact=compact,
                     ),
                     **(
@@ -383,7 +419,7 @@ def get_claims():
                             "memberSupportedMoneySummary":
                                 member_summaries[claim["memberId"]]
                         }
-                        if include_financial
+                        if include_financial and not claim.get("isHistoricalReference", False)
                         else {}
                     ),
                 }
@@ -404,11 +440,15 @@ def get_claims():
 def get_claim(claim_number):
     database = configured_workbook_database()
     if database:
-        claim = database.find_claim(claim_number, selectable_only=True)
+        claim = database.find_claim(claim_number, selectable_only=False)
         if not claim:
-            return json_response({"message": "Selectable workbook claim not found"}, 404)
+            return json_response({"message": "Workbook claim not found"}, 404)
         return json_response({
-            "item": workbook_claim_for_api(database, claim),
+            "item": workbook_claim_for_api(
+                database,
+                claim,
+                include_summary=not claim.get("isHistoricalReference", False),
+            ),
             "source": database.source_banner(),
         })
     db = connect_mongo()
@@ -553,7 +593,9 @@ def get_prediction_scenarios():
     """Build provider-facing episode scenarios from the current database rows."""
     database = configured_workbook_database()
     if database:
-        rows = workbook_claims_for_request(database, request.args)
+        # Historical-reference rows are visible in the claims directory but
+        # cannot be prediction targets.
+        rows = list(database.selectable_claims)
         results = [build_financial_result(database, claim["claimId"]) for claim in rows]
         episode_avoidable = {}
         latest_episode_predictions = {}
@@ -665,6 +707,93 @@ def generate_claim_anchored_payer_prediction(claim_number):
         return json_response({"message": str(error)}, 404)
     except ValueError as error:
         return json_response({"message": str(error)}, 422)
+
+
+@app.get("/api/predictions/value-based-case/<claim_number>")
+def get_value_based_case(claim_number):
+    """Evaluate a reference anchor or later claim using the configured workbook."""
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Configured workbook is required."}, 409)
+    try:
+        return json_response(build_value_based_case_for_claim(database, claim_number))
+    except KeyError as error:
+        return json_response({"message": str(error)}, 404)
+    except ValueError as error:
+        return json_response({"message": str(error)}, 422)
+
+
+@app.get("/api/predictions/uti-case-workbook")
+def get_uti_case_workbook():
+    return json_response(load_uti_case_workbook())
+
+
+@app.get("/api/datasets")
+def get_datasets():
+    return json_response({"datasets": dataset_registry()})
+
+
+@app.get("/api/claims/comparable-pairs")
+def get_comparable_pairs():
+    """Discover patients that share a disease family for cross-patient comparison."""
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Configured workbook is required."}, 409)
+    return json_response(discover_comparable_pairs(database))
+
+
+@app.get("/api/claims/compare-patients")
+def get_compare_patients():
+    """Compare two patients with the same disease family and return savings."""
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Configured workbook is required."}, 409)
+    member_1 = request.args.get("member_id_1", "").strip()
+    member_2 = request.args.get("member_id_2", "").strip()
+    family = request.args.get("diagnosis_family", "").strip()
+    if not member_1 or not member_2 or not family:
+        return json_response({"message": "member_id_1, member_id_2, and diagnosis_family are required."}, 400)
+    try:
+        return json_response(compare_patients(database, member_1, member_2, family))
+    except KeyError as error:
+        return json_response({"message": str(error)}, 404)
+    except ValueError as error:
+        return json_response({"message": str(error)}, 422)
+
+
+@app.get("/api/claims/same-patient-billed-savings")
+def get_same_patient_billed_savings():
+    """Apply the workbook intervention template using same-patient billed charges."""
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Configured workbook is required."}, 409)
+    member_id = request.args.get("member_id", "").strip()
+    family = request.args.get("diagnosis_family", "").strip()
+    anchor_claim_id = request.args.get("anchor_claim_id", "").strip()
+    if not member_id or not family:
+        return json_response({"message": "member_id and diagnosis_family are required."}, 400)
+    return json_response(build_same_patient_billed_intervention_savings(database, member_id, family, anchor_claim_id))
+
+
+@app.get("/api/payer-prediction/<member_id>")
+def get_payer_member_prediction(member_id):
+    """Compatibility route backed by the authoritative payer rule engine."""
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Configured workbook is required."}, 409)
+    try:
+        return json_response(build_member_payer_cohort_summary(database, member_id))
+    except ValueError as error:
+        return json_response({"message": str(error)}, 422)
+
+
+@app.get("/api/payer-prediction/validation")
+def get_payer_prediction_validation():
+    """Historical validation of the authoritative Paid_Amount payer rule model."""
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Configured workbook is required."}, 409)
+    return json_response(run_payer_temporal_backtest(database))
 
 
 @app.get("/api/predictions/payer/member/<member_id>")

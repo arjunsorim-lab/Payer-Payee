@@ -64,9 +64,13 @@ class IntegratedWorkbookTests(unittest.TestCase):
         self.assertIn("Authorization_Valid_From", self.database.selectable_claims[0]["workbookFields"])
         self.assertIn("Remit_835_Received_Date", self.database.selectable_claims[0]["workbookFields"])
 
-    def test_historical_reference_rows_are_not_selectable_or_visible(self):
+    def test_historical_reference_rows_are_not_selectable_but_are_visible_for_audit(self):
         historical = self.database.historical_claims[0]
         self.assertIsNone(self.database.find_claim(historical["claimId"], selectable_only=True))
+        self.assertIsNotNone(self.database.find_claim(historical["claimId"], selectable_only=False))
+        response = self.client.get(f"/api/claims?search={historical['claimId']}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["total"], 1)
         response = self.client.get(
             f"/api/members/{historical['memberId']}/claims"
         )
@@ -84,6 +88,9 @@ class IntegratedWorkbookTests(unittest.TestCase):
     def test_clm_1092_financial_categories_and_best_action(self):
         result = build_financial_result(self.database, "CLM00001092")
         summary = result["supported_money_summary"]
+        self.assertEqual(result["actual_claim_facts"]["days_outstanding"], 50)
+        self.assertEqual(result["actual_claim_facts"]["aging_bucket"], "31-60")
+        self.assertEqual(result["actual_claim_facts"]["payment_plan_status"], "Broken Plan")
         self.assertEqual(result["financial_opportunities"]["underpayment"]["amount"], 0.0)
         self.assertEqual(result["financial_opportunities"]["underpayment"]["status"], "supported_zero")
         self.assertEqual(result["financial_opportunities"]["patient_balance"]["amount"], 73.71)
@@ -100,6 +107,26 @@ class IntegratedWorkbookTests(unittest.TestCase):
         )
         patient = next(item for item in calculation if item["type"] == "patient_balance")
         self.assertEqual(patient["formula"], "114.16 - 40.45 = 73.71")
+        self.assertEqual(patient["details"]["responsibility_component_total"], 114.16)
+        self.assertEqual(patient["details"]["workbook_row"], 3)
+        self.assertIn("Synthetic demonstration value", patient["details"]["patient_payment_source"])
+        prediction_step = next(
+            section
+            for section in result["scenario_map"]["sections"]
+            if section["step"] == 6
+        )
+        self.assertIn(
+            "$424.52 target charge × 78.82%",
+            prediction_step["calculations"]["predicted_allowed"]["formula"],
+        )
+        self.assertIn(
+            "10.53% denial chance × $278.01",
+            prediction_step["calculations"]["future_denial_exposure"]["formula"],
+        )
+        self.assertIn(
+            "24.10% repeat chance × 68.85% avoidable share × $334.61",
+            prediction_step["calculations"]["predicted_avoidable_spend"]["formula"],
+        )
 
     def test_clm_143_financial_categories_and_best_action(self):
         result = build_financial_result(self.database, "CLM00000143")
@@ -226,7 +253,12 @@ class IntegratedWorkbookTests(unittest.TestCase):
         )
 
     def test_rag_is_workbook_only_and_excludes_direct_phi(self):
-        bundle = build_index(self.database)
+        try:
+            bundle = build_index(self.database)
+        except RuntimeError as exc:
+            if "unavailable" in str(exc).lower():
+                self.skipTest(f"Ollama not available: {exc}")
+            raise
         self.assertGreater(bundle["manifest"]["document_count"], len(self.database.claims))
         self.assertEqual(
             bundle["manifest"]["document_count"],
@@ -253,7 +285,12 @@ class IntegratedWorkbookTests(unittest.TestCase):
 
     def test_rag_filters_claim_episode_and_cutoff(self):
         canonical = build_financial_result(self.database, "CLM00001092")
-        rag = retrieve_evidence(self.database, canonical, "patient balance")
+        try:
+            rag = retrieve_evidence(self.database, canonical, "patient balance")
+        except RuntimeError as exc:
+            if "unavailable" in str(exc).lower():
+                self.skipTest(f"Ollama not available: {exc}")
+            raise
         selected = self.database.find_claim(canonical["claim_id"])
         by_id = {
             document["metadata"]["document_id"]: document
@@ -273,11 +310,16 @@ class IntegratedWorkbookTests(unittest.TestCase):
 
     def test_clm_143_retrieval_contains_underpayment_evidence_fields(self):
         canonical = build_financial_result(self.database, "CLM00000143")
-        rag = retrieve_evidence(
-            self.database,
-            canonical,
-            "Why is the supported underpayment recoverable?",
-        )
+        try:
+            rag = retrieve_evidence(
+                self.database,
+                canonical,
+                "Why is the supported underpayment recoverable?",
+            )
+        except RuntimeError as exc:
+            if "unavailable" in str(exc).lower():
+                self.skipTest(f"Ollama not available: {exc}")
+            raise
         exact_claim_fields = {
             field
             for document in rag["retrieved_documents"]

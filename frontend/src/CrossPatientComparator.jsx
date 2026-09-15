@@ -47,7 +47,7 @@ export function SamePatientBilledSavings({ memberId, diagnosisCode, claimId = ''
     <p>{result?.reason || 'The required claim evidence was not found.'}</p>
     <div className="missing-template-evidence">
       <strong>The calculation requires all three items:</strong>
-      <ol><li>An earlier visit for the same member and diagnosis family.</li><li>A later related visit anchored to the selected claim.</li><li>A separately identifiable billed intervention or additional billed unit on the later visit.</li></ol>
+      <ol><li>An earlier visit for the same member and diagnosis family.</li><li>A later related visit anchored to the selected claim.</li><li>A separately identifiable billed intervention explicitly supported by the later visit.</li></ol>
     </div>
     <p className="same-patient-billed-warning">No amount is displayed because missing evidence must not be replaced with another member’s values.</p>
   </section>
@@ -55,7 +55,10 @@ export function SamePatientBilledSavings({ memberId, diagnosisCode, claimId = ''
   const calculation = result.calculation
   const selectionAudit = result.selection_audit
   const fmt = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value || 0)
+  const claimNames = (episode) => (episode?.claims || []).map((line) => line.claim_id).filter(Boolean).join(', ') || 'no claim ID'
   const interventionLines = result.intervention_lines || result.culture_add_on_lines || []
+  const interventionSource = interventionLines.map((line) => `${line.claim_id || 'claim'} ${line.cpt || ''}`.trim()).join(', ') || 'none'
+  const interventionDetail = interventionLines.map((line) => `${line.claim_id || 'claim'} · ${line.procedure_description || line.cpt || 'intervention line'} · billed ${fmt(line.billed_amount)}`).join('; ') || 'No intervention lines identified.'
   const episodeLines = (episode) => (episode?.claims || []).map((line) => (
     <li key={line.claim_id}><strong>{line.claim_id}</strong> · {line.procedure_description || line.cpt || 'Billed claim'} · billed {fmt(line.billed_amount)}</li>
   ))
@@ -67,23 +70,26 @@ export function SamePatientBilledSavings({ memberId, diagnosisCode, claimId = ''
         <h2 id="same-patient-billed-heading">Estimated billed impact of moving the additional service earlier</h2>
         <p>This compares one earlier visit with the selected later visit for <strong>{result.member_id}</strong>{result.anchor_claim_id ? <>. The later visit is anchored to claim <strong>{result.anchor_claim_id}</strong></> : null}. All amounts come from this member's recorded billed claims.</p>
       </header>
+      {result.synthetic_demo ? <div className="synthetic-demo-notice" role="note"><ShieldAlert size={18} /><span><strong>Synthetic presentation data.</strong> This example demonstrates the calculation and must not be presented as a real patient or real claims.</span></div> : null}
       <div className="same-patient-billed-grid">
-        <div><span>Earlier visit actually billed</span><strong>{fmt(calculation.earlier_episode_actual_billed)}</strong><small>All billed lines on the selected earlier visit.</small></div>
-        <div><span>Later visit actually billed</span><strong>{fmt(calculation.later_episode_actual_billed)}</strong><small>All billed lines on the selected later visit.</small></div>
-        <div><span>Additional service cost moved earlier</span><strong>{fmt(calculation.culture_and_specimen_add_on_billed)}</strong><small>The separately identifiable later service used as the intervention.</small></div>
-        <div><span>What was billed across both visits</span><strong>{fmt(calculation.actual_two_episode_billed)}</strong><small>Earlier visit + later visit.</small></div>
-        <div><span>Estimated cost with earlier intervention</span><strong>{fmt(calculation.proposed_earlier_episode_with_add_on_billed)}</strong><small>Earlier visit + additional service, without counting the later visit.</small></div>
-        <div className="difference"><span>Predicted billed amount that may be avoided</span><strong>{fmt(calculation.potential_billed_difference)}</strong><small>Two-visit total − estimated earlier-intervention cost.</small></div>
+        <div><span>Earlier visit actually billed</span><strong>{fmt(calculation.earlier_episode_actual_billed)}</strong><small>Sum of every billed line in {claimNames(result.earlier_episode)}.</small></div>
+        <div><span>Later visit actually billed</span><strong>{fmt(calculation.later_episode_actual_billed)}</strong><small>Sum of every billed line in {claimNames(result.later_episode)}.</small></div>
+        <div><span>Supported intervention lines moved earlier</span><strong>{fmt(calculation.culture_and_specimen_add_on_billed)}</strong><small>{interventionDetail}. These lines are from the later visit and absent from the earlier visit.</small></div>
+        <div><span>What was billed across both visits</span><strong>{fmt(calculation.actual_two_episode_billed)}</strong><small>{fmt(calculation.earlier_episode_actual_billed)} earlier + {fmt(calculation.later_episode_actual_billed)} later.</small></div>
+        <div><span>Estimated earlier visit with those lines</span><strong>{fmt(calculation.proposed_earlier_episode_with_add_on_billed)}</strong><small>{fmt(calculation.earlier_episode_actual_billed)} earlier + {fmt(calculation.culture_and_specimen_add_on_billed)} intervention lines.</small></div>
+        <div className="difference"><span>Predicted billed amount that may be avoided</span><strong>{fmt(calculation.potential_billed_difference)}</strong><small>{fmt(calculation.actual_two_episode_billed)} actual total − {fmt(calculation.proposed_earlier_episode_with_add_on_billed)} estimated earlier scenario.</small></div>
       </div>
       <p className="same-patient-billed-equation">
         {fmt(calculation.actual_two_episode_billed)} − {fmt(calculation.proposed_earlier_episode_with_add_on_billed)} = {fmt(calculation.potential_billed_difference)}
       </p>
       <div className="calculation-explanation">
-        <h3>What the calculation means</h3>
+        <h3>Where every number comes from</h3>
         <ol>
-          <li>The two visits actually billed <strong>{fmt(calculation.earlier_episode_actual_billed)} + {fmt(calculation.later_episode_actual_billed)} = {fmt(calculation.actual_two_episode_billed)}</strong>.</li>
-          <li>Moving the separately billed additional service to the earlier visit produces an estimated earlier-intervention cost of <strong>{fmt(calculation.earlier_episode_actual_billed)} + {fmt(calculation.culture_and_specimen_add_on_billed)} = {fmt(calculation.proposed_earlier_episode_with_add_on_billed)}</strong>.</li>
-          <li>The predicted billed amount that may be avoided is <strong>{fmt(calculation.actual_two_episode_billed)} − {fmt(calculation.proposed_earlier_episode_with_add_on_billed)} = {fmt(calculation.potential_billed_difference)}</strong>.</li>
+          <li><strong>Earlier source:</strong> {claimNames(result.earlier_episode)} contributes {fmt(calculation.earlier_episode_actual_billed)} from all of its billed lines.</li>
+          <li><strong>Later source:</strong> {claimNames(result.later_episode)} contributes {fmt(calculation.later_episode_actual_billed)} from all of its billed lines.</li>
+          <li><strong>Actual total:</strong> {fmt(calculation.earlier_episode_actual_billed)} + {fmt(calculation.later_episode_actual_billed)} = <strong>{fmt(calculation.actual_two_episode_billed)}</strong>.</li>
+          <li><strong>Counterfactual:</strong> only these later lines are moved earlier: {interventionDetail}. Their billed total is {fmt(calculation.culture_and_specimen_add_on_billed)}. Therefore {fmt(calculation.earlier_episode_actual_billed)} earlier-visit billed amount + {fmt(calculation.culture_and_specimen_add_on_billed)} intervention billed amount = <strong>{fmt(calculation.proposed_earlier_episode_with_add_on_billed)}</strong>.</li>
+          <li><strong>Predicted billed difference:</strong> {fmt(calculation.actual_two_episode_billed)} − {fmt(calculation.proposed_earlier_episode_with_add_on_billed)} = <strong>{fmt(calculation.potential_billed_difference)}</strong>. This is a review estimate, not confirmed savings.</li>
         </ol>
       </div>
       {selectionAudit ? <section className="intervention-selection-reason" aria-labelledby="intervention-selection-heading">
@@ -115,9 +121,10 @@ export function SamePatientBilledSavings({ memberId, diagnosisCode, claimId = ''
           <div><h4>Later episode · {result.later_episode?.start_date || 'date unavailable'}</h4><p>Actual billed total: <strong>{fmt(calculation.later_episode_actual_billed)}</strong></p><ul>{episodeLines(result.later_episode)}</ul></div>
         </div>
         <h4>Separately identifiable intervention lines used as the proposed add-on</h4>
+        <p>These are the only lines added to the earlier visit. Each line is shown with its claim ID, procedure, and billed amount so the add-on total can be checked directly.</p>
         <ul>
           {interventionLines.map((line) => (
-            <li key={`${line.claim_id}-${line.cpt}`}>{line.procedure_description || line.cpt} ({line.cpt}) — {fmt(line.billed_amount)}{line.derived_from_units ? ` · ${line.units} additional unit(s), derived from ${line.observed_later_units} later units versus ${line.earlier_units} earlier units` : ''}</li>
+            <li key={`${line.claim_id}-${line.cpt}`}>{line.procedure_description || line.cpt} ({line.cpt}) — {fmt(line.billed_amount)}</li>
           ))}
         </ul>
       </details>
@@ -161,6 +168,7 @@ export function PatientWorkbookCalculation({ diagnosisCode }) {
   </section>
 }
 
+// eslint-disable-next-line no-unused-vars
 function MemberWorkbookCalculations({ diagnosisCode, members }) {
   const family = String(diagnosisCode || '').slice(0, 3).toUpperCase()
   if (!members?.length) return null
@@ -175,6 +183,7 @@ function MemberWorkbookCalculations({ diagnosisCode, members }) {
   </section>
 }
 
+// eslint-disable-next-line no-unused-vars
 function QualityOfCareReason({ diagnosisCode, memberCount }) {
   const family = String(diagnosisCode || '').slice(0, 3).toUpperCase()
   if (!family || !memberCount) return null
@@ -220,13 +229,13 @@ export function CrossPatientComparatorContent({
   // Pre-configured showcases for quick, powerful demonstrations
   const SHOWCASE_PRESETS = [
     {
-      label: 'Kidneys · UTI Culture (N39)',
+      label: 'Kidneys · UTI Billed Demo (N39)',
       emoji: '💧',
       organ: 'Kidneys & Urinary Tract',
       family: 'N39',
-      m1: 'MBR00006',
+      m1: 'MBRDEMO01',
       m2: 'MBR00017',
-      desc: 'Charles Moore vs Richard Jackson · High avoidable spend',
+      desc: 'Synthetic presentation member vs Richard Jackson · billed-amount comparison',
     },
     {
       label: 'Bones · RA Biologic (M06)',
@@ -621,10 +630,6 @@ export function CrossPatientComparatorContent({
         )}
       </div>
 
-      <QualityOfCareReason diagnosisCode={selectedFamily} memberCount={availableMembers.length} />
-      <PatientWorkbookCalculation diagnosisCode={selectedFamily} />
-      <MemberWorkbookCalculations diagnosisCode={selectedFamily} members={availableMembers} />
-
       {/* Error message */}
       {comparisonError && (
         <div className="comparator-error-banner">
@@ -643,6 +648,7 @@ export function CrossPatientComparatorContent({
 
       {comparisonResult && (
         <div className="comparator-results-section">
+          {(comparisonResult.higher_cost_patient.episode.synthetic_demo || comparisonResult.lower_cost_patient.episode.synthetic_demo) ? <div className="synthetic-demo-notice" role="note"><ShieldAlert size={18} /><span><strong>Synthetic presentation data is included.</strong> Use this comparison to demonstrate the billed-amount workflow, not as evidence about a real patient.</span></div> : null}
           {/* Executive Savings Banner */}
           <div className="comparator-savings-banner">
             <div className="savings-left">
@@ -688,7 +694,7 @@ export function CrossPatientComparatorContent({
                 </div>
                 <h3>{comparisonResult.higher_cost_patient.patient_name}</h3>
                 <span className="member-id-tag">
-                  Member ID: {comparisonResult.higher_cost_patient.member_id}
+                  Member ID: {comparisonResult.higher_cost_patient.member_id}{comparisonResult.higher_cost_patient.episode.synthetic_demo ? ' · Synthetic demo' : ''}
                 </span>
               </div>
               <div className="patient-card-metrics">
@@ -744,7 +750,7 @@ export function CrossPatientComparatorContent({
                 </div>
                 <h3>{comparisonResult.lower_cost_patient.patient_name}</h3>
                 <span className="member-id-tag">
-                  Member ID: {comparisonResult.lower_cost_patient.member_id}
+                  Member ID: {comparisonResult.lower_cost_patient.member_id}{comparisonResult.lower_cost_patient.episode.synthetic_demo ? ' · Synthetic demo' : ''}
                 </span>
               </div>
               <div className="patient-card-metrics">

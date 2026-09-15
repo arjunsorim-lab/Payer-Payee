@@ -107,6 +107,15 @@ def _number(value):
         return 0.0
 
 
+def _boolean(value):
+    text = _text(value).upper()
+    if text in {"Y", "YES", "TRUE", "1"}:
+        return True
+    if text in {"N", "NO", "FALSE", "0"}:
+        return False
+    return None
+
+
 def _money(value):
     return float(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
@@ -152,6 +161,11 @@ def _is_historical_reference(claim):
     }
 
 
+def _is_template_coverage_demo(claim):
+    """Identify synthetic support rows reserved for the same-patient demo."""
+    return _text(_field(claim, "UI_Detail_Reason")).lower() == "demo-only template-coverage episode"
+
+
 def _claim_summary(claim):
     """Build a lightweight claim summary dict."""
     service_date = _day(_field(claim, "Service_Date_From", "dos"))
@@ -168,6 +182,8 @@ def _claim_summary(claim):
         "billed_amount": _number(_field(claim, "Charge_Amount", "totalCharge")),
         "allowed_amount": _number(_field(claim, "Allowed_Amount", "allowed")),
         "units": _number(_field(claim, "Units", "units")),
+        "intervention_performed": _boolean(_field(claim, "Intervention_Performed")),
+        "synthetic_demo": _text(_field(claim, "Reason_Code")).upper() == "SYNTHETIC_PRESENTATION_CASE",
     }
 
 
@@ -230,6 +246,7 @@ def _make_episode(rows, member_id, family):
         "start_date": min(dates) if dates else "",
         "end_date": max(dates) if dates else "",
         "claim_count": len(rows),
+        "synthetic_demo": any(s["synthetic_demo"] for s in summaries),
         "total_paid": _money(total_paid),
         "total_billed": _money(total_billed),
         "total_allowed": _money(total_allowed),
@@ -249,7 +266,7 @@ def discover_comparable_pairs(database):
     # The selector is an evidence directory: include every member with this
     # disease family, including historical-reference records. The response
     # identifies those rows so reviewers can distinguish reference evidence.
-    claims = list(database.claims)
+    claims = [claim for claim in database.claims if not _is_template_coverage_demo(claim)]
     episodes = _build_episodes(claims)
 
     # Group episodes by family
@@ -327,7 +344,7 @@ def compare_patients(database, member_id_1, member_id_2, diagnosis_family):
     if member_id_1 == member_id_2:
         raise ValueError("The two patients must be different members.")
 
-    claims = list(database.claims)
+    claims = [claim for claim in database.claims if not _is_template_coverage_demo(claim)]
     episodes = _build_episodes(claims)
 
     # Find episodes for each member in this disease family
@@ -427,52 +444,14 @@ def _is_uti_culture_line(claim_summary):
     )
 
 
-_TEMPLATE_INTERVENTION_TERMS = (
-    "culture", "specimen", "imaging", "scan", "x-ray", "ultrasound", "mri", "ct ",
-    "laboratory", "lab ", "test", "screening", "therapy", "injection", "infusion",
-    "procedure", "surgery", "medication", "counsel", "follow-up", "follow up", "evaluation",
-)
-
-
 def _is_template_intervention_line(line, earlier_lines):
-    """Apply the spreadsheet pattern to a distinct, reviewable later service line."""
+    """Require an explicitly marked, distinct later intervention service."""
     cpt = _text(line.get("cpt"))
     description = _text(line.get("procedure_description")).lower()
     earlier_keys = {(_text(item.get("cpt")), _text(item.get("procedure_description")).lower()) for item in earlier_lines}
     if (cpt, description) in earlier_keys:
         return False
-    return bool(cpt or description) and any(term in description for term in _TEMPLATE_INTERVENTION_TERMS)
-
-
-def _incremental_unit_intervention_lines(earlier, later):
-    """Return separately billed additional units when no new CPT line exists."""
-    derived = []
-    earlier_by_cpt = defaultdict(list)
-    for line in earlier["claims"]:
-        earlier_by_cpt[_text(line.get("cpt"))].append(line)
-    for line in later["claims"]:
-        cpt = _text(line.get("cpt"))
-        candidates = earlier_by_cpt.get(cpt, [])
-        if not cpt or not candidates:
-            continue
-        previous = sorted(candidates, key=lambda item: (item.get("service_date", ""), item.get("claim_id", "")))[-1]
-        later_units = _number(line.get("units"))
-        earlier_units = _number(previous.get("units"))
-        extra_units = later_units - earlier_units
-        if extra_units <= 0 or later_units <= 0 or _number(line.get("billed_amount")) <= 0:
-            continue
-        amount = _money((_number(line.get("billed_amount")) / later_units) * extra_units)
-        derived.append({
-            **line,
-            "procedure_description": f"Additional {line.get('procedure_description') or cpt} unit(s)",
-            "units": extra_units,
-            "billed_amount": amount,
-            "derived_from_units": True,
-            "observed_later_units": later_units,
-            "earlier_units": earlier_units,
-            "source_earlier_claim_id": previous.get("claim_id"),
-        })
-    return derived
+    return bool(cpt or description) and line.get("intervention_performed") is True
 
 
 def build_same_patient_billed_intervention_savings(database, member_id, diagnosis_family, anchor_claim_id=""):
@@ -486,7 +465,11 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
     if not family:
         return {"available": False, "member_id": member_id, "diagnosis_family": family, "reason": "No diagnosis family was supplied."}
 
-    claims = [c for c in database.selectable_claims if not _is_historical_reference(c)]
+    source_claims = getattr(database, "claims", database.selectable_claims)
+    claims = [
+        claim for claim in source_claims
+        if not _is_historical_reference(claim) or _is_template_coverage_demo(claim)
+    ]
     # The workbook treats each encounter date as one episode. Do not chain
     # several visits together through the broader 90-day comparison window.
     episodes = sorted(
@@ -515,8 +498,8 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
                     continue
             else:
                 add_on_lines = [line for line in later["claims"] if _is_template_intervention_line(line, earlier["claims"])]
-                if not add_on_lines:
-                    add_on_lines = _incremental_unit_intervention_lines(earlier, later)
+                if any(_is_template_intervention_line(line, []) for line in earlier["claims"]):
+                    continue
             if not add_on_lines:
                 continue
             selected_pair = (earlier, later, add_on_lines, later_index)
@@ -572,10 +555,14 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
             "selected": selected,
             "decision": "Selected: closest earlier visit meeting the same-member and diagnosis-family rule." if selected else "Ranked lower because another eligible visit occurred more recently.",
         })
+    intervention_detail = "; ".join(
+        f"{line.get('claim_id') or 'claim'} ({line.get('cpt') or 'procedure'}): {_money(line.get('billed_amount')):,.2f} billed"
+        for line in add_on_lines
+    ) or "No separately identifiable intervention lines were found."
     intervention_reason = (
-        f"The anchored later claim records {add_on_lines[0].get('observed_later_units'):g} unit(s), while the selected earlier claim records {add_on_lines[0].get('earlier_units'):g}. The additional {add_on_lines[0].get('units'):g} unit(s) are separately priced from the later claim's billed amount."
-        if add_on_lines and add_on_lines[0].get("derived_from_units")
-        else "These billed service lines appear on the later visit and do not appear on the selected earlier visit."
+        "The later UTI visit records urine-culture or specimen services that are absent from the earlier visit, matching the attached workbook's intervention bundle."
+        if family.startswith(("N30", "N39"))
+        else f"The add-on is limited to these later-visit lines: {intervention_detail}. Each is marked as an intervention and was absent from the selected earlier visit; no other later lines are included."
     )
 
     return {
@@ -583,11 +570,12 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
         "member_id": member_id,
         "diagnosis_family": family,
         "anchor_claim_id": anchor_claim_id or None,
+        "synthetic_demo": bool(earlier.get("synthetic_demo") or later.get("synthetic_demo")),
         "template_logic": {
             "earlier_episode_without_intervention": True,
             "later_related_episode_with_intervention": True,
             "billed_intervention_lines_added_to_earlier": True,
-            "intervention_scope": "UTI culture/specimen bundle" if family.startswith(("N30", "N39")) else "Distinct later diagnostic, treatment, procedure, or follow-up service lines identified from this member's claims",
+            "intervention_scope": "UTI culture/specimen bundle" if family.startswith(("N30", "N39")) else "Distinct later service lines explicitly recorded as interventions in this member's claims",
         },
         "selection_audit": {
             "rule": "Anchor the selected later claim, keep the same member and ICD-10 diagnosis family, then choose the closest qualifying earlier visit. Billed amount does not choose the visit.",
@@ -633,6 +621,7 @@ def _episode_summary(episode):
         "start_date": episode["start_date"],
         "end_date": episode["end_date"],
         "claim_count": episode["claim_count"],
+        "synthetic_demo": episode.get("synthetic_demo", False),
         "total_paid": episode["total_paid"],
         "total_billed": episode["total_billed"],
         "total_allowed": episode["total_allowed"],

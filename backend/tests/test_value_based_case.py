@@ -444,7 +444,7 @@ class SyntheticWorkbookRegressionTests(unittest.TestCase):
         for field in ("billed_comparison", "source_rows", "match_checks", "selection_audit"):
             self.assertIn(field, section)
         view = source[source.index("function PredictionScenarioMap"):source.index("function filterClaimsByTime")]
-        self.assertIn("<PeerComparisonPredictionSummary", view)
+        self.assertIn("<SamePatientBilledSavings", view)
         self.assertNotIn("<ValueBasedRectificationCase", view)
         self.assertNotRegex(section, r"CLM\d{5,}|MBR\d{5,}|3585\.03|975\.99")
 

@@ -8542,6 +8542,23 @@ button {
   font-weight: 600;
 }
 
+.synthetic-demo-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  margin: 0 0 1rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid #f0c36a;
+  border-radius: 12px;
+  background: #fff8e8;
+  color: #7a4b00;
+}
+
+.synthetic-demo-notice svg {
+  flex: 0 0 auto;
+  margin-top: 0.1rem;
+}
+
 .comparator-loading-inline, .comparator-loading-state {
   display: flex;
   align-items: center;

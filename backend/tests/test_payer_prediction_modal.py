@@ -145,8 +145,8 @@ class ClaimAnchoredPayerPopupTests(unittest.TestCase):
 
     def test_05_scenario_1_requires_strict_matching(self):
         self.assertEqual(self.strict_result["scenario_selection"]["selected"]["number"], 1)
-        target = {"member_id": "A", "diagnosis_family": "E11", "selected_identity": {"payer_id": "P1", "provider": "N1", "pos": "11", "cpt": "99214", "procedure_family": "992", "units": 1}}
-        peer = {"member_id": "B", "diagnosis_family": "E11", "anchor_identities": [{"payer_id": "P1", "provider": "DIFFERENT", "pos": "11", "cpt": "99214", "procedure_family": "992", "units": 1}]}
+        target = {"member_id": "A", "diagnosis_family": "E11", "selected_identity": {"exact_icd": "E11.9", "payer_id": "P1", "provider": "N1", "pos": "11", "cpt": "99214", "procedure_family": "992", "units": 1}}
+        peer = {"member_id": "B", "diagnosis_family": "E11", "anchor_identities": [{"exact_icd": "E11.9", "payer_id": "P1", "provider": "DIFFERENT", "pos": "11", "cpt": "99214", "procedure_family": "992", "units": 1}]}
         self.assertFalse(_claim_scenario_match(target, peer, 1))
 
     def test_06_scenario_2_requires_same_disease_and_payer(self):

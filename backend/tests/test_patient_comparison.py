@@ -172,7 +172,7 @@ class TestSamePatientBilledInterventionSavings(unittest.TestCase):
         result = build_same_patient_billed_intervention_savings(self.db, "PATIENT", "F41")
         self.assertFalse(result["available"])
 
-    def test_claim_anchor_uses_incremental_billed_units_for_other_families(self):
+    def test_more_units_alone_are_not_called_an_intervention(self):
         earlier = billed_claim("PREVENTIVE-EARLIER", "2024-01-01", 800.00, "99395", "Preventive Visit")
         later = billed_claim("PREVENTIVE-LATER", "2024-06-01", 1600.00, "99395", "Preventive Visit")
         for claim, units in ((earlier, 1), (later, 2)):
@@ -184,13 +184,67 @@ class TestSamePatientBilledInterventionSavings(unittest.TestCase):
         result = build_same_patient_billed_intervention_savings(
             SyntheticDatabase([earlier, later]), "GENERAL-PATIENT", "Z01", "PREVENTIVE-LATER"
         )
+        self.assertFalse(result["available"])
+
+    def test_explicit_distinct_intervention_can_use_general_template(self):
+        earlier = billed_claim("BASE-EARLIER", "2024-01-01", 800.00, "99395", "Preventive Visit")
+        later_base = billed_claim("BASE-LATER", "2024-06-01", 800.00, "99395", "Preventive Visit")
+        intervention = billed_claim("INTERVENTION", "2024-06-01", 200.00, "99401", "Preventive counseling")
+        for claim in (earlier, later_base, intervention):
+            fields = claim["workbookFields"]
+            fields["Member_ID"] = "GENERAL-PATIENT"
+            fields["ICD10_Family"] = "Z01"
+            fields["ICD10_Diagnosis_Code"] = "Z01.419"
+            fields["Units"] = 1
+        intervention["workbookFields"]["Intervention_Performed"] = "Y"
+        result = build_same_patient_billed_intervention_savings(
+            SyntheticDatabase([earlier, later_base, intervention]), "GENERAL-PATIENT", "Z01", "BASE-LATER"
+        )
         self.assertTrue(result["available"])
-        self.assertEqual(result["anchor_claim_id"], "PREVENTIVE-LATER")
-        self.assertEqual(result["calculation"]["culture_and_specimen_add_on_billed"], 800.00)
-        self.assertEqual(result["calculation"]["actual_two_episode_billed"], 2400.00)
-        self.assertEqual(result["calculation"]["proposed_earlier_episode_with_add_on_billed"], 1600.00)
+        self.assertEqual(result["calculation"]["culture_and_specimen_add_on_billed"], 200.00)
+        self.assertEqual(result["calculation"]["actual_two_episode_billed"], 1800.00)
+        self.assertEqual(result["calculation"]["proposed_earlier_episode_with_add_on_billed"], 1000.00)
         self.assertEqual(result["calculation"]["potential_billed_difference"], 800.00)
-        self.assertTrue(result["intervention_lines"][0]["derived_from_units"])
+
+    def test_bundled_synthetic_presentation_case_uses_billed_amounts(self):
+        database = load_workbook_database("data/claims-demo.xlsx")
+        result = build_same_patient_billed_intervention_savings(
+            database, "MBRDEMO01", "N39", "CLM00990003"
+        )
+        calculation = result["calculation"]
+        self.assertTrue(result["available"])
+        self.assertTrue(result["synthetic_demo"])
+        self.assertEqual(result["calculation_basis"], "billed_amount")
+        self.assertEqual(calculation["earlier_episode_actual_billed"], 500.00)
+        self.assertEqual(calculation["later_episode_actual_billed"], 2750.00)
+        self.assertEqual(calculation["culture_and_specimen_add_on_billed"], 250.00)
+        self.assertEqual(calculation["potential_billed_difference"], 2500.00)
+
+    def test_bundled_dataset_has_demo_template_coverage_for_every_member_family(self):
+        database = load_workbook_database("data/claims-demo.xlsx")
+        pairs = {
+            (
+                claim["workbookFields"]["Member_ID"],
+                claim["workbookFields"]["ICD10_Family"],
+            )
+            for claim in database.selectable_claims
+        }
+        coverage_rows = {}
+        for claim in database.claims:
+            fields = claim["workbookFields"]
+            if fields.get("UI_Detail_Reason") != "Demo-only template-coverage episode":
+                continue
+            key = (fields["Member_ID"], fields["ICD10_Family"])
+            coverage_rows.setdefault(key, []).append(fields)
+
+        self.assertEqual(len(pairs), 319)
+        self.assertEqual(set(coverage_rows), pairs - {("MBRDEMO01", "N39")})
+        for key, rows in coverage_rows.items():
+            episode_ids = {str(row["Episode_ID"]) for row in rows}
+            self.assertTrue(any(episode_id.endswith("-E1") for episode_id in episode_ids), key)
+            self.assertTrue(any(episode_id.endswith("-E2") for episode_id in episode_ids), key)
+            self.assertTrue(any(str(row["Intervention_Performed"]).upper() == "Y" for row in rows), key)
+            self.assertTrue(all(float(row["Charge_Amount"]) > 0 for row in rows), key)
 
 
 if __name__ == "__main__":

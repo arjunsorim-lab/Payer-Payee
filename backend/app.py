@@ -389,7 +389,7 @@ def get_claims():
         rows = workbook_claims_for_request(database, request.args)
         page, limit, skip = page_options(request.args)
         page_rows = rows[skip: skip + limit]
-        include_financial = query_flag(request.args, "includeFinancial")
+        include_financial = query_flag(request.args, "includeFinancial", default=False)
         compact = query_flag(request.args, "compact", default=False)
         member_summaries = (
             {
@@ -464,6 +464,7 @@ def get_members():
     if database:
         page, limit, skip = page_options(request.args)
         search = str(request.args.get("search", "") or "").strip().lower()
+        include_financial = query_flag(request.args, "includeFinancial", default=False)
         members = [
             member for member in database.members
             if not search
@@ -473,8 +474,14 @@ def get_members():
         items = [
             {
                 **member,
-                "supportedMoneySummary": member_supported_summary(
-                    database, member["memberId"]
+                **(
+                    {
+                        "supportedMoneySummary": member_supported_summary(
+                            database, member["memberId"]
+                        )
+                    }
+                    if include_financial
+                    else {}
                 ),
             }
             for member in members[skip: skip + limit]
@@ -595,7 +602,9 @@ def get_prediction_scenarios():
     if database:
         # Historical-reference rows are visible in the claims directory but
         # cannot be prediction targets.
-        rows = list(database.selectable_claims)
+        all_rows = list(database.selectable_claims)
+        page, limit, skip = page_options(request.args, default_limit=50)
+        rows = all_rows[skip: skip + limit]
         results = [build_financial_result(database, claim["claimId"]) for claim in rows]
         episode_avoidable = {}
         latest_episode_predictions = {}
@@ -620,7 +629,8 @@ def get_prediction_scenarios():
                 latest_episode_predictions[episode_key] = item
         return json_response({
             "summary": {
-                "totalClaims": len(results),
+                "totalClaims": len(all_rows),
+                "visibleClaims": len(results),
                 "recoverableNow": round(sum(item["supported_money_summary"]["recoverable_now"] for item in results), 2),
                 "supportedAvoidableSpend": round(sum(episode_avoidable.values()), 2),
                 "predictedAvoidableSpend90d": round(
@@ -640,7 +650,9 @@ def get_prediction_scenarios():
                 "futureDenialExposure": round(sum(item["supported_money_summary"]["future_denial_exposure"] for item in results), 2),
                 "futureRepeatPaymentExposure": round(sum(item["supported_money_summary"]["future_repeat_payment_exposure"] for item in results), 2),
             },
-            "totalClaims": len(results),
+            "page": page,
+            "limit": limit,
+            "totalClaims": len(all_rows),
             "items": results,
             "source": database.source_banner(),
             "model": {

@@ -1517,7 +1517,7 @@ function DetailedClaimFinancialBreakdown({ scenario, facts, snapshot, summary })
                   <span>Calculated remaining balance:</span>
                   <PlainTooltip text="This is the recorded patient amount minus patient payments received. Staff should confirm it before contacting the patient."><strong className="warning-text">{formatOptionalCurrency(patientUnpaid)}</strong></PlainTooltip>
                 </div>
-                {Number.isFinite(recordedPatientBalance) && Math.abs(recordedPatientBalance - patientUnpaid) > 0.01 ? <p role="note">Balance mismatch: {formatOptionalCurrency(patientResp)} − {formatOptionalCurrency(patientPaid)} = {formatOptionalCurrency(patientUnpaid)}. The source records {formatOptionalCurrency(recordedPatientBalance)}, which is still used in the review total pending reconciliation.</p> : null}
+                {Number.isFinite(recordedPatientBalance) && Math.abs(recordedPatientBalance - patientUnpaid) > 0.01 ? <p role="note">Balance reconciliation: {formatOptionalCurrency(patientResp)} − {formatOptionalCurrency(patientPaid)} = {formatOptionalCurrency(patientUnpaid)}. Review totals use the calculated amount due. The source balance of {formatOptionalCurrency(recordedPatientBalance)} is retained for audit.</p> : null}
                 <div className="sub-row">
                   <span>How long it has been waiting:</span>
                   <span className="badge-broken-plan">{facts.days_outstanding ?? 0} days · {facts.payment_plan_status || facts.balance_status || 'Status not recorded'}</span>
@@ -1528,7 +1528,7 @@ function DetailedClaimFinancialBreakdown({ scenario, facts, snapshot, summary })
                 <div>
                   <p><strong>Amount assigned to the patient:</strong> Copied from the claim's recorded patient-responsibility field. It is not calculated as agreed price minus insurance payment.</p>
                   <p><strong>Calculated balance:</strong> {formatOptionalCurrency(patientResp)} recorded patient amount − {formatOptionalCurrency(patientPaid)} patient payments = {formatOptionalCurrency(patientUnpaid)}.</p>
-                  {Number.isFinite(recordedPatientBalance) && Math.abs(recordedPatientBalance - patientUnpaid) > 0.01 ? <p><strong>Source discrepancy:</strong> The workbook separately records {formatOptionalCurrency(recordedPatientBalance)} outstanding. It differs from this calculation by {formatOptionalCurrency(recordedPatientBalance - patientUnpaid)} and needs reconciliation. The claim review amount uses the recorded balance.</p> : null}
+                  {Number.isFinite(recordedPatientBalance) && Math.abs(recordedPatientBalance - patientUnpaid) > 0.01 ? <p><strong>Source discrepancy:</strong> The workbook separately records {formatOptionalCurrency(recordedPatientBalance)} outstanding. The calculated amount due is {formatOptionalCurrency(Math.max(0, patientUnpaid))}; this is the balance used when calculating the actionable review amount.</p> : null}
                 </div>
               </details>
             </div>
@@ -2191,6 +2191,7 @@ function ValueBasedRectificationCase({ valueBasedCase }) {
   if (!valueBasedCase.available) {
     const prediction = valueBasedCase.prediction_claim || {}
     const calculation = valueBasedCase.calculation || {}
+    const outcomeEvidence = valueBasedCase.outcome_evidence || {}
     return (
       <section className="value-based-case value-based-case-no-reference" aria-labelledby="value-based-case-heading">
         <header>
@@ -2217,6 +2218,23 @@ function ValueBasedRectificationCase({ valueBasedCase }) {
           </div>
         </div>
         <p className="value-based-calculation-note">{calculation.reason} This total is not the payer comparison prediction.</p>
+        {outcomeEvidence.claim_id ? (
+          <div className="value-based-evidence-review" role="note">
+            <div>
+              <span>What the claim data actually records</span>
+              <strong>{outcomeEvidence.claim_id} · {outcomeEvidence.procedure || 'service not recorded'}</strong>
+            </div>
+            <dl>
+              <div><dt>Condition resolved</dt><dd>{outcomeEvidence.condition_resolved}</dd></div>
+              <div><dt>Treatment outcome</dt><dd>{outcomeEvidence.treatment_outcome}</dd></div>
+              <div><dt>Follow-up completed</dt><dd>{outcomeEvidence.follow_up_completed}</dd></div>
+              <div><dt>Outcome claim flag</dt><dd>{outcomeEvidence.outcome_claim_flag}</dd></div>
+              <div><dt>Related claim flag</dt><dd>{outcomeEvidence.related_claim_flag}</dd></div>
+              <div><dt>Data type</dt><dd>{outcomeEvidence.synthetic ? 'Synthetic demonstration record' : 'Recorded claim data'}</dd></div>
+            </dl>
+            <p><strong>Evidence status: insufficient.</strong> {outcomeEvidence.conclusion}</p>
+          </div>
+        ) : null}
       </section>
     )
   }
@@ -2769,6 +2787,75 @@ function OrganSystemComparativeSavingsCard({ scenario, facts }) {
   )
 }
 
+function ClaimOutcomeEvidencePanel({ facts }) {
+  const raw = facts.outcome_evidence || facts.outcomeEvidence || facts.workbookFields || facts.syntheticEnrichment || {}
+  const evidence = facts.outcome_evidence || facts.outcomeEvidence ? raw : {
+    condition_resolved: raw.Condition_Resolved || raw.condition_resolved || 'Not recorded',
+    treatment_outcome: raw.Treatment_Outcome || raw.treatment_outcome || 'Not recorded',
+    follow_up_completed: raw.Follow_Up_Completed || raw.follow_up_completed || 'Not recorded',
+    outcome_claim_flag: raw.Outcome_Claim_Flag || raw.outcome_claim_flag || 'Not recorded',
+    related_claim_flag: raw.Related_Claim_Flag || raw.related_claim_flag || 'Not recorded',
+    synthetic: String(raw.Reason_Code || '').toUpperCase() === 'SYNTHETIC_PRESENTATION_CASE' || String(raw.reason_code || '').toUpperCase() === 'SYNTHETIC_PRESENTATION_CASE',
+    status: 'Not established',
+    conclusion: 'No outcome fields are recorded for this claim.',
+  }
+  const outcomeText = [evidence.condition_resolved, evidence.treatment_outcome, evidence.follow_up_completed].filter(Boolean).join(' | ').toLowerCase()
+  const positiveOutcome = /(resolved|improved|recovered|documented outcome assessment|clinical improvement)/i.test(outcomeText)
+  const recordedOutcome = [
+    evidence.condition_resolved,
+    evidence.treatment_outcome,
+    evidence.follow_up_completed,
+    evidence.outcome_claim_flag,
+    evidence.related_claim_flag,
+  ].some((value) => value && !/^not recorded$/i.test(String(value).trim()))
+  const status = positiveOutcome ? 'Recorded outcome evidence' : (evidence.status || 'Not established')
+  const conclusion = positiveOutcome
+    ? (evidence.conclusion || 'Recorded claim fields show a resolved or improved outcome.')
+    : recordedOutcome
+      ? 'Recorded claim fields are shown below. They do not record a resolved or improved outcome for this claim.'
+      : 'No outcome fields are recorded for this claim.'
+  const heading = positiveOutcome
+    ? 'Recorded outcome evidence'
+    : recordedOutcome
+      ? 'Recorded outcome fields'
+      : 'Outcome not recorded'
+  const fields = [
+    ['Preventive claim', evidence.preventive_claim_id || 'Not recorded'],
+    ['Preventive service date', evidence.preventive_service_date || 'Not recorded'],
+    ['Preventive procedure', evidence.preventive_procedure || 'Not recorded'],
+    ['Outcome claim', evidence.source_claim_id || facts.claim_id || 'Not recorded'],
+    ['Outcome service date', evidence.source_service_date || 'Not recorded'],
+    ['Outcome procedure', evidence.source_procedure || 'Not recorded'],
+    ['Condition resolved', evidence.condition_resolved],
+    ['Treatment outcome', evidence.treatment_outcome],
+    ['Follow-up completed', evidence.follow_up_completed],
+    ['Outcome claim flag', evidence.outcome_claim_flag],
+    ['Reference claim flag', evidence.reference_claim_flag],
+    ['Related claim flag', evidence.related_claim_flag],
+    ['Later related claims after outcome', evidence.no_later_related_claims === true ? 'None recorded' : evidence.later_related_claim_ids?.join(', ') || 'Not evaluated'],
+  ]
+
+  return (
+    <aside className="claim-outcome-evidence" aria-label="Claim outcome evidence">
+      <div className="claim-outcome-evidence-heading">
+        <ShieldAlert size={18} />
+        <div>
+          <span>Outcome evidence for this claim</span>
+          <strong>{heading}</strong>
+        </div>
+      </div>
+      <p>{conclusion}</p>
+      <dl>
+        {fields.map(([label, value]) => (
+          <div key={label}><dt>{label}</dt><dd>{value || 'Not recorded'}</dd></div>
+        ))}
+        <div><dt>Data type</dt><dd>{evidence.synthetic ? 'Synthetic demonstration' : 'Recorded claim data'}</dd></div>
+      </dl>
+      <small>Evidence status: {status}. Clinical results, diagnosis resolution, and causal attribution require evidence outside the claim record.</small>
+    </aside>
+  )
+}
+
 function PredictionScenarioMap({ scenario, initialMemberId, initialDiagnosisCode }) {
   const facts = scenario.actual_claim_facts
   const summary = scenario.supported_money_summary
@@ -2815,6 +2902,8 @@ function PredictionScenarioMap({ scenario, initialMemberId, initialDiagnosisCode
         </div>
         <span className="priority-chip">First thing to check: {suggestedReviewLabel}</span>
       </header>
+
+      <ClaimOutcomeEvidencePanel facts={facts} />
 
       {payerSavings?.available === false && !payerSavings?.procedure_comparison?.available ? (
         <aside className="payer-savings-availability" role="status">
@@ -2866,12 +2955,6 @@ function PredictionScenarioMap({ scenario, initialMemberId, initialDiagnosisCode
         summary={summary}
       />
 
-      <details className="scenario-technical-details">
-        <summary>Show hard words, codes, and detailed math</summary>
-        <div className="scenario-pathway">
-          {scenario.scenario_map.sections.map((section) => <ScenarioMapSection key={section.step} section={section} />)}
-        </div>
-      </details>
       <footer className="provider-forecast-note">{scenario.versions.prediction_version} · Workbook-only decision support.</footer>
     </Card>
   )
@@ -2919,12 +3002,57 @@ function ClaimsTableFooter({ currentPage, pageCount, pageSize, totalCount, onPag
 }
 
 function ClaimDetailPage({ claim }) {
+  const [hydratedClaim, setHydratedClaim] = useState(claim)
+
+  useEffect(() => {
+    if (!claim) {
+      setHydratedClaim(null)
+      return undefined
+    }
+
+    const hasOutcomeFields = Boolean(
+      claim.outcomeEvidence
+      || claim.outcome_evidence
+      || claim.workbookFields
+      || claim.syntheticEnrichment
+      || claim.Condition_Resolved
+      || claim.Treatment_Outcome
+      || claim.Follow_Up_Completed
+    )
+
+    if (hasOutcomeFields) {
+      setHydratedClaim(claim)
+      return undefined
+    }
+
+    const identifier = claim.claimId || claim.number
+    if (!identifier) {
+      setHydratedClaim(claim)
+      return undefined
+    }
+
+    let active = true
+    fetchJson(`/api/claims/${encodeURIComponent(identifier)}`)
+      .then((payload) => {
+        if (active && payload?.item) setHydratedClaim(payload.item)
+      })
+      .catch(() => {
+        if (active) setHydratedClaim(claim)
+      })
+
+    return () => {
+      active = false
+    }
+  }, [claim])
+
+  const activeClaim = hydratedClaim || claim
+
   return (
     <>
       <div className="claim-detail-layout">
-        <SelectedClaimDetail claim={claim} />
-        <WorkbookFinancialPredictionCard claim={claim} />
-        <ClaimReasonCard claim={claim} />
+        <SelectedClaimDetail claim={activeClaim} />
+        <WorkbookFinancialPredictionCard claim={activeClaim} />
+        <ClaimReasonCard claim={activeClaim} />
       </div>
     </>
   )
@@ -4079,6 +4207,7 @@ function SelectedClaimDetail({ claim }) {
         <ClaimInfoPanel title="Provider & Payer" rows={providerFacts} />
         <ClaimInfoPanel title="Service Details" rows={clinicalFacts} />
       </div>
+        <ClaimOutcomeEvidencePanel facts={claim} />
     </div>
   )
 }
@@ -4155,7 +4284,7 @@ function getClaimReasonRows(claim) {
       field: 'Status',
       value: statusLabel(claim.status),
       reason: statusReason,
-      source: 'Current enriched 837 claim · Claim_Status_Code, Claim_Status_Description, Denial_Reason, Payer_Name, and Claim_Filing_Indicator.',
+      source: 'Current enriched 837 claim · Claim_Status, Status_Code, Payer_Name, Filing_Indicator, and Denial_Reason.',
       method: 'The source status description is mapped to a concise display label. The payer, filing indicator, and denial reason add context when those source fields are present.',
     },
     {

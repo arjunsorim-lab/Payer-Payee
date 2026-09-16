@@ -1,6 +1,8 @@
-# Local payer/payee MongoDB
+# Optional raw-workbook archive
 
-This project runs a separate MongoDB instance bound only to the local device.
+This is an optional import and verification utility, not the database used by the main PayerPayee application. For normal development, use the root workbook configured by `SAVINGS_WORKBOOK_PATH` and ignore this folder.
+
+When needed, this utility runs a separate MongoDB instance bound only to the local device.
 
 - Connection URI: `mongodb://127.0.0.1:27018/`
 - Database: `payer_payee`

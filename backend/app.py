@@ -1,4 +1,5 @@
 import os
+import gzip
 import re
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,7 @@ from werkzeug.exceptions import HTTPException, ServiceUnavailable
 try:
     from .db import connect_mongo, get_mongo_config
     from .financial_engine import build_financial_result, member_supported_summary
+    from .outcome_evidence import build_outcome_evidence
     from .import_claims import read_claims
     from .llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
     from .ollama_service import OllamaClient, OllamaError
@@ -41,6 +43,7 @@ try:
 except ImportError:
     from db import connect_mongo, get_mongo_config
     from financial_engine import build_financial_result, member_supported_summary
+    from outcome_evidence import build_outcome_evidence
     from import_claims import read_claims
     from llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
     from ollama_service import OllamaClient, OllamaError
@@ -72,6 +75,23 @@ BUNDLED_WORKBOOK_PATH = (
 
 app = Flask(__name__, static_folder=None)
 CORS(app, origins=os.getenv("CORS_ORIGIN", "*").split(","))
+
+
+@app.after_request
+def compress_json_response(response):
+    """Reduce large workbook transfers while honoring content negotiation."""
+    if response.mimetype != "application/json" or response.status_code != 200:
+        return response
+    response.vary.add("Accept-Encoding")
+    if (request.accept_encodings.quality("gzip") or 0) <= 0 or response.headers.get("Content-Encoding"):
+        return response
+    body = response.get_data()
+    if len(body) >= 1024:
+        compressed = gzip.compress(body, compresslevel=5, mtime=0)
+        if len(compressed) < len(body):
+            response.set_data(compressed)
+            response.headers["Content-Encoding"] = "gzip"
+    return response
 
 
 def serialize(value):
@@ -209,6 +229,8 @@ def workbook_claims_for_request(database, args):
 
 def workbook_claim_for_api(database, claim, include_summary=True, compact=False):
     payload = {key: value for key, value in claim.items() if key != "raw"}
+    fields = claim.get("workbookFields", {})
+    payload["outcomeEvidence"] = build_outcome_evidence(database, claim)
     if compact:
         for key in (
             "workbookFields",

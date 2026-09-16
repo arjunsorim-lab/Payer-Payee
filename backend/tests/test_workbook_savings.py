@@ -10,7 +10,7 @@ from unittest.mock import patch
 WORKBOOK = Path(
     os.getenv(
         "SAVINGS_WORKBOOK_PATH",
-        "/Users/user/Downloads/EDI_834_837_20_members_ENRICHED (2).xlsx",
+        Path(__file__).resolve().parents[2] / "data" / "claims-demo.xlsx",
     )
 )
 os.environ["SAVINGS_WORKBOOK_PATH"] = str(WORKBOOK)
@@ -57,9 +57,9 @@ class IntegratedWorkbookTests(unittest.TestCase):
                 "Data_Notes_READ_ME",
             },
         )
-        self.assertEqual(self.database.report["total_claim_count"], 3285)
+        self.assertEqual(self.database.report["total_claim_count"], 3287)
         self.assertEqual(self.database.report["claim_column_count"], 145)
-        self.assertEqual(len(self.database.selectable_claims), 2470)
+        self.assertEqual(len(self.database.selectable_claims), 2472)
         self.assertEqual(len(self.database.historical_claims), 815)
         self.assertIn("Authorization_Valid_From", self.database.selectable_claims[0]["workbookFields"])
         self.assertIn("Remit_835_Received_Date", self.database.selectable_claims[0]["workbookFields"])

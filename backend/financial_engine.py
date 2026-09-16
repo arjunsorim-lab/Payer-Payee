@@ -27,6 +27,7 @@ try:
         PRIOR_STRENGTH,
         build_predicted_avoidable_spend,
     )
+    from .outcome_evidence import build_outcome_evidence
     from .workbook_enrichment import (
         CALCULATION_VERSION,
         GROQ_PROMPT_VERSION,
@@ -46,6 +47,7 @@ except ImportError:
         PRIOR_STRENGTH,
         build_predicted_avoidable_spend,
     )
+    from outcome_evidence import build_outcome_evidence
     from workbook_enrichment import (
         CALCULATION_VERSION,
         GROQ_PROMPT_VERSION,
@@ -493,12 +495,13 @@ def _patient_balance(claim):
         actionable_signals.append(_text(fields.get("Collection_Status")))
     if _yes(fields.get("Chk_Confirmed_Unpaid_Balance")):
         actionable_signals.append("confirmed unpaid-balance check")
-    supported = outstanding > 0 and status != "paid in full" and bool(actionable_signals)
     calculation = _money(responsibility - received)
+    calculated_due = max(0.0, calculation)
+    supported = calculated_due > 0 and status != "paid in full" and bool(actionable_signals)
     warnings = []
     if abs(outstanding - calculation) > 0.01:
         warnings.append(
-            f"Workbook Outstanding_Patient_Balance {outstanding:.2f} differs from responsibility-minus-payment {calculation:.2f}; workbook balance remains authoritative."
+            f"Workbook Outstanding_Patient_Balance {outstanding:.2f} differs from responsibility-minus-payment {calculation:.2f}; review totals use the calculated amount due {calculated_due:.2f}."
         )
     reason = (
         "Outstanding balance is actionable because " + ", ".join(actionable_signals) + "."
@@ -507,7 +510,7 @@ def _patient_balance(claim):
     )
     return _category(
         status="supported" if supported else "supported_zero",
-        amount=outstanding if supported else 0,
+        amount=calculated_due if supported else 0,
         reason_code="ACTIONABLE_PATIENT_BALANCE" if supported else "PATIENT_BALANCE_CURRENTLY_SUPPORTED_AT_ZERO",
         reason=reason,
         formula=f"{responsibility:.2f} - {received:.2f} = {calculation:.2f}; recorded outstanding balance = {outstanding:.2f}",
@@ -520,6 +523,8 @@ def _patient_balance(claim):
             "patient_responsibility": responsibility,
             "patient_payment_received": received,
             "outstanding_patient_balance": outstanding,
+            "calculated_patient_balance": calculation,
+            "calculated_amount_due": calculated_due,
             "deductible_amount": deductible,
             "copay_amount": copay,
             "coinsurance_amount": coinsurance,
@@ -1246,6 +1251,7 @@ def build_financial_result(database, claim_id):
         prediction_snapshot, categories, summary
     )
     fields = claim["workbookFields"]
+    outcome_evidence = build_outcome_evidence(database, claim)
     validated_category = categories[
         "potentially_avoidable_episode_spend"
     ]
@@ -1278,6 +1284,7 @@ def build_financial_result(database, claim_id):
         },
         "actual_claim_facts": {
             "claim_id": claim["claimId"],
+            "outcome_evidence": outcome_evidence,
             "service_date": claim.get("dos"),
             "cpt_code": claim.get("cptCode"),
             "cpt_description": claim.get("cptDescription"),

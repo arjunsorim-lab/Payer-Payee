@@ -2230,6 +2230,42 @@ button {
   white-space: nowrap;
 }
 
+.claim-outcome-evidence {
+  padding: 16px 18px;
+  border: 1px solid #f1c7c7;
+  border-left: 4px solid #c24141;
+  border-radius: 11px;
+  background: #fff8f8;
+  color: #5f2930;
+}
+
+.claim-outcome-evidence-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.claim-outcome-evidence-heading svg { flex: 0 0 auto; margin-top: 1px; color: #b4232f; }
+.claim-outcome-evidence-heading div { display: grid; gap: 3px; }
+.claim-outcome-evidence-heading span { color: #9f3f49; font-size: 11px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
+.claim-outcome-evidence-heading strong { color: #4c1d25; font-size: 15px; }
+.claim-outcome-evidence > p { margin: 9px 0 12px 27px; color: #71333b; font-size: 13px; line-height: 1.5; }
+.claim-outcome-evidence dl { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.claim-outcome-evidence dl div { padding: 9px 10px; border: 1px solid #f3dada; border-radius: 7px; background: #ffffff; }
+.claim-outcome-evidence dt { color: #8b5a61; font-size: 10px; font-weight: 700; line-height: 1.25; }
+.claim-outcome-evidence dd { margin: 4px 0 0; color: #4c1d25; font-size: 12px; font-weight: 800; overflow-wrap: anywhere; }
+.claim-outcome-evidence > small { display: block; margin: 11px 0 0 27px; color: #8b5a61; font-size: 11px; line-height: 1.45; }
+
+@media (max-width: 1100px) {
+  .claim-outcome-evidence dl { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 640px) {
+  .claim-outcome-evidence { padding: 14px; }
+  .claim-outcome-evidence > p, .claim-outcome-evidence > small { margin-left: 0; }
+  .claim-outcome-evidence dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 /* Provider Forecast Metrics Grid (5 KPI Cards) */
 .provider-forecast-metrics {
   display: grid;
@@ -2467,6 +2503,72 @@ button {
   margin-top: 2px;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.value-based-evidence-review {
+  margin-top: 16px;
+  padding: 15px 16px;
+  border: 1px solid #f1c7c7;
+  border-left: 4px solid #c24141;
+  border-radius: 10px;
+  background: #fff8f8;
+  color: #5f2930;
+}
+
+.value-based-evidence-review > div {
+  display: grid;
+  gap: 3px;
+}
+
+.value-based-evidence-review > div span {
+  color: #9f3f49;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.value-based-evidence-review > div strong {
+  color: #4c1d25;
+  font-size: 14px;
+}
+
+.value-based-evidence-review dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 13px 0 10px;
+}
+
+.value-based-evidence-review dl div {
+  padding: 9px 10px;
+  border: 1px solid #f3dada;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.value-based-evidence-review dt {
+  color: #8b5a61;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.value-based-evidence-review dd {
+  margin: 3px 0 0;
+  color: #4c1d25;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.value-based-evidence-review > p {
+  margin: 0;
+  color: #71333b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+@media (max-width: 760px) {
+  .value-based-evidence-review dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 .value-based-claim-grid {
@@ -5161,6 +5263,7 @@ button {
 .condition-icon-badge.blue { background: #dbeafe; color: #2563eb; }
 .condition-icon-badge.green { background: #dcfce7; color: #16a34a; }
 .condition-icon-badge.amber { background: #fef3c7; color: #d97706; }
+.condition-icon-badge.red { background: #fee2e2; color: #dc2626; }
 .condition-name-group {
   display: flex;
   flex-direction: column;
@@ -6407,6 +6510,201 @@ button {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.scope-bridge-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.scope-bridge-tag {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  padding: 2px 8px;
+  border-radius: 6px;
+}
+
+.scope-bridge-id {
+  font-size: 12px;
+  font-weight: 700;
+  color: #0369a1;
+}
+
+.scope-bridge-text {
+  font-size: 13px;
+  color: #0f172a;
+  line-height: 1.45;
+  margin: 0;
+}
+
+.scope-bridge-text strong {
+  color: #0369a1;
+}
+
+/* WINDOW CLAIMS MODAL */
+.window-claims-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.6);
+  backdrop-filter: blur(4px);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.window-claims-modal {
+  background: white;
+  border-radius: 14px;
+  max-width: 800px;
+  width: 100%;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.2), 0 10px 10px -5px rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+  border: 1px solid #cbd5e1;
+}
+
+.window-claims-header {
+  padding: 20px 24px;
+  background: #f8fafc;
+  border-bottom: 1px solid #e2e8f0;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.window-claims-header h3 {
+  font-size: 18px;
+  font-weight: 800;
+  color: #0f172a;
+  margin: 6px 0 4px;
+}
+
+.window-claims-header p {
+  font-size: 13px;
+  color: #64748b;
+  margin: 0;
+  line-height: 1.4;
+}
+
+.window-claims-close {
+  background: #e2e8f0;
+  border: none;
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #475569;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.window-claims-close:hover {
+  background: #cbd5e1;
+  color: #0f172a;
+}
+
+.window-claims-body {
+  padding: 20px 24px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.window-claims-table-wrap {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.window-claims-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  text-align: left;
+}
+
+.window-claims-table th {
+  background: #f1f5f9;
+  padding: 10px 14px;
+  font-weight: 700;
+  color: #334155;
+  border-bottom: 1px solid #cbd5e1;
+}
+
+.window-claims-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid #f1f5f9;
+  color: #1e293b;
+}
+
+.window-claims-table tfoot td {
+  background: #f8fafc;
+  font-size: 13.5px;
+  font-weight: 800;
+  border-top: 2px solid #cbd5e1;
+  color: #0f172a;
+  padding: 12px 14px;
+}
+
+.table-action-link {
+  background: #eff6ff;
+  color: #2563eb;
+  border: 1px solid #bfdbfe;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.table-action-link:hover {
+  background: #dbeafe;
+}
+
+.window-claims-summary-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 14px 18px;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.summary-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: center;
+}
+
+.summary-col span {
+  font-size: 11px;
+  font-weight: 700;
+  color: #64748b;
+  text-transform: uppercase;
+}
+
+.summary-col strong {
+  font-size: 17px;
+  font-weight: 800;
+  color: #0f172a;
 }
 
 .scope-bridge-header {
@@ -8579,9 +8877,10 @@ button {
 .same-patient-billed-card {
   margin: 18px 0 24px;
   padding: 24px;
-  background: #f8fffb;
-  border: 1px solid #9fe4bf;
-  border-radius: 14px;
+  background: linear-gradient(145deg, #f8fffb 0%, #ffffff 62%);
+  border: 1px solid #b8dfcb;
+  border-radius: 16px;
+  box-shadow: 0 10px 24px rgba(28, 86, 61, 0.07);
 }
 .same-patient-billed-card.unavailable { border-color: #d7dde7; background: #fafbfc; }
 .missing-template-evidence { margin: 14px 0; padding: 14px 16px; border-radius: 10px; background: #fff; border: 1px solid #e1e6ee; color: #475569; }
@@ -8648,6 +8947,12 @@ button {
   text-transform: uppercase;
 }
 
+.same-patient-billed-card header p {
+  max-width: 850px;
+  margin: 0;
+  font-size: 14px;
+}
+
 .same-patient-billed-card header h2 {
   margin: 6px 0 8px;
   color: #172033;
@@ -8674,16 +8979,26 @@ button {
   background: #ffffff;
   border: 1px solid #d9e6df;
   border-radius: 10px;
+  min-height: 128px;
 }
 
 .same-patient-billed-grid span {
   color: #637086;
   font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
 }
 
 .same-patient-billed-grid strong {
   color: #172033;
   font-size: 22px;
+  line-height: 1.15;
+}
+
+.same-patient-billed-grid small {
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .same-patient-billed-grid .difference {
@@ -8696,15 +9011,72 @@ button {
 }
 
 .same-patient-billed-equation {
-  display: inline-block;
-  margin: 16px 0 8px;
-  padding: 8px 12px;
+  display: grid;
+  gap: 5px;
+  margin: 18px 0 10px;
+  padding: 14px 16px;
   background: #e9f9f0;
+  border: 1px solid #9fe4bf;
+  border-left: 5px solid #2f8f68;
   border-radius: 8px;
   color: #245d43;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-weight: 700;
 }
+
+.same-patient-billed-equation strong {
+  font-size: 12px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.same-patient-billed-equation span {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.same-patient-billed-equation b { color: #12633f; }
+
+.same-patient-billed-card .calculation-explanation {
+  margin-top: 12px;
+  background: rgba(255, 255, 255, .82);
+}
+
+.scenario-technical-details {
+  margin-top: 14px;
+  overflow: hidden;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.scenario-technical-details > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  color: #1e3a5f;
+  list-style: none;
+  cursor: pointer;
+}
+
+.scenario-technical-details > summary::-webkit-details-marker { display: none; }
+.scenario-technical-details > summary > svg:last-child { margin-left: auto; transition: transform .2s ease; }
+.scenario-technical-details[open] > summary > svg:last-child { transform: rotate(90deg); }
+.technical-details-toggle-label { display: inline-flex; align-items: center; gap: 8px; font-weight: 800; }
+.technical-details-toggle-help { color: #64748b; font-size: 12px; }
+.scenario-technical-content { padding: 0 16px 16px; }
+.technical-details-context { margin: 0 0 14px; padding: 10px 12px; border-radius: 8px; background: #f8fafc; color: #475569; font-size: 12px; line-height: 1.45; }
+.technical-details-data-note { margin: -4px 0 14px; color: #64748b; font-size: 11px; font-style: italic; line-height: 1.45; }
+.technical-details-section { margin-top: 16px; }
+.technical-details-section h4 { margin: 0 0 8px; color: #1e3a5f; font-size: 14px; }
+.technical-glossary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.technical-glossary-grid > div { padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc; }
+.technical-glossary-grid dt { color: #334155; font-size: 12px; font-weight: 800; }
+.technical-glossary-grid dd { margin: 4px 0 0; color: #64748b; font-size: 12px; line-height: 1.45; }
+.technical-math-list { margin: 0; padding-left: 22px; color: #475569; font-size: 12px; line-height: 1.65; }
+.technical-details-caution { margin: 12px 0 0; padding: 10px 12px; border-left: 3px solid #f59e0b; background: #fffbeb; color: #78350f; font-size: 12px; line-height: 1.5; }
+.technical-details-section > p, .technical-details-section > ul { color: #526078; font-size: 12px; line-height: 1.5; }
+.technical-details-section > ul { padding-left: 20px; }
 
 .same-patient-billed-state {
   display: flex;
@@ -8728,4 +9100,12 @@ button {
   .same-patient-billed-grid {
     grid-template-columns: 1fr;
   }
+}
+
+@media (max-width: 640px) {
+  .same-patient-billed-card { padding: 16px; }
+  .same-patient-billed-card header h2 { font-size: 20px; line-height: 1.25; }
+  .technical-glossary-grid { grid-template-columns: 1fr; }
+  .technical-details-toggle-help { display: none; }
+  .same-patient-billed-equation span { overflow-wrap: anywhere; }
 }

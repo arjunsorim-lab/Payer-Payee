@@ -13,6 +13,7 @@ import {
 const app = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const styles = readFileSync(new URL('./App.css', import.meta.url), 'utf8')
 const formatter = readFileSync(new URL('./providerLlmFormat.js', import.meta.url), 'utf8')
+const comparator = readFileSync(new URL('./CrossPatientComparator.jsx', import.meta.url), 'utf8')
 
 test('status-aware formatters preserve backend meaning', () => {
   assert.equal(formatProbability(0.18), '18.0%')
@@ -66,6 +67,18 @@ test('provider prediction consumes one canonical backend result', () => {
   assert.match(app, /encodeURIComponent\(claim\.claimId \|\| claim\.number\)/)
 })
 
+test('claim outcome panel shows recorded improvement data when the worksheet records it', () => {
+  assert.match(app, /Recorded outcome evidence/)
+  assert.match(app, /Recorded claim fields show a resolved or improved outcome/)
+  assert.doesNotMatch(app, /Outcome evidence for this claim\s*<\/span>\s*<strong>Claims data does not prove cure or causation<\/strong>/s)
+})
+
+test('claim detail view hydrates a compact list record before rendering outcome evidence', () => {
+  assert.match(app, /const \[hydratedClaim, setHydratedClaim\] = useState\(claim\)/)
+  assert.match(app, /fetchJson\(\`\/api\/claims\/\$\{encodeURIComponent\(identifier\)\}\`\)/)
+  assert.match(app, /hasOutcomeFields/)
+})
+
 test('claim-anchored payer popup displays canonical content instead of a blank modal', () => {
   assert.match(app, /result\?\.benchmark_summary \? <ClaimPayerPredictionResult result=\{result\} \/>/)
   assert.match(app, /\/api\/predictions\/payer\/claim\//)
@@ -90,7 +103,7 @@ test('claim-anchored payer popup displays canonical content instead of a blank m
 
 test('provider forecast shows one claim-anchored billed comparison', () => {
   const providerView = app.slice(app.indexOf('function PredictionScenarioMap'), app.indexOf('function filterClaimsByTime'))
-  assert.match(providerView, /Possible future cost/)
+  assert.match(providerView, /Expected avoidable repeat cost/)
   assert.match(providerView, /not money already saved/)
   assert.match(app, /Do not add these numbers together/)
   assert.match(providerView, /scenario\.historical_comparison\?\.sample_size/)
@@ -141,7 +154,7 @@ test('provider forecast explains the prediction for a reader without claims know
   assert.match(app, /This is only a guess, not a promise/)
   assert.match(app, /Tap here if a word is new/)
   assert.match(app, /function PlainTooltip/)
-  assert.match(app, /Show hard words, codes, and detailed math/)
+  assert.match(comparator, /Show hard words, codes, and detailed math/)
   assert.match(app, /Show where these numbers came from/)
   assert.match(app, /Billed-price difference for review/)
   assert.match(app, /This is a charge difference, not payer savings/)

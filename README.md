@@ -79,7 +79,7 @@ Ollama and FAISS do not select scenarios or calculate financial amounts. Payer p
 
 ## Data sources
 
-### 1. Enriched workbook
+### 1. Authoritative claims source: enriched workbook
 
 The configured workbook is the preferred source for detailed prediction and Member 360 workflows. By default, the application uses:
 
@@ -101,9 +101,9 @@ Rows with `Is_Historical_Reference_Record = Y` are retained as historical eviden
 
 The loader records workbook hashes, source-row hashes, import time, calculation version, prediction version, and evidence metadata for traceability. Its in-process cache is invalidated when the workbook changes.
 
-### 2. MongoDB
+### 2. Optional compatibility store: MongoDB
 
-MongoDB supports the general application query layer and non-workbook fallback workflows. Defaults:
+MongoDB is optional. It supports legacy/general query endpoints, but it is not a second source of truth for workbook predictions. The app's authoritative claims source remains the configured workbook. Defaults:
 
 ```text
 URI:      mongodb://localhost:27017/
@@ -112,7 +112,7 @@ Database: PayerPayee
 
 Run `npm run import:mongo` to import the configured CSV into MongoDB. If MongoDB is reachable but empty, the application can seed it from the bundled claim snapshot.
 
-### 3. Bundled snapshot
+### 3. Emergency fallback snapshot
 
 If MongoDB is unavailable, the query layer falls back to:
 
@@ -120,12 +120,12 @@ If MongoDB is unavailable, the query layer falls back to:
 frontend/public/data/claims-fallback.json
 ```
 
-This snapshot keeps the basic dashboard and claim/member browsing usable. Workbook-only cohort predictions still require a valid configured workbook.
+This snapshot keeps the basic dashboard and claim/member browsing usable when MongoDB is unavailable. It is a generated cache, not a second database to maintain. Workbook-only cohort predictions still require a valid configured workbook.
 
 ### Source precedence
 
-- Workbook-aware endpoints use `SAVINGS_WORKBOOK_PATH`, or the bundled workbook when no path is set.
-- General Mongo-backed endpoints connect to MongoDB and fall back to the bundled JSON snapshot when necessary.
+- Workbook-aware endpoints use `SAVINGS_WORKBOOK_PATH`, or the bundled workbook when no path is set. This is the single authoritative source for prediction and Member 360 data.
+- General query endpoints use MongoDB only when available and fall back to the bundled JSON snapshot when necessary.
 - Browser cache may improve initial display speed, but it is not an authoritative source for financial calculations.
 
 ## Payer cohort savings rules
@@ -463,9 +463,9 @@ Generated indexes are stored under `backend/.rag_index/` and are ignored by Git.
 
 Two self-contained helpers live in the repository but are not required to start the main application.
 
-### Isolated raw-workbook MongoDB
+### Optional raw-workbook archive
 
-[`payer_payee_mongodb/`](payer_payee_mongodb/) runs a separate local MongoDB instance on `127.0.0.1:27018`. It preserves raw workbook headings in `payer_payee.837_claims` and includes validation and connection scripts. Its database is intentionally separate from the main application's default port 27017 database.
+[`payer_payee_mongodb/`](payer_payee_mongodb/) is an optional raw-workbook archive and verification utility. It is not required by the application and should be ignored for normal development when using the single authoritative workbook source above. The app does not read predictions from this utility database.
 
 ## Troubleshooting
 

@@ -40,7 +40,7 @@ REQUIRED_SHEETS = {
     DATA_NOTES_SHEET,
 }
 
-CALCULATION_VERSION = "workbook-money-v2"
+CALCULATION_VERSION = "workbook-money-v3"
 PREDICTION_VERSION = "workbook-peer-avoidable-forecast-v2"
 SAVINGS_VERSION = "workbook-opportunity-v1"
 RAG_INDEX_VERSION = "workbook-rag-v1"

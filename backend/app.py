@@ -72,6 +72,7 @@ FRONTEND_DIST_DIR = Path(__file__).resolve().parent.parent / "dist"
 BUNDLED_WORKBOOK_PATH = (
     Path(__file__).resolve().parent.parent / "data" / "claims-demo.xlsx"
 )
+_PRELOADED_WORKBOOK_DATABASE = None
 
 app = Flask(__name__, static_folder=None)
 CORS(app, origins=os.getenv("CORS_ORIGIN", "*").split(","))
@@ -129,15 +130,26 @@ def query_flag(args, name, default=True):
 
 def configured_workbook_database():
     """Return the configured workbook repository or None when not configured."""
+    global _PRELOADED_WORKBOOK_DATABASE
+    if _PRELOADED_WORKBOOK_DATABASE is not None:
+        return _PRELOADED_WORKBOOK_DATABASE
     configured = os.getenv("SAVINGS_WORKBOOK_PATH", "").strip()
     if not configured and BUNDLED_WORKBOOK_PATH.is_file():
         configured = str(BUNDLED_WORKBOOK_PATH)
     if not configured:
         return None
     try:
-        return load_workbook_database(configured)
+        _PRELOADED_WORKBOOK_DATABASE = load_workbook_database(configured)
+        return _PRELOADED_WORKBOOK_DATABASE
     except (FileNotFoundError, OSError, ValueError, RuntimeError) as error:
         raise ServiceUnavailable(description=str(error)) from error
+
+
+# Render's first request has a strict upstream response window. Load the
+# configured workbook during process startup so the port is exposed only after
+# the in-memory repository is ready. Tests and special tooling can opt out.
+if os.getenv("PRELOAD_WORKBOOK", "true").strip().lower() not in {"0", "false", "no", "off"}:
+    configured_workbook_database()
 
 
 def workbook_prediction_with_rag(database, claim_number):
@@ -230,7 +242,10 @@ def workbook_claims_for_request(database, args):
 def workbook_claim_for_api(database, claim, include_summary=True, compact=False):
     payload = {key: value for key, value in claim.items() if key != "raw"}
     fields = claim.get("workbookFields", {})
-    payload["outcomeEvidence"] = build_outcome_evidence(database, claim)
+    # Collection pages do not render outcome evidence. Avoid an O(n²) scan
+    # across the workbook for thousands of compact rows; detail endpoints add it.
+    if not compact:
+        payload["outcomeEvidence"] = build_outcome_evidence(database, claim)
     if compact:
         for key in (
             "workbookFields",

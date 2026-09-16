@@ -507,20 +507,21 @@ function App() {
 
   useEffect(() => {
     let active = true
+    const claimsPageSize = 500
 
     // Load the complete workbook list without running the expensive per-claim
     // prediction engine. Detailed financial calculations remain available from
     // the member, claim, and prediction endpoints when the user opens a record.
-    fetchJson('/api/claims?limit=2000&includeFinancial=false&compact=true')
+    fetchJson(`/api/claims?limit=${claimsPageSize}&includeFinancial=false&compact=true`)
       .then(async (payload) => {
         if (!active) return
         const firstPageItems = payload.items || []
         const remaining = Math.max(0, Number(payload.total || 0) - firstPageItems.length)
-        const additionalPages = remaining
-          ? await Promise.all(Array.from({ length: Math.ceil(remaining / 2000) }, (_, index) => (
-            fetchJson(`/api/claims?page=${index + 2}&limit=2000&includeFinancial=false&compact=true`)
-          )))
-          : []
+        const additionalPages = []
+        for (let index = 0; index < Math.ceil(remaining / claimsPageSize); index += 1) {
+          if (!active) return
+          additionalPages.push(await fetchJson(`/api/claims?page=${index + 2}&limit=${claimsPageSize}&includeFinancial=false&compact=true`))
+        }
         if (!active) return
         const items = [...firstPageItems, ...additionalPages.flatMap((page) => page.items || [])]
         const source = payload.source || null

@@ -140,6 +140,13 @@ def configured_workbook_database():
         raise ServiceUnavailable(description=str(error)) from error
 
 
+# Render's first request has a strict upstream response window. Load the
+# configured workbook during process startup so the port is exposed only after
+# the in-memory repository is ready. Tests and special tooling can opt out.
+if os.getenv("PRELOAD_WORKBOOK", "true").strip().lower() not in {"0", "false", "no", "off"}:
+    configured_workbook_database()
+
+
 def workbook_prediction_with_rag(database, claim_number):
     result = build_financial_result(database, claim_number)
     try:
@@ -230,7 +237,10 @@ def workbook_claims_for_request(database, args):
 def workbook_claim_for_api(database, claim, include_summary=True, compact=False):
     payload = {key: value for key, value in claim.items() if key != "raw"}
     fields = claim.get("workbookFields", {})
-    payload["outcomeEvidence"] = build_outcome_evidence(database, claim)
+    # Collection pages do not render outcome evidence. Avoid an O(n²) scan
+    # across the workbook for thousands of compact rows; detail endpoints add it.
+    if not compact:
+        payload["outcomeEvidence"] = build_outcome_evidence(database, claim)
     if compact:
         for key in (
             "workbookFields",

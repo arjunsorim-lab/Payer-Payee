@@ -12,6 +12,7 @@ from werkzeug.exceptions import HTTPException, ServiceUnavailable
 try:
     from .db import connect_mongo, get_mongo_config
     from .financial_engine import build_financial_result, member_supported_summary
+    from .outcome_evidence import build_outcome_evidence
     from .import_claims import read_claims
     from .llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
     from .ollama_service import OllamaClient, OllamaError
@@ -42,6 +43,7 @@ try:
 except ImportError:
     from db import connect_mongo, get_mongo_config
     from financial_engine import build_financial_result, member_supported_summary
+    from outcome_evidence import build_outcome_evidence
     from import_claims import read_claims
     from llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
     from ollama_service import OllamaClient, OllamaError
@@ -227,6 +229,8 @@ def workbook_claims_for_request(database, args):
 
 def workbook_claim_for_api(database, claim, include_summary=True, compact=False):
     payload = {key: value for key, value in claim.items() if key != "raw"}
+    fields = claim.get("workbookFields", {})
+    payload["outcomeEvidence"] = build_outcome_evidence(database, claim)
     if compact:
         for key in (
             "workbookFields",

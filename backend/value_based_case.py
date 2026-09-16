@@ -498,6 +498,20 @@ def build_value_based_case_for_claim(database, claim_number, *, config=None, _pr
     selected = next((r for r in rows if _id(r) == _id(selected)), selected)
     if not _date(selected):
         raise ValueError("Selected claim has a missing or invalid service date")
+    selected_fields = selected.get("workbookFields", {})
+    outcome_evidence = {
+        "claim_id": _id(selected),
+        "service_date": _date(selected).isoformat(),
+        "procedure": _text(_field(selected, "CPT_Description")),
+        "condition_resolved": _text(selected_fields.get("Condition_Resolved")) or "Not recorded",
+        "treatment_outcome": _text(selected_fields.get("Treatment_Outcome")) or "Not recorded",
+        "follow_up_completed": _text(selected_fields.get("Follow_Up_Completed")) or "Not recorded",
+        "outcome_claim_flag": _text(selected_fields.get("Outcome_Claim_Flag")) or "Not recorded",
+        "related_claim_flag": _text(selected_fields.get("Related_Claim_Flag")) or "Not recorded",
+        "synthetic": _synthetic(database, selected),
+        "status": "INSUFFICIENT_EVIDENCE",
+        "conclusion": "Claims data does not prove that this service cured a disease or caused an improved outcome.",
+    }
     reference, mode, selection_reason, selection_evidence = _select_reference(database, selected, rows, settings)
     base = {"available": False, "status": "No claims-based rectification scenario", "reason": selection_reason,
             "selected_claim": _summary(database, selected), "selection_mode": mode,
@@ -511,6 +525,7 @@ def build_value_based_case_for_claim(database, claim_number, *, config=None, _pr
                             "confirmed_savings": 0.0, "present_claim_paid": None, "later_related_paid": 0.0,
                             "formula": "Sum unique eligible later claims with verified Paid_Amount",
                             "reason": selection_reason},
+            "outcome_evidence": outcome_evidence,
             "requirements_verification": {}, "clinical_review_required": True,
             "data_limitations": ["This is a retrospective review of observed utilization. Earlier interventions remain hypotheses; exposure is not confirmed savings."]}
     names = ("reference_claim_identified", "first_documented_relevant_visit", "reference_service_verified",

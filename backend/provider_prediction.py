@@ -1707,6 +1707,30 @@ def _build_savings_opportunity(scenario, actual, forecast, financial_metrics, re
 def build_provider_prediction_payload(scenario):
     """Create the UI/API contract with actual facts separated from estimates."""
     selected = scenario.get("selectedClaim") or scenario.get("anchor") or {}
+    selected_evidence = selected.get("syntheticEnrichment") or selected.get("workbookFields") or {}
+    outcome_source = selected
+    episode_id = selected.get("episodeId")
+    selected_date = str(selected.get("dos") or "")
+    later_outcomes = [
+        row
+        for row in scenario.get("claims", [])
+        if row.get("memberId") == selected.get("memberId")
+        and row.get("episodeId") == episode_id
+        and str(row.get("dos") or "") > selected_date
+        and any(
+            token in " | ".join(
+                str((row.get("syntheticEnrichment") or row.get("workbookFields") or {}).get(key) or "")
+                for key in ("Condition_Resolved", "Treatment_Outcome", "Follow_Up_Completed")
+            ).lower()
+            for token in ("resolved", "improved", "recovered", "documented outcome assessment")
+        )
+    ]
+    if later_outcomes:
+        outcome_source = sorted(
+            later_outcomes,
+            key=lambda row: (str(row.get("dos") or ""), row.get("claimId", "")),
+        )[0]
+        selected_evidence = outcome_source.get("syntheticEnrichment") or outcome_source.get("workbookFields") or {}
     financial = scenario.get("forecast", {})
     repeat = scenario.get("repeatRisk", {}).get("probabilities", {})
     denial = scenario.get("denialRisk", {})
@@ -1749,6 +1773,27 @@ def build_provider_prediction_payload(scenario):
         "has_prior_auth": bool(selected.get("priorAuth")),
         "has_referral": bool(selected.get("referral")),
         "adjudicated": bool(selected.get("status") or selected.get("statusCode")),
+        "outcome_evidence": {
+            "condition_resolved": selected_evidence.get("Condition_Resolved") or "Not recorded",
+            "treatment_outcome": selected_evidence.get("Treatment_Outcome") or "Not recorded",
+            "follow_up_completed": selected_evidence.get("Follow_Up_Completed") or "Not recorded",
+            "outcome_claim_flag": selected_evidence.get("Outcome_Claim_Flag") or "Not recorded",
+            "related_claim_flag": selected_evidence.get("Related_Claim_Flag") or "Not recorded",
+            "synthetic": bool(selected.get("syntheticEnrichment")),
+            "source_claim_id": outcome_source.get("claimId"),
+            "source_service_date": outcome_source.get("dos"),
+            "source_procedure": outcome_source.get("cptDescription"),
+            "status": "Recorded outcome evidence" if any(token in " | ".join([
+                str(selected_evidence.get("Condition_Resolved") or ""),
+                str(selected_evidence.get("Treatment_Outcome") or ""),
+                str(selected_evidence.get("Follow_Up_Completed") or ""),
+            ]).lower() for token in ("resolved", "improved", "recovered", "documented outcome assessment")) else "Not established",
+            "conclusion": "The linked later claim records a resolved or improved outcome after this claim. The claims record does not establish that this visit caused the improvement." if outcome_source is not selected and any(token in " | ".join([
+                str(selected_evidence.get("Condition_Resolved") or ""),
+                str(selected_evidence.get("Treatment_Outcome") or ""),
+                str(selected_evidence.get("Follow_Up_Completed") or ""),
+            ]).lower() for token in ("resolved", "improved", "recovered", "documented outcome assessment")) else "Claims data alone does not prove that a preventive service cured a disease or caused an improved outcome.",
+        },
     }
     forecast = {
         "forecast_context": "next_related_claim",

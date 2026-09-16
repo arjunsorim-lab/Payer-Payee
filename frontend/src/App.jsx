@@ -1377,7 +1377,8 @@ function DetailedClaimFinancialBreakdown({ scenario, facts, snapshot, summary })
   const paid = facts.paid || 0
   const patientResp = facts.patient_responsibility || 0
   const patientPaid = facts.patient_payment_received || 0
-  const patientUnpaid = facts.outstanding_patient_balance || 0
+  const patientUnpaid = Math.round((patientResp - patientPaid) * 100) / 100
+  const recordedPatientBalance = facts.outstanding_patient_balance
 
   return (
     <div className="financial-responsibility-breakdown-card">
@@ -1513,9 +1514,10 @@ function DetailedClaimFinancialBreakdown({ scenario, facts, snapshot, summary })
                   <strong className="paid-amount">{formatOptionalCurrency(patientPaid)} ({patientResp > 0 ? ((patientPaid / patientResp) * 100).toFixed(0) : 0}%)</strong>
                 </div>
                 <div className="sub-row unpaid-row">
-                  <span>Still to check:</span>
+                  <span>Calculated remaining balance:</span>
                   <PlainTooltip text="This is the recorded patient amount minus patient payments received. Staff should confirm it before contacting the patient."><strong className="warning-text">{formatOptionalCurrency(patientUnpaid)}</strong></PlainTooltip>
                 </div>
+                {Number.isFinite(recordedPatientBalance) && Math.abs(recordedPatientBalance - patientUnpaid) > 0.01 ? <p role="note">Balance mismatch: {formatOptionalCurrency(patientResp)} − {formatOptionalCurrency(patientPaid)} = {formatOptionalCurrency(patientUnpaid)}. The source records {formatOptionalCurrency(recordedPatientBalance)}, which is still used in the review total pending reconciliation.</p> : null}
                 <div className="sub-row">
                   <span>How long it has been waiting:</span>
                   <span className="badge-broken-plan">{facts.days_outstanding ?? 0} days · {facts.payment_plan_status || facts.balance_status || 'Status not recorded'}</span>
@@ -1525,7 +1527,8 @@ function DetailedClaimFinancialBreakdown({ scenario, facts, snapshot, summary })
                 <summary>Show where these numbers came from</summary>
                 <div>
                   <p><strong>Amount assigned to the patient:</strong> Copied from the claim's recorded patient-responsibility field. It is not calculated as agreed price minus insurance payment.</p>
-                  <p><strong>Amount still owed:</strong> {formatOptionalCurrency(patientResp)} recorded patient amount − {formatOptionalCurrency(patientPaid)} patient payments = {formatOptionalCurrency(patientUnpaid)} outstanding balance.</p>
+                  <p><strong>Calculated balance:</strong> {formatOptionalCurrency(patientResp)} recorded patient amount − {formatOptionalCurrency(patientPaid)} patient payments = {formatOptionalCurrency(patientUnpaid)}.</p>
+                  {Number.isFinite(recordedPatientBalance) && Math.abs(recordedPatientBalance - patientUnpaid) > 0.01 ? <p><strong>Source discrepancy:</strong> The workbook separately records {formatOptionalCurrency(recordedPatientBalance)} outstanding. It differs from this calculation by {formatOptionalCurrency(recordedPatientBalance - patientUnpaid)} and needs reconciliation. The claim review amount uses the recorded balance.</p> : null}
                 </div>
               </details>
             </div>
@@ -1538,8 +1541,8 @@ function DetailedClaimFinancialBreakdown({ scenario, facts, snapshot, summary })
               </div>
               <div className="box-sub-items">
                 <div className="sub-row formula-row">
-                  <span>The small math:</span>
-                  <code>{formatProbability(avoidable.repeat_probability_90d)} × {formatProbability(avoidable.avoidable_given_repeat_probability)} × {formatOptionalCurrency(avoidable.expected_extra_repeat_allowed_cost)}</code>
+                  <span>Calculation using stored probabilities:</span>
+                  <code>{avoidable.repeat_probability_90d} × {avoidable.avoidable_given_repeat_probability} × {formatOptionalCurrency(avoidable.expected_extra_repeat_allowed_cost)}</code>
                 </div>
                 <div className="sub-row">
                   <span>What this guess means:</span>
@@ -1552,7 +1555,7 @@ function DetailedClaimFinancialBreakdown({ scenario, facts, snapshot, summary })
                   <p><strong>{formatProbability(avoidable.repeat_probability_90d)} chance of another related claim:</strong> Estimated from earlier claim timing.</p>
                   <p><strong>{formatProbability(avoidable.avoidable_given_repeat_probability)} with avoidability evidence:</strong> The share of earlier repeats carrying the workbook's avoidability signals. This is not a medical-necessity decision.</p>
                   <p><strong>{formatOptionalCurrency(avoidable.expected_extra_repeat_allowed_cost)} possible extra cost:</strong> The historical cost estimate used if such a repeat occurs.</p>
-                  <p><strong>Calculation:</strong> {formatProbability(avoidable.repeat_probability_90d)} × {formatProbability(avoidable.avoidable_given_repeat_probability)} × {formatOptionalCurrency(avoidable.expected_extra_repeat_allowed_cost)} = {formatOptionalCurrency(avoidable.value)} average per similar case.</p>
+                  <p><strong>Calculation:</strong> {avoidable.repeat_probability_90d} × {avoidable.avoidable_given_repeat_probability} × {formatOptionalCurrency(avoidable.expected_extra_repeat_allowed_cost)} = {formatOptionalCurrency(avoidable.value)} average per similar case, rounded to cents. Percentage labels elsewhere are rounded for display.</p>
                 </div>
               </details>
             </div>
@@ -1805,7 +1808,8 @@ function PlainLanguageClaimNarrative({ scenario, facts, summary, snapshot, histo
     <section className="plain-claim-narrative" aria-labelledby="plain-claim-narrative-title">
       <header>
         <span>Start here</span>
-        <h2 id="plain-claim-narrative-title">A simple story about this visit</h2>
+        <h2 id="plain-claim-narrative-title">What this prediction means: A simple story about this visit</h2>
+        <p>Start with the selected claim, then check the evidence behind each estimate. The amounts below are separate: a recorded billed amount, a prediction, and—when available—a same-member billed comparison.</p>
       </header>
 
       <div className="claim-story-grid">
@@ -1813,7 +1817,7 @@ function PlainLanguageClaimNarrative({ scenario, facts, summary, snapshot, histo
           <span className="story-number">1</span>
           <div>
             <h3>What happened</h3>
-            <p>This was a <strong>{serviceName}</strong> visit at {facts.provider || 'the provider'} on {formatDate(facts.service_date)}. The hospital first asked for <strong>{formatOptionalCurrency(billed)}</strong>. The insurance plan used <strong>{formatOptionalCurrency(allowed)}</strong> as its price. That is {formatOptionalCurrency(discount)} less.</p>
+            <p>This was a <strong>{serviceName}</strong> visit at {facts.provider || 'the provider'} on {formatDate(facts.service_date)}. The recorded billed amount was <strong>{formatOptionalCurrency(billed)}</strong>. The insurance plan allowed <strong>{formatOptionalCurrency(allowed)}</strong>, which is {formatOptionalCurrency(discount)} below the billed amount.</p>
             <p>The insurance company paid <strong>{formatOptionalCurrency(facts.paid)}</strong>. The patient’s share was <strong>{formatOptionalCurrency(facts.patient_responsibility)}</strong>. The record says {formatOptionalCurrency(patientPaid)} was already paid and <strong>{formatOptionalCurrency(patientBalance)} still needs to be checked</strong>.</p>
           </div>
         </article>
@@ -1822,8 +1826,8 @@ function PlainLanguageClaimNarrative({ scenario, facts, summary, snapshot, histo
           <span className="story-number">2</span>
           <div>
             <h3>What the computer is guessing</h3>
-            <p>It looked at <strong>{historicalPeerCount} older bills that look similar</strong>. It guesses the provider might be paid {formatOptionalCurrency(snapshot.predicted_provider_payment?.value)}.</p>
-            <p>It also guesses there is a <strong>{formatProbability(avoidable.repeat_probability_90d)}</strong> chance of another related bill in the next three months. The possible extra cost is <strong>{formatOptionalCurrency(avoidable.value)}</strong>. This is only a guess, not a promise.</p>
+            <p>It looked at <strong>{historicalPeerCount} older bills that look similar</strong> to estimate the provider payment: <strong>{formatOptionalCurrency(snapshot.predicted_provider_payment?.value)}</strong>. This is a prediction, not a recorded payment.</p>
+            <p>It also estimates a <strong>{formatProbability(avoidable.repeat_probability_90d)}</strong> chance of another related bill in the next three months. The possible future cost is <strong>{formatOptionalCurrency(avoidable.value)}</strong>. This is separate from the billed amount. This is only a guess, not a promise.</p>
           </div>
         </article>
 
@@ -1832,7 +1836,7 @@ function PlainLanguageClaimNarrative({ scenario, facts, summary, snapshot, histo
           <div>
             <h3>What to do next</h3>
             <p>{action.action || 'Review the recorded claim information before taking action.'}</p>
-            <p>The amount to check is <strong>{formatOptionalCurrency(summary.recoverable_now)}</strong>. A person must check the records before doing anything.</p>
+            <p>For a billed comparison, the application uses the same member’s earlier and later episodes only when it can show the source claims and intervention lines. The predicted difference is a review flag—not confirmed savings. A person must check the records before doing anything.</p>
           </div>
         </article>
       </div>
@@ -2776,25 +2780,25 @@ function PredictionScenarioMap({ scenario, initialMemberId, initialDiagnosisCode
     : summary.top_supported_opportunity?.label || 'Current claim amount'
   const topMetrics = [
     {
-      label: 'Money to check now',
+      label: 'Current claim review amount',
       value: formatOptionalCurrency(summary.recoverable_now),
-      note: 'This number is in the bill and needs a person to check it.',
+      note: (scenario.supported_financial_opportunities || []).filter((item) => ['underpayment', 'correctable_denial', 'excessive_adjustment', 'patient_balance', 'duplicate_or_correction'].includes(item.type) && item.amount > 0).map((item) => `${item.type.replaceAll('_', ' ')}: ${formatOptionalCurrency(item.amount)}`).join(' + ') || 'No supported current review components.',
       tone: 'green',
       icon: DollarSign,
-      help: 'This is a real number written in this bill. Someone still needs to check it.',
+      help: 'This is the calculated review amount, which may combine supported opportunities. It is not necessarily a single recorded billed line.',
     },
     {
-      label: 'Possible future cost',
+      label: 'Expected avoidable repeat cost (allowed basis)',
       value: formatOptionalCurrency(snapshot.predicted_avoidable_spend.value),
-      note: 'A computer guess about another related bill in the next three months.',
+      note: `${snapshot.predicted_avoidable_spend.repeat_probability_90d} repeat probability × ${snapshot.predicted_avoidable_spend.avoidable_given_repeat_probability} avoidable share × ${formatOptionalCurrency(snapshot.predicted_avoidable_spend.expected_extra_repeat_allowed_cost)} extra allowed cost; rounded to cents.`,
       tone: 'purple',
       icon: TrendingDown,
       help: 'This is a guess. It is not money already saved.',
     },
     {
-      label: 'Money insurance might not pay',
-      value: formatOptionalCurrency(summary.future_denial_exposure),
-      note: `${formatProbability(snapshot.denial_probability)} chance in the computer’s guess; this has not happened.`,
+      label: 'Expected denial exposure (payment basis)',
+      value: formatOptionalCurrency(snapshot.future_denial_exposure?.value),
+      note: `${formatProbability(snapshot.denial_probability)} denial chance × ${formatOptionalCurrency(snapshot.predicted_provider_payment.value)} predicted payment.`,
       tone: 'red',
       icon: ShieldAlert,
       help: 'This is a computer guess about money that insurance might not pay.',
@@ -2832,14 +2836,6 @@ function PredictionScenarioMap({ scenario, initialMemberId, initialDiagnosisCode
           claimAnchored
         />
       </section>
-      <PlainLanguageClaimNarrative
-        scenario={scenario}
-        facts={facts}
-        summary={summary}
-        snapshot={snapshot}
-        historicalPeerCount={historicalPeerCount}
-      />
-
       <div className="provider-forecast-metrics">
         {topMetrics.map(({ label, value, note, tone, icon: Icon, help }) => (
           <div key={label} className={`forecast-metric-card ${tone || 'blue'}`}>

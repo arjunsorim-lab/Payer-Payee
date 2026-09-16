@@ -57,6 +57,7 @@ export function SamePatientBilledSavings({ memberId, diagnosisCode, claimId = ''
   const fmt = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value || 0)
   const claimNames = (episode) => (episode?.claims || []).map((line) => line.claim_id).filter(Boolean).join(', ') || 'no claim ID'
   const interventionLines = result.intervention_lines || result.culture_add_on_lines || []
+  const billedSum = (episode) => (episode?.claims || []).map((line) => `${fmt(line.billed_amount)} (${line.claim_id})`).join(' + ')
   const interventionSource = interventionLines.map((line) => `${line.claim_id || 'claim'} ${line.cpt || ''}`.trim()).join(', ') || 'none'
   const interventionDetail = interventionLines.map((line) => `${line.claim_id || 'claim'} · ${line.procedure_description || line.cpt || 'intervention line'} · billed ${fmt(line.billed_amount)}`).join('; ') || 'No intervention lines identified.'
   const episodeLines = (episode) => (episode?.claims || []).map((line) => (
@@ -70,11 +71,11 @@ export function SamePatientBilledSavings({ memberId, diagnosisCode, claimId = ''
         <h2 id="same-patient-billed-heading">Estimated billed impact of moving the additional service earlier</h2>
         <p>This compares one earlier visit with the selected later visit for <strong>{result.member_id}</strong>{result.anchor_claim_id ? <>. The later visit is anchored to claim <strong>{result.anchor_claim_id}</strong></> : null}. All amounts come from this member's recorded billed claims.</p>
       </header>
-      {result.synthetic_demo ? <div className="synthetic-demo-notice" role="note"><ShieldAlert size={18} /><span><strong>Synthetic presentation data.</strong> This example demonstrates the calculation and must not be presented as a real patient or real claims.</span></div> : null}
+      {result.synthetic_demo ? <small>Demo data · includes generated example claims</small> : null}
       <div className="same-patient-billed-grid">
         <div><span>Earlier visit actually billed</span><strong>{fmt(calculation.earlier_episode_actual_billed)}</strong><small>Sum of every billed line in {claimNames(result.earlier_episode)}.</small></div>
-        <div><span>Later visit actually billed</span><strong>{fmt(calculation.later_episode_actual_billed)}</strong><small>Sum of every billed line in {claimNames(result.later_episode)}.</small></div>
-        <div><span>Supported intervention lines moved earlier</span><strong>{fmt(calculation.culture_and_specimen_add_on_billed)}</strong><small>{interventionDetail}. These lines are from the later visit and absent from the earlier visit.</small></div>
+        <div><span>Total charges for the later visit</span><strong>{fmt(calculation.later_episode_actual_billed)}</strong><small>{billedSum(result.later_episode)} = {fmt(calculation.later_episode_actual_billed)}. This adds the bills grouped into the same later visit.</small></div>
+        <div><span>Cost of the service proposed earlier</span><strong>{fmt(calculation.culture_and_specimen_add_on_billed)}</strong><small>{interventionDetail}. This amount is copied from the selected service bill. It is already included in the later-visit total; the scenario assumes this service happens earlier instead.</small></div>
         <div><span>What was billed across both visits</span><strong>{fmt(calculation.actual_two_episode_billed)}</strong><small>{fmt(calculation.earlier_episode_actual_billed)} earlier + {fmt(calculation.later_episode_actual_billed)} later.</small></div>
         <div><span>Estimated earlier visit with those lines</span><strong>{fmt(calculation.proposed_earlier_episode_with_add_on_billed)}</strong><small>{fmt(calculation.earlier_episode_actual_billed)} earlier + {fmt(calculation.culture_and_specimen_add_on_billed)} intervention lines.</small></div>
         <div className="difference"><span>Predicted billed amount that may be avoided</span><strong>{fmt(calculation.potential_billed_difference)}</strong><small>{fmt(calculation.actual_two_episode_billed)} actual total − {fmt(calculation.proposed_earlier_episode_with_add_on_billed)} estimated earlier scenario.</small></div>
@@ -86,11 +87,13 @@ export function SamePatientBilledSavings({ memberId, diagnosisCode, claimId = ''
         <h3>Where every number comes from</h3>
         <ol>
           <li><strong>Earlier source:</strong> {claimNames(result.earlier_episode)} contributes {fmt(calculation.earlier_episode_actual_billed)} from all of its billed lines.</li>
-          <li><strong>Later source:</strong> {claimNames(result.later_episode)} contributes {fmt(calculation.later_episode_actual_billed)} from all of its billed lines.</li>
+          <li><strong>What makes up the later visit:</strong> {billedSum(result.later_episode)} = {fmt(calculation.later_episode_actual_billed)}.<ul>{episodeLines(result.later_episode)}</ul></li>
           <li><strong>Actual total:</strong> {fmt(calculation.earlier_episode_actual_billed)} + {fmt(calculation.later_episode_actual_billed)} = <strong>{fmt(calculation.actual_two_episode_billed)}</strong>.</li>
           <li><strong>Counterfactual:</strong> only these later lines are moved earlier: {interventionDetail}. Their billed total is {fmt(calculation.culture_and_specimen_add_on_billed)}. Therefore {fmt(calculation.earlier_episode_actual_billed)} earlier-visit billed amount + {fmt(calculation.culture_and_specimen_add_on_billed)} intervention billed amount = <strong>{fmt(calculation.proposed_earlier_episode_with_add_on_billed)}</strong>.</li>
           <li><strong>Predicted billed difference:</strong> {fmt(calculation.actual_two_episode_billed)} − {fmt(calculation.proposed_earlier_episode_with_add_on_billed)} = <strong>{fmt(calculation.potential_billed_difference)}</strong>. This is a review estimate, not confirmed savings.</li>
         </ol>
+        <p><strong>Why propose the service earlier?</strong> The calculation selects a service identified as an intervention in the later visit that was absent from the earlier visit. It asks what the charges would be if that service were delivered earlier and the rest of the later visit were avoided. The billing records alone do not prove that earlier treatment would prevent that visit.</p>
+        <p><strong>Why the difference is {fmt(calculation.potential_billed_difference)}:</strong> The earlier-visit cost appears in both totals and cancels out. The difference is therefore {fmt(calculation.later_episode_actual_billed)} later-visit charges − {fmt(calculation.culture_and_specimen_add_on_billed)} service moved earlier. The proposed service is still paid for once.</p>
       </div>
       {selectionAudit ? <section className="intervention-selection-reason" aria-labelledby="intervention-selection-heading">
         <span>Selection reasoning</span>

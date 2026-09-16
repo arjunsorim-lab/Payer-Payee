@@ -510,7 +510,7 @@ def _patient_balance(claim):
         amount=outstanding if supported else 0,
         reason_code="ACTIONABLE_PATIENT_BALANCE" if supported else "PATIENT_BALANCE_CURRENTLY_SUPPORTED_AT_ZERO",
         reason=reason,
-        formula=f"{responsibility:.2f} - {received:.2f} = {outstanding:.2f}",
+        formula=f"{responsibility:.2f} - {received:.2f} = {calculation:.2f}; recorded outstanding balance = {outstanding:.2f}",
         evidence_fields=required + ["Days_Outstanding", "Aging_Bucket", "Payment_Plan_Status", "Collection_Status", "Chk_Confirmed_Unpaid_Balance"],
         evidence_claim_ids=[claim["claimId"]],
         data_source="837_Claims",

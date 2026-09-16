@@ -72,7 +72,6 @@ FRONTEND_DIST_DIR = Path(__file__).resolve().parent.parent / "dist"
 BUNDLED_WORKBOOK_PATH = (
     Path(__file__).resolve().parent.parent / "data" / "claims-demo.xlsx"
 )
-_PRELOADED_WORKBOOK_DATABASE = None
 
 app = Flask(__name__, static_folder=None)
 CORS(app, origins=os.getenv("CORS_ORIGIN", "*").split(","))
@@ -130,17 +129,13 @@ def query_flag(args, name, default=True):
 
 def configured_workbook_database():
     """Return the configured workbook repository or None when not configured."""
-    global _PRELOADED_WORKBOOK_DATABASE
-    if _PRELOADED_WORKBOOK_DATABASE is not None:
-        return _PRELOADED_WORKBOOK_DATABASE
     configured = os.getenv("SAVINGS_WORKBOOK_PATH", "").strip()
     if not configured and BUNDLED_WORKBOOK_PATH.is_file():
         configured = str(BUNDLED_WORKBOOK_PATH)
     if not configured:
         return None
     try:
-        _PRELOADED_WORKBOOK_DATABASE = load_workbook_database(configured)
-        return _PRELOADED_WORKBOOK_DATABASE
+        return load_workbook_database(configured)
     except (FileNotFoundError, OSError, ValueError, RuntimeError) as error:
         raise ServiceUnavailable(description=str(error)) from error
 

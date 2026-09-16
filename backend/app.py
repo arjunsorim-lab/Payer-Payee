@@ -1,4 +1,5 @@
 import os
+import gzip
 import re
 from datetime import datetime
 from pathlib import Path
@@ -72,6 +73,23 @@ BUNDLED_WORKBOOK_PATH = (
 
 app = Flask(__name__, static_folder=None)
 CORS(app, origins=os.getenv("CORS_ORIGIN", "*").split(","))
+
+
+@app.after_request
+def compress_json_response(response):
+    """Reduce large workbook transfers while honoring content negotiation."""
+    if response.mimetype != "application/json" or response.status_code != 200:
+        return response
+    response.vary.add("Accept-Encoding")
+    if (request.accept_encodings.quality("gzip") or 0) <= 0 or response.headers.get("Content-Encoding"):
+        return response
+    body = response.get_data()
+    if len(body) >= 1024:
+        compressed = gzip.compress(body, compresslevel=5, mtime=0)
+        if len(compressed) < len(body):
+            response.set_data(compressed)
+            response.headers["Content-Encoding"] = "gzip"
+    return response
 
 
 def serialize(value):

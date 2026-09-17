@@ -220,6 +220,25 @@ class TestSamePatientBilledInterventionSavings(unittest.TestCase):
         self.assertEqual(calculation["culture_and_specimen_add_on_billed"], 250.00)
         self.assertEqual(calculation["potential_billed_difference"], 2500.00)
 
+    def test_gynecological_journey_starts_at_first_symptomatic_visit(self):
+        database = load_workbook_database("data/claims-demo.xlsx")
+        result = build_same_patient_billed_intervention_savings(
+            database, "MBR00015", "N92", "CLM09921096"
+        )
+        calculation = result["calculation"]
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["earlier_episode"]["claims"][0]["claim_id"], "CLM09920296")
+        self.assertEqual(result["intervening_episodes"][0]["claims"][0]["claim_id"], "CLM09920297")
+        self.assertEqual(result["days_between_episodes"], 32)
+        self.assertEqual(result["days_to_first_intervening_episode"], 25)
+        self.assertEqual(calculation["earlier_episode_actual_billed"], 701.48)
+        self.assertEqual(calculation["intervening_episode_actual_billed"], 1241.08)
+        self.assertEqual(calculation["later_episode_actual_billed"], 900.00)
+        self.assertEqual(calculation["actual_two_episode_billed"], 2842.56)
+        self.assertEqual(calculation["proposed_earlier_episode_with_add_on_billed"], 1601.48)
+        self.assertEqual(calculation["potential_billed_difference"], 1241.08)
+
     def test_bundled_dataset_has_demo_template_coverage_for_every_member_family(self):
         database = load_workbook_database("data/claims-demo.xlsx")
         pairs = {
@@ -242,6 +261,7 @@ class TestSamePatientBilledInterventionSavings(unittest.TestCase):
             set(coverage_rows),
             pairs - {
                 ("MBRDEMO01", "N39"),
+                ("MBR00015", "N92"),
                 ("MBR00015", "Z01"),
                 ("MBR00016", "Z01"),
             },

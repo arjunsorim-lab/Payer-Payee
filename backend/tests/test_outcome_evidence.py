@@ -97,6 +97,8 @@ class TestOutcomeEvidence(unittest.TestCase):
         self.assertTrue(evidence["no_later_related_claims"])
         self.assertIn("200-day follow-up period", evidence["conclusion"])
         self.assertIn("immediately after the first episode", evidence["conclusion"])
+        self.assertEqual(evidence["preventive_claim_id"], "PREVENTIVE-REFERENCE")
+        self.assertEqual(evidence["journey_claim_id"], "PREVENTIVE-REFERENCE")
 
     def test_does_not_borrow_another_members_outcome(self):
         other_member_outcome = claim(

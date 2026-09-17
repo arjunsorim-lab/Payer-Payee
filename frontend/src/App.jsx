@@ -3165,8 +3165,10 @@ function EncounterSearch({ searchQuery, onSearchChange, onSelectMember, onOpenCl
   const statusOptions = useMemo(() => ['All Statuses', ...uniqueValues(claimsData, 'status')], [claimsData])
   const filteredEncounters = useMemo(() => claimsData.filter((claim) => {
       const matchesSearch = !normalizedQuery || (
-        claim.patient.toLowerCase().includes(normalizedQuery) ||
-        claim.memberId.toLowerCase().includes(normalizedQuery)
+        String(claim.patient || '').toLowerCase().includes(normalizedQuery) ||
+        String(claim.memberId || '').toLowerCase().includes(normalizedQuery) ||
+        String(claim.claimId || '').toLowerCase().includes(normalizedQuery) ||
+        String(claim.number || '').toLowerCase().includes(normalizedQuery)
       )
       const matchesStatus = statusFilter === 'All Statuses' || claim.status === statusFilter
       return matchesSearch && matchesStatus
@@ -3207,8 +3209,8 @@ function EncounterSearch({ searchQuery, onSearchChange, onSelectMember, onOpenCl
               type="search"
               value={searchQuery}
               onChange={(event) => onSearchChange(event.target.value)}
-              placeholder="Search patient name or member ID"
-              aria-label="Search patients by name or member ID"
+              placeholder="Search patient, member ID, or claim ID"
+              aria-label="Search encounters by patient name, member ID, or claim ID"
             />
           </label>
           <label className="claims-time-filter">
@@ -3228,7 +3230,7 @@ function EncounterSearch({ searchQuery, onSearchChange, onSelectMember, onOpenCl
         claims={pagedEncounters}
         onSelectMember={onSelectMember}
         onOpenClaim={onOpenClaim}
-        emptyMessage="No encounters match that patient name, member ID, or status."
+        emptyMessage="No encounters match that patient name, member ID, claim ID, or status."
         footer={(
           <ClaimsTableFooter
             currentPage={safePage}

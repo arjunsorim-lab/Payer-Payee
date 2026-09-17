@@ -29,3 +29,7 @@ backend/.rag_index/
 *.njsproj
 *.sln
 *.sw?
+
+# Generated inspection dumps from workbook/Excel analysis.
+# These are regenerable scratch artifacts (~150 MB each) and exceed GitHub's 100 MB file limit.
+*.inspect.ndjson

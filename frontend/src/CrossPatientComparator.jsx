@@ -60,7 +60,6 @@ export function SamePatientBilledSavings({ memberId, diagnosisCode, claimId = ''
   const claimNames = (episode) => (episode?.claims || []).map((line) => line.claim_id).filter(Boolean).join(', ') || 'no claim ID'
   const interventionLines = result.intervention_lines || result.culture_add_on_lines || []
   const billedSum = (episode) => (episode?.claims || []).map((line) => `${fmt(line.billed_amount)} (${line.claim_id})`).join(' + ')
-  const interventionSource = interventionLines.map((line) => `${line.claim_id || 'claim'} ${line.cpt || ''}`.trim()).join(', ') || 'none'
   const interventionDetail = interventionLines.map((line) => `${line.claim_id || 'claim'} · ${line.procedure_description || line.cpt || 'intervention line'} · billed ${fmt(line.billed_amount)}`).join('; ') || 'No intervention lines identified.'
   const episodeLines = (episode) => (episode?.claims || []).map((line) => (
     <li key={line.claim_id}><strong>{line.claim_id}</strong> · {line.procedure_description || 'Billed service'} · ICD-10 {line.icd10 || 'not recorded'} · CPT {line.cpt || 'not recorded'} · units {line.units ?? 'not recorded'} · billed {fmt(line.billed_amount)}</li>

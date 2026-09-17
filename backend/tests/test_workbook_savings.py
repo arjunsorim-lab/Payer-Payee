@@ -57,10 +57,10 @@ class IntegratedWorkbookTests(unittest.TestCase):
                 "Data_Notes_READ_ME",
             },
         )
-        self.assertEqual(self.database.report["total_claim_count"], 3287)
-        self.assertEqual(self.database.report["claim_column_count"], 145)
-        self.assertEqual(len(self.database.selectable_claims), 2472)
-        self.assertEqual(len(self.database.historical_claims), 815)
+        self.assertEqual(self.database.report["total_claim_count"], 3289)
+        self.assertEqual(self.database.report["claim_column_count"], 148)
+        self.assertEqual(len(self.database.selectable_claims), 2473)
+        self.assertEqual(len(self.database.historical_claims), 816)
         self.assertIn("Authorization_Valid_From", self.database.selectable_claims[0]["workbookFields"])
         self.assertIn("Remit_835_Received_Date", self.database.selectable_claims[0]["workbookFields"])
 

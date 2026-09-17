@@ -164,7 +164,10 @@ def build_outcome_evidence(database, claim):
     ] if positive else []
     # An explicit positive-outcome row can reuse a preventive CPT code, but it
     # must not serve as both the intervention and its own outcome evidence.
-    preventive_source = claim if _preventive_visit(claim) and not positive else None
+    # A claim can be both the preventive intervention and the recorded outcome
+    # evidence. Keep that claim as the source instead of searching backward and
+    # incorrectly presenting an older preventive claim as the intervention.
+    preventive_source = claim if _preventive_visit(claim) else None
     if positive and preventive_source is None and episode_id:
         prior_preventive_visits = [
             candidate
@@ -260,7 +263,11 @@ def build_outcome_evidence(database, claim):
         "reference_diagnosis": historical_reference.get("diagnosisDescription") if historical_reference else None,
         "reference_intervention": historical_reference.get("cptDescription") if historical_reference else None,
         "reference_treatment_outcome": _text(historical_fields.get("Treatment_Outcome")) or None,
-        "historical_no_readmission_days": historical_fields.get("Episode_Duration_Days") if historical_match else None,
+        "historical_no_readmission_days": (
+            historical_fields.get("Episode_Duration_Days")
+            if historical_match
+            else fields.get("Episode_Duration_Days") if positive and not later_related else None
+        ),
         "recommended_intervention": historical_reference.get("cptDescription") if historical_match else None,
         "prediction_claim_id": claim.get("claimId") if historical_match else None,
         "prediction_intervention_performed": _text(claim_fields.get("Intervention_Performed")) or None,

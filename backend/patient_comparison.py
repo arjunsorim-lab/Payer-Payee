@@ -183,6 +183,8 @@ def _claim_summary(claim):
         "allowed_amount": _number(_field(claim, "Allowed_Amount", "allowed")),
         "units": _number(_field(claim, "Units", "units")),
         "intervention_performed": _boolean(_field(claim, "Intervention_Performed")),
+        "reason_code": _text(_field(claim, "Reason_Code")),
+        "episode_duration_days": _number(_field(claim, "Episode_Duration_Days")),
         "synthetic_demo": _text(_field(claim, "Reason_Code")).upper() == "SYNTHETIC_PRESENTATION_CASE",
     }
 
@@ -491,7 +493,16 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
         if anchor_episode_indexes and later_index not in anchor_episode_indexes:
             continue
         later = episodes[later_index]
-        for earlier in reversed(episodes[:later_index]):
+        anchor_line = next(
+            (line for line in later["claims"] if _text(line.get("claim_id")).replace("-", "") == normalized_anchor),
+            later["claims"][0] if later["claims"] else {},
+        )
+        gynecological_journey = (
+            family == "N92"
+            and _text(anchor_line.get("reason_code")).upper() == "SYNTHETIC_GYNECOLOGICAL_PREVENTIVE_OUTCOME_REFERENCE"
+        )
+        earlier_candidates = episodes[:later_index] if gynecological_journey else reversed(episodes[:later_index])
+        for earlier in earlier_candidates:
             if family.startswith(("N30", "N39")):
                 add_on_lines = [line for line in later["claims"] if _is_uti_culture_line(line)]
                 if any(_is_uti_culture_line(line) for line in earlier["claims"]):
@@ -517,16 +528,25 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
         }
 
     earlier, later, add_on_lines, later_index = selected_pair
+    earlier_index = episodes.index(earlier)
+    intervening_episodes = episodes[earlier_index + 1:later_index]
+    intervening_billed = _money(sum(episode["total_billed"] for episode in intervening_episodes))
+    journey_mode = bool(intervening_episodes)
     earlier_billed = _money(earlier["total_billed"])
     later_billed = _money(later["total_billed"])
     add_on_billed = _money(sum(line["billed_amount"] for line in add_on_lines))
-    actual_billed = _money(earlier_billed + later_billed)
+    actual_billed = _money(earlier_billed + intervening_billed + later_billed)
     proposed_billed = _money(earlier_billed + add_on_billed)
     billed_difference = _money(actual_billed - proposed_billed)
 
     earlier_end = _day(earlier["end_date"])
     later_start = _day(later["start_date"])
     days_between = (later_start - earlier_end).days if earlier_end and later_start else None
+    first_intervening_start = _day(intervening_episodes[0]["start_date"]) if intervening_episodes else None
+    days_to_first_intervening = (
+        (first_intervening_start - earlier_end).days
+        if earlier_end and first_intervening_start else None
+    )
     anchor_line = next(
         (line for line in later["claims"] if _text(line.get("claim_id")).replace("-", "") == normalized_anchor),
         later["claims"][0] if later["claims"] else {},
@@ -541,7 +561,8 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
         and _text(anchor_line.get("cpt")) == _text(earlier_line.get("cpt"))
     )
     candidate_visits = []
-    for rank, candidate in enumerate(reversed(episodes[:later_index]), start=1):
+    ranked_candidates = episodes[:later_index] if journey_mode else list(reversed(episodes[:later_index]))
+    for rank, candidate in enumerate(ranked_candidates, start=1):
         candidate_line = candidate["claims"][-1] if candidate["claims"] else {}
         selected = candidate is earlier
         candidate_visits.append({
@@ -553,17 +574,41 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
             "units": candidate_line.get("units"),
             "billed_amount": _money(candidate.get("total_billed")),
             "selected": selected,
-            "decision": "Selected: closest earlier visit meeting the same-member and diagnosis-family rule." if selected else "Ranked lower because another eligible visit occurred more recently.",
+            "decision": (
+                "Selected: first symptomatic visit in the documented progression journey."
+                if selected and journey_mode else
+                "Selected: closest earlier visit meeting the same-member and diagnosis-family rule."
+                if selected else
+                "Included as a subsequent visit in the documented progression journey."
+                if journey_mode else
+                "Ranked lower because another eligible visit occurred more recently."
+            ),
         })
     intervention_detail = "; ".join(
         f"{line.get('claim_id') or 'claim'} ({line.get('cpt') or 'procedure'}): {_money(line.get('billed_amount')):,.2f} billed"
         for line in add_on_lines
     ) or "No separately identifiable intervention lines were found."
+    earlier_line_keys = {
+        (_text(item.get("cpt")), _text(item.get("procedure_description")).lower())
+        for item in earlier["claims"]
+    }
+    excluded_marked_lines = [
+        line for line in later["claims"]
+        if line.get("intervention_performed") is True
+        and line not in add_on_lines
+        and (_text(line.get("cpt")), _text(line.get("procedure_description")).lower()) in earlier_line_keys
+    ]
+    excluded_detail = "; ".join(
+        f"{line.get('claim_id') or 'claim'} ({line.get('cpt') or 'procedure'})"
+        for line in excluded_marked_lines
+    )
     intervention_reason = (
         "The later UTI visit records urine-culture or specimen services that are absent from the earlier visit, matching the attached workbook's intervention bundle."
         if family.startswith(("N30", "N39"))
         else f"The add-on is limited to these later-visit lines: {intervention_detail}. Each is marked as an intervention and was absent from the selected earlier visit; no other later lines are included."
     )
+    if excluded_detail:
+        intervention_reason += f" {excluded_detail} was not added because the same billed service was already present in the earlier visit."
 
     return {
         "available": True,
@@ -578,28 +623,43 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
             "intervention_scope": "UTI culture/specimen bundle" if family.startswith(("N30", "N39")) else "Distinct later service lines explicitly recorded as interventions in this member's claims",
         },
         "selection_audit": {
-            "rule": "Anchor the selected later claim, keep the same member and ICD-10 diagnosis family, then choose the closest qualifying earlier visit. Billed amount does not choose the visit.",
+            "rule": (
+                "Anchor the preventive follow-up, keep the same member and ICD-10 diagnosis family, then start the calculation at the first symptomatic visit and include each intervening visit. Billed amount does not choose the visit."
+                if journey_mode else
+                "Anchor the selected later claim, keep the same member and ICD-10 diagnosis family, then choose the closest qualifying earlier visit. Billed amount does not choose the visit."
+            ),
             "anchor_reason": f"{anchor_line.get('claim_id')} is used because it is the claim opened on this prediction page.",
             "diagnosis_reason": f"Both visits are for ICD-10 family {family}." + (f" Both record the exact diagnosis {anchor_line.get('icd10')}." if exact_diagnosis_match else " The exact diagnosis codes differ within that family."),
-            "earlier_visit_reason": f"{earlier_line.get('claim_id')} is the most recent earlier visit for this member that satisfies the diagnosis-family and intervention-evidence rules.",
+            "earlier_visit_reason": (
+                f"{earlier_line.get('claim_id')} is the first symptomatic visit. The later worsening visit is included in the actual journey and treated as the visit that may have been avoided by applying the intervention at this first visit."
+                if journey_mode else
+                f"{earlier_line.get('claim_id')} is the most recent earlier visit for this member that satisfies the diagnosis-family and intervention-evidence rules."
+            ),
             "procedure_reason": f"Both visits record procedure {anchor_line.get('cpt')}." if same_procedure else "The procedures differ, but the later visit contains a separately identifiable intervention line.",
             "intervention_reason": intervention_reason,
             "candidate_visits": candidate_visits,
         },
         "calculation_basis": "billed_amount",
         "earlier_episode": _episode_summary(earlier),
+        "intervening_episodes": [_episode_summary(episode) for episode in intervening_episodes],
         "later_episode": _episode_summary(later),
         "days_between_episodes": days_between,
+        "days_to_first_intervening_episode": days_to_first_intervening,
         "culture_add_on_lines": add_on_lines,
         "intervention_lines": add_on_lines,
         "calculation": {
             "earlier_episode_actual_billed": earlier_billed,
             "later_episode_actual_billed": later_billed,
+            "intervening_episode_actual_billed": intervening_billed,
             "culture_and_specimen_add_on_billed": add_on_billed,
             "actual_two_episode_billed": actual_billed,
             "proposed_earlier_episode_with_add_on_billed": proposed_billed,
             "potential_billed_difference": billed_difference,
-            "formula": "actual earlier episode billed amount + actual later episode billed amount - (earlier episode billed amount + separately identifiable later intervention lines)",
+            "formula": (
+                "actual first visit + intervening worsening visits + preventive follow-up - (first visit + preventive intervention moved to the first visit)"
+                if journey_mode else
+                "actual earlier episode billed amount + actual later episode billed amount - (earlier episode billed amount + separately identifiable later intervention lines)"
+            ),
         },
         "includes_all_later_episode_lines": True,
         "clinical_review_required": True,

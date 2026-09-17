@@ -1,5 +1,7 @@
 """Data-driven linking of preventive visits to later recorded outcomes."""
 
+from datetime import date
+
 
 POSITIVE_OUTCOME_TERMS = (
     "resolved",
@@ -40,12 +42,98 @@ def _preventive_visit(claim):
     )
 
 
+def _date(value):
+    try:
+        return date.fromisoformat(_text(value)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def _claim_by_id(database, claim_id):
+    normalized = _text(claim_id).upper()
+    return next(
+        (candidate for candidate in database.claims if _text(candidate.get("claimId")).upper() == normalized),
+        None,
+    )
+
+
 def build_outcome_evidence(database, claim):
     """Return linked outcome evidence using only workbook fields and claim relationships."""
     source = claim
     claim_date = _text(claim.get("dos"))
     episode_id = claim.get("episodeId")
     family = _diagnosis_family(claim)
+    claim_fields = claim.get("workbookFields", {})
+    explicit_reference_id = _text(
+        claim_fields.get("Reference_Claim_ID") or claim_fields.get("Reference claim")
+    )
+    historical_reference = _claim_by_id(database, explicit_reference_id) if explicit_reference_id else None
+    historical_fields = historical_reference.get("workbookFields", {}) if historical_reference else {}
+    historical_match = bool(
+        historical_reference
+        and _diagnosis_family(historical_reference) == family
+        and _positive_outcome(historical_reference)
+        and _preventive_visit(historical_reference)
+        and _text(historical_fields.get("Reference_Claim_Flag")).upper() == "Y"
+        and _text(historical_fields.get("Intervention_Performed")).upper() == "Y"
+    )
+
+    readmission_candidates = [
+        candidate
+        for candidate in database.claims
+        if candidate.get("memberId") == claim.get("memberId")
+        and candidate.get("claimId") != claim.get("claimId")
+        and _diagnosis_family(candidate) == family
+        and _text(candidate.get("dos")) > claim_date
+        and (
+            candidate.get("episodeId") == episode_id
+            or _text(candidate.get("workbookFields", {}).get("Reference_Claim_ID")) == explicit_reference_id
+        )
+        and _text(candidate.get("workbookFields", {}).get("Related_Claim_Flag")).upper() == "Y"
+        and (
+            "READMISSION" in _text(candidate.get("workbookFields", {}).get("Reason_Code")).upper()
+            or "hospital" in _text(candidate.get("placeOfService")).lower()
+            or "hospital" in _text(candidate.get("cptDescription")).lower()
+        )
+    ] if historical_match else []
+    predicted_readmission = min(
+        readmission_candidates,
+        key=lambda candidate: (_text(candidate.get("dos")), candidate.get("claimId", "")),
+        default=None,
+    )
+    claim_is_later_hospitalization = bool(
+        historical_match
+        and not predicted_readmission
+        and (
+            "READMISSION" in _text(claim_fields.get("Reason_Code")).upper()
+            or "hospital" in _text(claim.get("placeOfService")).lower()
+            or "hospital" in _text(claim.get("cptDescription")).lower()
+        )
+    )
+    linked_prediction_claim_id = None
+    if claim_is_later_hospitalization:
+        earlier_episode_claims = [
+            candidate
+            for candidate in database.claims
+            if candidate.get("memberId") == claim.get("memberId")
+            and candidate.get("claimId") != claim.get("claimId")
+            and candidate.get("episodeId") == episode_id
+            and _text(candidate.get("dos")) < claim_date
+        ]
+        earlier_prediction = min(
+            earlier_episode_claims,
+            key=lambda candidate: (_text(candidate.get("dos")), candidate.get("claimId", "")),
+            default=None,
+        )
+        linked_prediction_claim_id = earlier_prediction.get("claimId") if earlier_prediction else None
+        predicted_readmission = claim
+    prediction_date = _date(claim.get("dos"))
+    readmission_date = _date(predicted_readmission.get("dos")) if predicted_readmission else None
+    predicted_gap_days = (
+        (readmission_date - prediction_date).days
+        if prediction_date and readmission_date and not claim_is_later_hospitalization
+        else None
+    )
     if not _positive_outcome(claim) and episode_id and _preventive_visit(claim):
         candidates = [
             candidate
@@ -99,7 +187,50 @@ def build_outcome_evidence(database, claim):
         f"Treatment outcome = {treatment or 'Not recorded'}, and "
         f"Follow-up completed = {follow_up or 'Not recorded'}."
     )
-    if positive and preventive_source:
+    if historical_match:
+        no_readmission_days = historical_fields.get("Episode_Duration_Days")
+        conclusion = (
+            "Why this recommendation was made: "
+            f"historical claim {historical_reference.get('claimId')} records "
+            f"{historical_reference.get('cptDescription')} for {_diagnosis_family(historical_reference)} "
+            f"and an improved outcome with no related readmission recorded for {no_readmission_days} days. "
+            f"Claim {claim.get('claimId')} has the same diagnosis family ({family}) and records that the "
+            f"preventive intervention was not performed. "
+        )
+        if claim_is_later_hospitalization:
+            conclusion += (
+                f"This claim is the linked later hospitalization dated {claim.get('dos')}"
+                + (
+                    f", after prediction claim {linked_prediction_claim_id} in the same member episode"
+                    if linked_prediction_claim_id
+                    else ""
+                )
+                + ". Its recorded billed charge is the potentially avoidable amount."
+            )
+        elif predicted_readmission:
+            conclusion += (
+                f"The same patient later had hospitalization claim {predicted_readmission.get('claimId')} "
+                f"{predicted_gap_days} days later. The recommendation is to provide "
+                f"{historical_reference.get('cptDescription')} earlier. The potentially avoidable amount is "
+                f"the hospitalization's recorded billed charge, not an allowed or paid amount."
+            )
+        else:
+            conclusion += f"The recommendation is to provide {historical_reference.get('cptDescription')} earlier."
+    elif positive and _preventive_visit(claim) and source.get("claimId") == claim.get("claimId"):
+        follow_up_days = fields.get("Episode_Duration_Days")
+        conclusion = (
+            f"Preventive claim {claim.get('claimId')} dated {claim.get('dos')} records "
+            f"Treatment outcome = {treatment or 'Not recorded'} and "
+            f"Follow-up completed = {follow_up or 'Not recorded'}. "
+            + (
+                f"No later related claim or readmission is recorded for this diagnosis family during the "
+                f"{follow_up_days}-day follow-up period. "
+                if follow_up_days and not later_related
+                else ""
+            )
+            + "This historical pattern supports recommending the preventive intervention immediately after the first episode."
+        )
+    elif positive and preventive_source:
         conclusion = (
             f"Preventive claim {preventive_source.get('claimId')} dated {preventive_source.get('dos')} "
             f"is linked to outcome claim {source.get('claimId')} dated {source_date}. "
@@ -124,6 +255,47 @@ def build_outcome_evidence(database, claim):
         "follow_up_completed": follow_up or "Not recorded",
         "outcome_claim_flag": _text(fields.get("Outcome_Claim_Flag")) or ("Y" if positive else "N"),
         "reference_claim_flag": _text(fields.get("Reference_Claim_Flag")) or "N",
+        "reference_claim_id": explicit_reference_id or None,
+        "reference_outcome_supported": historical_match,
+        "reference_diagnosis": historical_reference.get("diagnosisDescription") if historical_reference else None,
+        "reference_intervention": historical_reference.get("cptDescription") if historical_reference else None,
+        "reference_treatment_outcome": _text(historical_fields.get("Treatment_Outcome")) or None,
+        "historical_no_readmission_days": historical_fields.get("Episode_Duration_Days") if historical_match else None,
+        "recommended_intervention": historical_reference.get("cptDescription") if historical_match else None,
+        "prediction_claim_id": claim.get("claimId") if historical_match else None,
+        "prediction_intervention_performed": _text(claim_fields.get("Intervention_Performed")) or None,
+        "prediction_readmission_claim_id": predicted_readmission.get("claimId") if predicted_readmission else None,
+        "prediction_readmission_gap_days": predicted_gap_days,
+        "prediction_readmission_billed_amount": float(predicted_readmission.get("totalCharge") or 0) if predicted_readmission else None,
+        "claim_is_later_hospitalization": claim_is_later_hospitalization,
+        "linked_prediction_claim_id": linked_prediction_claim_id,
+        "member_id": claim.get("memberId"),
+        "episode_id": episode_id,
+        "calculation_basis": "billed_charge_amount" if historical_match else None,
+        "reference_source_row": {
+            "claim_id": historical_reference.get("claimId"),
+            "service_date": historical_reference.get("dos"),
+            "billed_amount": float(historical_reference.get("totalCharge") or 0),
+            "calculation_basis": "billed_charge_amount",
+            "why_included": (
+                "Used as the historical reference because this claim points to it via Reference_Claim_ID, "
+                "it shares the same diagnosis family, and it records a preventive intervention with a positive outcome."
+            ),
+        } if historical_match else None,
+        "prediction_readmission_source": {
+            "claim_id": predicted_readmission.get("claimId"),
+            "service_date": predicted_readmission.get("dos"),
+            "billed_amount": float(predicted_readmission.get("totalCharge") or 0),
+            "calculation_basis": "billed_charge_amount",
+            "why_included": (
+                "This claim is the later related hospitalization, so its own billed (charge) amount is the potentially avoided amount."
+                if claim_is_later_hospitalization
+                else (
+                    "Included because it is the same member's later related hospitalization for this diagnosis family "
+                    "(Related_Claim_Flag = Y), and its billed (charge) amount is the potentially avoided amount."
+                )
+            ),
+        } if predicted_readmission else None,
         "related_claim_flag": _text(fields.get("Related_Claim_Flag")) or "Not recorded",
         "synthetic": _text(fields.get("Reason_Code")).upper() in {"SYNTHETIC_PRESENTATION_CASE", "SYNTHETIC_OUTCOME_REFERENCE"},
         "source_claim_id": source.get("claimId"),
@@ -136,6 +308,6 @@ def build_outcome_evidence(database, claim):
         "preventive_visit_identified": preventive_source is not None,
         "no_later_related_claims": positive and not later_related,
         "later_related_claim_ids": later_related,
-        "status": "Recorded outcome evidence" if positive else "Not established",
+        "status": "Historical reference evidence" if historical_match else "Recorded outcome evidence" if positive else "Not established",
         "conclusion": conclusion,
     }

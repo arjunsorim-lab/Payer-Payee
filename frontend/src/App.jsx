@@ -1804,14 +1804,28 @@ function PlainLanguageClaimNarrative({ scenario, facts, summary, snapshot, histo
   const peerDifference = Number.isFinite(lowestPeerAllowed) ? Math.max(0, allowed - lowestPeerAllowed) : null
   const serviceName = facts.cpt_description || 'a healthcare service'
   const action = summary.best_action || {}
+  const historicalEvidence = facts.outcome_evidence || facts.outcomeEvidence || null
 
   return (
     <section className="plain-claim-narrative" aria-labelledby="plain-claim-narrative-title">
       <header>
         <span>Start here</span>
         <h2 id="plain-claim-narrative-title">What this prediction means: A simple story about this visit</h2>
-        <p>Start with the selected claim, then check the evidence behind each estimate. The amounts below are separate: a recorded billed amount, a prediction, and—when available—a same-member billed comparison.</p>
+        <p><strong>Presenting?</strong> Start on the Predictions page, open <strong>claim {facts.claim_id}</strong>, and read this story top to bottom. The Outcome evidence panel directly below shows the recorded claims behind every number; further down, the Claim-anchored billed comparison lists the claim IDs and billed amounts of every line it uses. Each other amount below is a separate model estimate and is labeled as such — do not add them together.</p>
       </header>
+
+      {historicalEvidence?.reference_outcome_supported === true ? (
+        <aside className="start-here-strongest-claim" role="note">
+          <strong>This claim is one of the strongest demo claims.</strong> The historical reference patient
+          received preventive care ({historicalEvidence.reference_intervention}, claim {historicalEvidence.reference_claim_id})
+          and then had no related readmission for about {historicalEvidence.historical_no_readmission_days} days.
+          This prediction patient has the same diagnosis pattern but has not received that intervention
+          {historicalEvidence.prediction_readmission_billed_amount != null
+            ? <> and later had a related hospitalization (claim {historicalEvidence.prediction_readmission_claim_id}) billed at {formatOptionalCurrency(historicalEvidence.prediction_readmission_billed_amount)}</>
+            : null}
+          . Click the Outcome evidence panel below to show this, then the Claim-anchored billed comparison further down.
+        </aside>
+      ) : null}
 
       <div className="claim-story-grid">
         <article>
@@ -2802,6 +2816,7 @@ function ClaimOutcomeEvidencePanel({ facts }) {
   }
   const outcomeText = [evidence.condition_resolved, evidence.treatment_outcome, evidence.follow_up_completed].filter(Boolean).join(' | ').toLowerCase()
   const positiveOutcome = /(resolved|improved|recovered|documented outcome assessment|clinical improvement)/i.test(outcomeText)
+  const historicalReference = evidence.reference_outcome_supported === true
   const recordedOutcome = [
     evidence.condition_resolved,
     evidence.treatment_outcome,
@@ -2809,22 +2824,40 @@ function ClaimOutcomeEvidencePanel({ facts }) {
     evidence.outcome_claim_flag,
     evidence.related_claim_flag,
   ].some((value) => value && !/^not recorded$/i.test(String(value).trim()))
-  const status = positiveOutcome ? 'Recorded outcome evidence' : (evidence.status || 'Not established')
-  const conclusion = positiveOutcome
+  const status = historicalReference ? 'Historical reference evidence' : positiveOutcome ? 'Recorded outcome evidence' : (evidence.status || 'Not established')
+  const conclusion = historicalReference
+    ? evidence.conclusion
+    : positiveOutcome
     ? (evidence.conclusion || 'Recorded claim fields show a resolved or improved outcome.')
     : recordedOutcome
       ? 'Recorded claim fields are shown below. They do not record a resolved or improved outcome for this claim.'
       : 'No outcome fields are recorded for this claim.'
-  const heading = positiveOutcome
+  const heading = historicalReference
+    ? 'Historical evidence supports this prediction'
+    : positiveOutcome
     ? 'Recorded outcome evidence'
     : recordedOutcome
       ? 'Recorded outcome fields'
       : 'Outcome not recorded'
-  const fields = [
+  const fields = historicalReference ? [
+    ['Matched member', evidence.member_id],
+    ['Matched episode', evidence.episode_id],
+    ['Historical reference claim', evidence.reference_claim_id],
+    ['Matched diagnosis', evidence.reference_diagnosis],
+    ['Intervention that improved the historical outcome', evidence.reference_intervention],
+    ['Recorded historical outcome', evidence.reference_treatment_outcome],
+    ['No related readmission recorded for', evidence.historical_no_readmission_days == null ? 'Not recorded' : `${evidence.historical_no_readmission_days} days`],
+    ['Prediction claim', evidence.prediction_claim_id],
+    ['Intervention already performed', evidence.prediction_intervention_performed === 'N' ? 'No — the preventive intervention was not performed for this patient' : evidence.prediction_intervention_performed],
+    ['Later hospitalization', evidence.claim_is_later_hospitalization ? `This claim (${evidence.prediction_readmission_claim_id}) is the later hospitalization` : (evidence.prediction_readmission_claim_id || 'Not recorded')],
+    ['Time to later hospitalization', evidence.prediction_readmission_gap_days == null ? 'Not recorded' : `${evidence.prediction_readmission_gap_days} days`],
+    ['Recommended earlier intervention', evidence.recommended_intervention],
+  ] : [
     ['Preventive claim', evidence.preventive_claim_id || 'Not recorded'],
     ['Preventive service date', evidence.preventive_service_date || 'Not recorded'],
     ['Preventive procedure', evidence.preventive_procedure || 'Not recorded'],
     ['Outcome claim', evidence.source_claim_id || facts.claim_id || 'Not recorded'],
+    ['Reference claim', evidence.reference_claim_id || 'Not recorded'],
     ['Outcome service date', evidence.source_service_date || 'Not recorded'],
     ['Outcome procedure', evidence.source_procedure || 'Not recorded'],
     ['Condition resolved', evidence.condition_resolved],
@@ -2846,6 +2879,20 @@ function ClaimOutcomeEvidencePanel({ facts }) {
         </div>
       </div>
       <p>{conclusion}</p>
+      {historicalReference ? (
+        <div className="outcome-evidence-traceability">
+          <strong>Where the billed amounts come from</strong>
+          <ul>
+            {[evidence.reference_source_row, evidence.prediction_readmission_source].filter(Boolean).map((row) => (
+              <li key={row.claim_id}>
+                <strong>{formatOptionalCurrency(row.billed_amount)}</strong> — recorded billed (charge) amount from claim{' '}
+                <strong>{row.claim_id}</strong> dated {row.service_date}. Why included: {row.why_included}
+              </li>
+            ))}
+          </ul>
+          <small>The later hospitalization's billed charge is the potentially avoidable amount. The historical reference claim is evidence for choosing the intervention; its billed charge is shown only for traceability and is not added to the predicted saving.</small>
+        </div>
+      ) : null}
       <dl>
         {fields.map(([label, value]) => (
           <div key={label}><dt>{label}</dt><dd>{value || 'Not recorded'}</dd></div>
@@ -2881,7 +2928,7 @@ function PredictionScenarioMap({ scenario, initialMemberId, initialDiagnosisCode
       note: `${snapshot.predicted_avoidable_spend.repeat_probability_90d} repeat probability × ${snapshot.predicted_avoidable_spend.avoidable_given_repeat_probability} avoidable share × ${formatOptionalCurrency(snapshot.predicted_avoidable_spend.expected_extra_repeat_allowed_cost)} extra allowed cost; rounded to cents.`,
       tone: 'purple',
       icon: TrendingDown,
-      help: 'This is a guess. It is not money already saved.',
+      help: 'Separate calculation: this is a model guess on the allowed-price basis. It is not the recorded billed amount shown in the Outcome evidence panel or the billed comparison, and it is not money already saved.',
     },
     {
       label: 'Expected denial exposure (payment basis)',
@@ -2889,7 +2936,7 @@ function PredictionScenarioMap({ scenario, initialMemberId, initialDiagnosisCode
       note: `${formatProbability(snapshot.denial_probability)} denial chance × ${formatOptionalCurrency(snapshot.predicted_provider_payment.value)} predicted payment.`,
       tone: 'red',
       icon: ShieldAlert,
-      help: 'This is a computer guess about money that insurance might not pay.',
+      help: 'Separate calculation: a computer guess about money that insurance might not pay. It is not the recorded billed amount shown in the Outcome evidence panel.',
     },
   ]
 
@@ -2903,6 +2950,14 @@ function PredictionScenarioMap({ scenario, initialMemberId, initialDiagnosisCode
         </div>
         <span className="priority-chip">First thing to check: {suggestedReviewLabel}</span>
       </header>
+
+      <PlainLanguageClaimNarrative
+        scenario={scenario}
+        facts={facts}
+        summary={summary}
+        snapshot={snapshot}
+        historicalPeerCount={historicalPeerCount}
+      />
 
       <ClaimOutcomeEvidencePanel facts={facts} />
 

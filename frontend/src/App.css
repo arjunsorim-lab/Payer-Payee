@@ -2256,6 +2256,23 @@ button {
 .claim-outcome-evidence dd { margin: 4px 0 0; color: #4c1d25; font-size: 12px; font-weight: 800; overflow-wrap: anywhere; }
 .claim-outcome-evidence > small { display: block; margin: 11px 0 0 27px; color: #8b5a61; font-size: 11px; line-height: 1.45; }
 
+/* Number traceability inside the outcome evidence panel */
+.outcome-evidence-traceability {
+  margin: 0 0 12px 27px;
+  padding: 10px 12px;
+  border: 1px dashed #e5b5b5;
+  border-radius: 8px;
+  background: #fffdfd;
+}
+.outcome-evidence-traceability strong { display: block; color: #9f3f49; font-size: 11px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+.outcome-evidence-traceability ul { margin: 8px 0 0; padding-left: 16px; display: grid; gap: 7px; }
+.outcome-evidence-traceability li { color: #71333b; font-size: 12px; line-height: 1.5; }
+.outcome-evidence-traceability small { display: block; margin-top: 8px; color: #8b5a61; font-size: 11px; line-height: 1.45; }
+
+@media (max-width: 640px) {
+  .outcome-evidence-traceability { margin-left: 0; }
+}
+
 @media (max-width: 1100px) {
   .claim-outcome-evidence dl { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
@@ -2399,6 +2416,18 @@ button {
   flex-direction: column;
   gap: 16px;
 }
+
+.start-here-strongest-claim {
+  padding: 12px 14px;
+  border: 1px solid #a7f3d0;
+  border-left: 4px solid #059669;
+  border-radius: 10px;
+  background: #ecfdf5;
+  color: #064e3b;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.start-here-strongest-claim strong { font-weight: 800; }
 
 .payer-savings-availability {
   display: flex;

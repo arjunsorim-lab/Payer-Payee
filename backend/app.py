@@ -627,6 +627,18 @@ def get_prediction_dashboard():
     })
 
 
+def _is_presentation_anchor_claim(claim):
+    """A claim the workbook itself anchors as a presentation/demo journey row.
+
+    Selection is data-driven: it reads the workbook Reference_Claim_ID and
+    Reason_Code fields instead of hardcoding any claim ID.
+    """
+    fields = claim.get("workbookFields", {})
+    reference_id = str(fields.get("Reference_Claim_ID") or "").strip()
+    reason_code = str(fields.get("Reason_Code") or "").upper()
+    return bool(reference_id) and "PREDICTION" in reason_code
+
+
 @app.get("/api/predictions/scenarios")
 def get_prediction_scenarios():
     """Build provider-facing episode scenarios from the current database rows."""
@@ -635,8 +647,17 @@ def get_prediction_scenarios():
         # Historical-reference rows are visible in the claims directory but
         # cannot be prediction targets.
         all_rows = list(database.selectable_claims)
+        # Workbook-anchored demo rows (Reference_Claim_ID / PREDICTION reason
+        # codes) are the strongest guided-demo claims, so surface them first.
+        # Presenters reach them on the first directory page without the app
+        # depending on any specific claim ID.
+        anchor_rows = sorted(
+            (row for row in all_rows if _is_presentation_anchor_claim(row)),
+            key=lambda row: (str(row.get("dos") or ""), str(row.get("claimId") or "")),
+        )
+        ordered_rows = anchor_rows + [row for row in all_rows if not _is_presentation_anchor_claim(row)]
         page, limit, skip = page_options(request.args, default_limit=50)
-        rows = all_rows[skip: skip + limit]
+        rows = ordered_rows[skip: skip + limit]
         results = [build_financial_result(database, claim["claimId"]) for claim in rows]
         episode_avoidable = {}
         latest_episode_predictions = {}

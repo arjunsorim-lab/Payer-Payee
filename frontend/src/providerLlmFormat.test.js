@@ -75,7 +75,7 @@ test('claim outcome panel shows recorded improvement data when the worksheet rec
 
 test('claim detail view hydrates a compact list record before rendering outcome evidence', () => {
   assert.match(app, /const \[hydratedClaim, setHydratedClaim\] = useState\(claim\)/)
-  assert.match(app, /fetchJson\(\`\/api\/claims\/\$\{encodeURIComponent\(identifier\)\}\`\)/)
+  assert.match(app, /fetchJson\(`\/api\/claims\/\$\{encodeURIComponent\(identifier\)\}`\)/)
   assert.match(app, /hasOutcomeFields/)
 })
 

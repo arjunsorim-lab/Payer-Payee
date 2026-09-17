@@ -75,6 +75,29 @@ class TestOutcomeEvidence(unittest.TestCase):
         self.assertIn("VISIT-ALPHA", evidence["conclusion"])
         self.assertIn("RESULT-BETA", evidence["conclusion"])
 
+    def test_preventive_reference_without_recurrence_recommends_earlier_care(self):
+        reference = claim(
+            "PREVENTIVE-REFERENCE",
+            "2025-01-01",
+            diagnosis="Z01.419",
+            CPT_Code="99395",
+            CPT_Description="Preventive Visit 18-39 Yrs",
+            Intervention_Performed="Y",
+            Outcome_Claim_Flag="Y",
+            Reference_Claim_Flag="Y",
+            Condition_Resolved="Y",
+            Treatment_Outcome="Improved",
+            Follow_Up_Completed="Y",
+            Episode_Duration_Days=200,
+        )
+
+        evidence = build_outcome_evidence(Database([reference]), reference)
+
+        self.assertEqual(evidence["status"], "Recorded outcome evidence")
+        self.assertTrue(evidence["no_later_related_claims"])
+        self.assertIn("200-day follow-up period", evidence["conclusion"])
+        self.assertIn("immediately after the first episode", evidence["conclusion"])
+
     def test_does_not_borrow_another_members_outcome(self):
         other_member_outcome = claim(
             "OTHER-OUTCOME",
@@ -91,6 +114,163 @@ class TestOutcomeEvidence(unittest.TestCase):
 
         self.assertEqual(evidence["source_claim_id"], "VISIT-ALPHA")
         self.assertEqual(evidence["status"], "Not established")
+
+    def test_cross_patient_reference_drives_recommendation_and_billed_savings(self):
+        reference = claim(
+            "REFERENCE-ONE",
+            "2025-01-01",
+            member="REFERENCE-MEMBER",
+            episode="REFERENCE-EPISODE",
+            diagnosis="R73.03",
+            CPT_Code="99395",
+            CPT_Description="Preventive Visit + Care Management",
+            Intervention_Performed="Y",
+            Outcome_Claim_Flag="Y",
+            Reference_Claim_Flag="Y",
+            Condition_Resolved="Y",
+            Treatment_Outcome="Improved",
+            Follow_Up_Completed="Y",
+            Episode_Duration_Days=200,
+        )
+        prediction = claim(
+            "PREDICTION-TWO",
+            "2026-01-15",
+            member="PREDICTION-MEMBER",
+            episode="PREDICTION-EPISODE",
+            diagnosis="R73.03",
+            Reference_Claim_ID="REFERENCE-ONE",
+            Intervention_Performed="N",
+        )
+        readmission = claim(
+            "READMISSION-THREE",
+            "2026-03-01",
+            member="PREDICTION-MEMBER",
+            episode="PREDICTION-EPISODE",
+            diagnosis="R73.03",
+            CPT_Description="Inpatient hospital care",
+            Reference_Claim_ID="REFERENCE-ONE",
+            Related_Claim_Flag="Y",
+            Reason_Code="PREDICTED_AVOIDABLE_READMISSION",
+        )
+        readmission["totalCharge"] = 4800
+
+        evidence = build_outcome_evidence(Database([reference, prediction, readmission]), prediction)
+
+        self.assertEqual(evidence["status"], "Historical reference evidence")
+        self.assertEqual(evidence["recommended_intervention"], "Preventive Visit + Care Management")
+        self.assertEqual(evidence["prediction_readmission_gap_days"], 45)
+        self.assertEqual(evidence["prediction_readmission_billed_amount"], 4800)
+        self.assertFalse(evidence["claim_is_later_hospitalization"])
+        self.assertEqual(evidence["calculation_basis"], "billed_charge_amount")
+
+    def test_readmission_source_row_is_traceable(self):
+        reference = claim(
+            "REFERENCE-ONE",
+            "2025-01-01",
+            member="REFERENCE-MEMBER",
+            episode="REFERENCE-EPISODE",
+            diagnosis="R73.03",
+            CPT_Code="99395",
+            CPT_Description="Preventive Visit + Care Management",
+            Intervention_Performed="Y",
+            Outcome_Claim_Flag="Y",
+            Reference_Claim_Flag="Y",
+            Condition_Resolved="Y",
+            Treatment_Outcome="Improved",
+            Follow_Up_Completed="Y",
+            Episode_Duration_Days=200,
+        )
+        reference["totalCharge"] = 823.9
+        prediction = claim(
+            "PREDICTION-TWO",
+            "2026-01-15",
+            member="PREDICTION-MEMBER",
+            episode="PREDICTION-EPISODE",
+            diagnosis="R73.03",
+            Reference_Claim_ID="REFERENCE-ONE",
+            Intervention_Performed="N",
+        )
+        readmission = claim(
+            "READMISSION-THREE",
+            "2026-03-01",
+            member="PREDICTION-MEMBER",
+            episode="PREDICTION-EPISODE",
+            diagnosis="R73.03",
+            CPT_Description="Inpatient hospital care",
+            Reference_Claim_ID="REFERENCE-ONE",
+            Related_Claim_Flag="Y",
+            Reason_Code="PREDICTED_AVOIDABLE_READMISSION",
+        )
+        readmission["totalCharge"] = 4800
+
+        evidence = build_outcome_evidence(Database([reference, prediction, readmission]), prediction)
+
+        self.assertEqual(
+            evidence["prediction_readmission_source"],
+            {
+                "claim_id": "READMISSION-THREE",
+                "service_date": "2026-03-01",
+                "billed_amount": 4800,
+                "calculation_basis": "billed_charge_amount",
+                "why_included": (
+                    "Included because it is the same member's later related hospitalization for this diagnosis family "
+                    "(Related_Claim_Flag = Y), and its billed (charge) amount is the potentially avoided amount."
+                ),
+            },
+        )
+        self.assertEqual(evidence["reference_source_row"]["claim_id"], "REFERENCE-ONE")
+        self.assertEqual(evidence["reference_source_row"]["billed_amount"], 823.9)
+        self.assertIn("Reference_Claim_ID", evidence["reference_source_row"]["why_included"])
+
+    def test_opening_the_readmission_claim_itself_stays_consistent(self):
+        reference = claim(
+            "REFERENCE-ONE",
+            "2025-01-01",
+            member="REFERENCE-MEMBER",
+            episode="REFERENCE-EPISODE",
+            diagnosis="R73.03",
+            CPT_Code="99395",
+            CPT_Description="Preventive Visit + Care Management",
+            Intervention_Performed="Y",
+            Outcome_Claim_Flag="Y",
+            Reference_Claim_Flag="Y",
+            Condition_Resolved="Y",
+            Treatment_Outcome="Improved",
+            Follow_Up_Completed="Y",
+            Episode_Duration_Days=200,
+        )
+        prediction = claim(
+            "PREDICTION-TWO",
+            "2026-01-15",
+            member="PREDICTION-MEMBER",
+            episode="PREDICTION-EPISODE",
+            diagnosis="R73.03",
+            Reference_Claim_ID="REFERENCE-ONE",
+            Intervention_Performed="N",
+        )
+        readmission = claim(
+            "READMISSION-THREE",
+            "2026-03-01",
+            member="PREDICTION-MEMBER",
+            episode="PREDICTION-EPISODE",
+            diagnosis="R73.03",
+            CPT_Description="Initial Hospital Care - Progression",
+            Reference_Claim_ID="REFERENCE-ONE",
+            Related_Claim_Flag="Y",
+            Reason_Code="PREDICTED_AVOIDABLE_READMISSION",
+        )
+        readmission["totalCharge"] = 4800
+
+        evidence = build_outcome_evidence(Database([reference, prediction, readmission]), readmission)
+
+        self.assertEqual(evidence["status"], "Historical reference evidence")
+        self.assertTrue(evidence["claim_is_later_hospitalization"])
+        self.assertEqual(evidence["prediction_readmission_claim_id"], "READMISSION-THREE")
+        self.assertEqual(evidence["linked_prediction_claim_id"], "PREDICTION-TWO")
+        self.assertIsNone(evidence["prediction_readmission_gap_days"])
+        self.assertIn("linked later hospitalization", evidence["conclusion"])
+        self.assertIn("PREDICTION-TWO", evidence["conclusion"])
+        self.assertEqual(evidence["prediction_readmission_source"]["billed_amount"], 4800)
 
 
 if __name__ == "__main__":

@@ -1336,7 +1336,9 @@ def build_financial_result(database, claim_id):
         "historical_comparison": comparison,
         "historical_patterns": patterns,
         "similar_historical_claims": similar,
-        "short_timeframe_patterns": short_patterns,
+        # The UI renders at most ten trace rows. Keep the complete aggregate
+        # statistics above, but do not serialize a combinatorial pair list.
+        "short_timeframe_patterns": short_patterns[:10],
         "historical_prediction_basis": comparison,
         "scenario_map": {},
         "rag_evidence": [],

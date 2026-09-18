@@ -877,7 +877,7 @@ function ClaimsWorkspace({ selectedClaim, searchQuery, onSearchChange, onOpenCla
             <div className="claims-directory-header">
               <div>
                 <h1>Claims</h1>
-                <p>All 837 claim records from the current database</p>
+                <p>Current selectable 837 claim records; linked sequence evidence loads with each claim</p>
               </div>
               <div className="claims-directory-controls">
                 <label className="claims-directory-search">
@@ -902,7 +902,7 @@ function ClaimsWorkspace({ selectedClaim, searchQuery, onSearchChange, onOpenCla
               </div>
             </div>
             <RecentClaims
-              title="All Claims"
+              title="Current Claims"
               claims={pagedClaims}
               onOpenClaim={onOpenClaim}
               emptyMessage="No claims match that patient name or member ID."
@@ -945,6 +945,9 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
     const scenarioPageSize = 10
     const loadScenarios = async () => {
       try {
+        // Load a small payload first, then progressively page-in cards.
+        // This keeps first paint fast and avoids computing a large scenario set
+        // before the user can interact.
         const payload = await fetchJson(`/api/predictions/scenarios?limit=${initialScenarioCount}&compact=true`)
         if (cancelled) return
         setScenarios(Array.isArray(payload.items) ? payload.items : [])
@@ -953,20 +956,34 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
         setScenarioError('')
         setScenarioLoading(false)
 
-        // Render the first page as soon as it is ready, then fill the remaining
-        // directory pages without blocking the user from opening a prediction.
-        const visibleScenarioLimit = 50
+        // Progressive card loading: fetch one additional directory page at a time,
+        // without over-fetching a large fixed window.
+        const appendPage = async (page) => {
+          const nextPayload = await fetchJson(`/api/predictions/scenarios?page=${page}&limit=${scenarioPageSize}&compact=true`)
+          if (cancelled) return
+          setScenarios((current) => {
+            const items = Array.isArray(nextPayload.items) ? nextPayload.items : []
+            // De-dupe by scenario id to avoid repeated fetch races.
+            const seen = new Set(current.map((s) => s.claim_id || s.id))
+            const merged = [...current]
+            for (const item of items) {
+              const key = item.claim_id || item.id
+              if (!seen.has(key)) {
+                merged.push(item)
+                seen.add(key)
+              }
+            }
+            return merged
+          })
+        }
+
+        // Page 1 (replace) then page 2 (append). Total: 2 sequential requests.
         const completeFirstPage = await fetchJson(`/api/predictions/scenarios?limit=${scenarioPageSize}&compact=true`)
         if (cancelled) return
         setScenarios(Array.isArray(completeFirstPage.items) ? completeFirstPage.items : [])
-        const totalPageCount = Math.ceil(
-          Math.min(Number(payload.totalClaims || 0), visibleScenarioLimit) / scenarioPageSize,
-        )
-        for (let page = 2; page <= totalPageCount; page += 1) {
-          const nextPayload = await fetchJson(`/api/predictions/scenarios?page=${page}&limit=${scenarioPageSize}&compact=true`)
-          if (cancelled) return
-          setScenarios((current) => [...current, ...(nextPayload.items || [])])
-        }
+
+        // Fire-and-forget page 2 to avoid blocking first render.
+        appendPage(2).catch(() => {})
       } catch {
         if (cancelled) return
         setScenarios([])

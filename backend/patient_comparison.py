@@ -268,7 +268,14 @@ def discover_comparable_pairs(database):
     # The selector is an evidence directory: include every member with this
     # disease family, including historical-reference records. The response
     # identifies those rows so reviewers can distinguish reference evidence.
-    claims = [claim for claim in database.claims if not _is_template_coverage_demo(claim)]
+    # Comparable-pair evidence must exclude synthetic peer rows so it doesn't
+    # contaminate unrelated comparisons.
+    claims = [
+        claim
+        for claim in database.claims
+        if not _is_template_coverage_demo(claim)
+        and not _text(_field(claim, "Reason_Code")).upper().startswith(("SYNTHETIC_SEQUENCE_", "SEQW-", "SEQP-"))
+    ]
     episodes = _build_episodes(claims)
 
     # Group episodes by family
@@ -346,7 +353,14 @@ def compare_patients(database, member_id_1, member_id_2, diagnosis_family):
     if member_id_1 == member_id_2:
         raise ValueError("The two patients must be different members.")
 
-    claims = [claim for claim in database.claims if not _is_template_coverage_demo(claim)]
+    # Comparable-pair evidence must exclude synthetic peer rows so it doesn't
+    # contaminate unrelated comparisons.
+    claims = [
+        claim
+        for claim in database.claims
+        if not _is_template_coverage_demo(claim)
+        and not _text(_field(claim, "Reason_Code")).upper().startswith(("SYNTHETIC_SEQUENCE_", "SEQW-", "SEQP-"))
+    ]
     episodes = _build_episodes(claims)
 
     # Find episodes for each member in this disease family

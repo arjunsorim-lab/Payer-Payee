@@ -77,6 +77,6 @@ def dataset_registry():
         ("requirements_pack", DEFAULT_SUPPORTING_DATASETS["requirements_pack"], "requirements and evidence-gap documentation"),
     ]
     return [
-        {"dataset_id": dataset_id, "workbook_name": path.name, "path": str(path), "role": role, "available": path.is_file()}
+        {"dataset_id": dataset_id, "workbook_name": path.name, "role": role, "available": path.is_file()}
         for dataset_id, path, role in entries
     ]

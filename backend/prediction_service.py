@@ -110,7 +110,13 @@ def _episode_explanations(episode, condition, repeated_services, denied, setting
 
 
 def build_prediction_scenarios(claims, min_claims=2):
-    claims = [dict(claim) for claim in claims if claim.get("memberId") and claim.get("diagnosisCode")]
+    # Keep scenario responses light: the browser directory cards don't need
+    # historical pattern/pair blobs or synthetic sequence companion data.
+    claims = [
+        _prune_browser_claim(dict(claim))
+        for claim in claims
+        if claim.get("memberId") and claim.get("diagnosisCode")
+    ]
     peer_groups = _peer_rates(claims)
     episodes = defaultdict(list)
     for claim in claims:
@@ -146,7 +152,28 @@ def build_prediction_scenarios(claims, min_claims=2):
                 "number": index,
                 "title": claim.get("cptDescription") or claim.get("placeOfService") or "Clinical service",
                 "detail": f"{claim.get('cptCode') or 'Service'} · billed ${_money(claim.get('totalCharge')):,.2f}, paid ${_money(claim.get('paid')):,.2f}",
-                "claim": claim,
+                # Do not include full historical claim objects; cards only
+                # require a minimal subset for display.
+                "claim": {
+                    "claimId": claim.get("claimId"),
+                    "memberId": claim.get("memberId"),
+                    "number": claim.get("number"),
+                    "dos": claim.get("dos"),
+                    "payer": claim.get("payer"),
+                    "billingProvider": claim.get("billingProvider"),
+                    "diagnosisCode": claim.get("diagnosisCode"),
+                    "diagnosisDescription": claim.get("diagnosisDescription"),
+                    "cptCode": claim.get("cptCode"),
+                    "cptDescription": claim.get("cptDescription"),
+                    "placeOfService": claim.get("placeOfService"),
+                    "placeOfServiceCode": claim.get("placeOfServiceCode"),
+                    "totalCharge": claim.get("totalCharge"),
+                    "paid": claim.get("paid"),
+                    "allowed": claim.get("allowed"),
+                    "patientResp": claim.get("patientResp"),
+                    "status": claim.get("status"),
+                    "units": claim.get("units"),
+                },
             })
 
         scenarios.append({
@@ -187,6 +214,22 @@ def build_prediction_scenarios(claims, min_claims=2):
         })
 
     return sorted(scenarios, key=lambda item: (item["risk"]["score"], item["avoidableSpend"]), reverse=True)
+
+
+def _prune_browser_claim(claim: dict) -> dict:
+    """Remove heavyweight fields before returning claim objects to the browser."""
+    if not isinstance(claim, dict):
+        return claim
+    heavy_keys = {
+        "historical_patterns",
+        "historical_pairs",
+        "historical_pair",
+        "short_timeframe_pairs",
+        "similar_historical_claims",
+        "pairs",
+        "pair",
+    }
+    return {k: v for k, v in claim.items() if k not in heavy_keys}
 
 
 def summarize_scenarios(scenarios):

@@ -74,7 +74,13 @@ BUNDLED_WORKBOOK_PATH = (
 )
 
 app = Flask(__name__, static_folder=None)
-CORS(app, origins=os.getenv("CORS_ORIGIN", "*").split(","))
+CORS(
+    app,
+    origins=os.getenv(
+        "CORS_ORIGIN",
+        "http://127.0.0.1:5173,http://localhost:5173",
+    ).split(","),
+)
 
 
 @app.after_request
@@ -1023,6 +1029,10 @@ def get_ai_health():
     client = OllamaClient()
     ollama = client.health()
     rag = index_status(database, client) if database else {"ready": False}
+    public_rag = {
+        key: value for key, value in rag.items()
+        if key not in {"path", "index_path", "index_location"}
+    }
     try:
         from .workbook_enrichment import (
             CALCULATION_VERSION,
@@ -1032,7 +1042,7 @@ def get_ai_health():
         from workbook_enrichment import CALCULATION_VERSION, PREDICTION_VERSION
     return json_response({
         "ollama": ollama,
-        "rag": rag,
+        "rag": public_rag,
         "prediction": {
             "model_version": PREDICTION_VERSION,
             "calculation_version": CALCULATION_VERSION,
@@ -1055,10 +1065,7 @@ def rebuild_rag():
         return json_response({"message": "Configured workbook is required."}, 409)
     try:
         bundle = build_index(database, force=True)
-        return json_response({
-            **bundle["manifest"],
-            "index_path": bundle["path"],
-        })
+        return json_response(bundle["manifest"])
     except (RuntimeError, OllamaError) as error:
         return json_response({"message": str(error)}, 503)
 

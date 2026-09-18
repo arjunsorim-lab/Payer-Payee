@@ -19,6 +19,7 @@ SIMILARITY_WEIGHTS = {
 MIN_PEERS = 3
 _EARLIER_CACHE = {}
 _SHORT_CACHE = {}
+_MEMBER_SHORT_CACHE = {}
 
 
 def _text(value):
@@ -44,6 +45,13 @@ def field(claim, name, fallback=""):
     return fallback if value in (None, "") else value
 
 
+def _is_synthetic_sequence_companion(claim):
+    return _text(field(claim, "Reason_Code")).upper() in {
+        "SYNTHETIC_SEQUENCE_WORSENING",
+        "SYNTHETIC_SEQUENCE_PREVENTIVE",
+    }
+
+
 def icd_family(claim):
     explicit = _text(field(claim, "ICD10_Family"))
     diagnosis = _text(claim.get("diagnosisCode") or field(claim, "ICD10_Diagnosis_Code"))
@@ -61,7 +69,11 @@ def earlier_claims(database, claim):
     if key in _EARLIER_CACHE:
         return _EARLIER_CACHE[key]
     source = getattr(database, "claims", getattr(database, "historical_claims", ()))
-    result = [row for row in source if _text(row.get("dos")) < cutoff]
+    result = [
+        row for row in source
+        if _text(row.get("dos")) < cutoff
+        and not _is_synthetic_sequence_companion(row)
+    ]
     _EARLIER_CACHE[key] = result
     return result
 
@@ -157,35 +169,65 @@ def similar_historical_claims(database, claim, limit=10):
     return sorted(ranked, key=lambda item: (-item["similarity_score"], item["service_date"], item["claim_id"]))[:limit]
 
 
-def short_timeframe_patterns(database, claim):
-    cache_key = (getattr(database, "workbook_hash", id(database)), _text(claim.get("claimId")), _text(claim.get("dos")))
-    if cache_key in _SHORT_CACHE:
-        return _SHORT_CACHE[cache_key]
+def _member_short_timeframe_patterns(database, member_id):
+    cache_key = (getattr(database, "workbook_hash", id(database)), _text(member_id))
+    cached = _MEMBER_SHORT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    source = getattr(database, "claims", getattr(database, "historical_claims", ()))
     member_rows = sorted(
-        [row for row in earlier_claims(database, claim) if row.get("memberId") == claim.get("memberId")],
+        [
+            row for row in source
+            if row.get("memberId") == member_id
+            and not _is_synthetic_sequence_companion(row)
+        ],
         key=lambda row: (row.get("dos", ""), row.get("claimId", "")),
     )
     pairs = []
     for first_index, first in enumerate(member_rows):
-      for second in member_rows[first_index + 1:]:
-        first_date, second_date = _date(first.get("dos")), _date(second.get("dos"))
-        if not first_date or not second_date:
+        first_date = _date(first.get("dos"))
+        if not first_date:
             continue
-        days = (second_date - first_date).days
-        if days > 90:
-            break
-        flags = {
-            "same_cpt": first.get("cptCode") == second.get("cptCode"),
-            "same_icd_family": icd_family(first) == icd_family(second),
-            "same_provider": first.get("billingProviderNpi") == second.get("billingProviderNpi"),
-            "same_payer": first.get("payerId") == second.get("payerId"),
-            "same_procedure_family": procedure_family(first) == procedure_family(second),
-            "same_episode": bool(first.get("episodeId") and first.get("episodeId") == second.get("episodeId")),
-        }
-        score = 25 * flags["same_cpt"] + 25 * flags["same_icd_family"] + 15 * flags["same_provider"] + 10 * flags["same_payer"] + 10 * flags["same_procedure_family"] + 15 * flags["same_episode"]
-        if score:
-            pairs.append({"claim_1": first["claimId"], "claim_2": second["claimId"], "date_1": first.get("dos"), "date_2": second.get("dos"), "days_apart": days, **flags, "relationship_score": score})
+        for second in member_rows[first_index + 1:]:
+            second_date = _date(second.get("dos"))
+            if not second_date:
+                continue
+            days = (second_date - first_date).days
+            if days > 90:
+                break
+            flags = {
+                "same_cpt": first.get("cptCode") == second.get("cptCode"),
+                "same_icd_family": icd_family(first) == icd_family(second),
+                "same_provider": first.get("billingProviderNpi") == second.get("billingProviderNpi"),
+                "same_payer": first.get("payerId") == second.get("payerId"),
+                "same_procedure_family": procedure_family(first) == procedure_family(second),
+                "same_episode": bool(first.get("episodeId") and first.get("episodeId") == second.get("episodeId")),
+            }
+            score = (
+                25 * flags["same_cpt"] + 25 * flags["same_icd_family"]
+                + 15 * flags["same_provider"] + 10 * flags["same_payer"]
+                + 10 * flags["same_procedure_family"] + 15 * flags["same_episode"]
+            )
+            if score:
+                pairs.append({
+                    "claim_1": first["claimId"], "claim_2": second["claimId"],
+                    "date_1": first.get("dos"), "date_2": second.get("dos"),
+                    "days_apart": days, **flags, "relationship_score": score,
+                })
     result = sorted(pairs, key=lambda item: (item["days_apart"], -item["relationship_score"]))
+    _MEMBER_SHORT_CACHE[cache_key] = result
+    return result
+
+
+def short_timeframe_patterns(database, claim):
+    cache_key = (getattr(database, "workbook_hash", id(database)), _text(claim.get("claimId")), _text(claim.get("dos")))
+    if cache_key in _SHORT_CACHE:
+        return _SHORT_CACHE[cache_key]
+    cutoff = _text(claim.get("dos"))
+    result = [
+        pair for pair in _member_short_timeframe_patterns(database, claim.get("memberId"))
+        if _text(pair.get("date_2")) < cutoff
+    ]
     _SHORT_CACHE[cache_key] = result
     return result
 

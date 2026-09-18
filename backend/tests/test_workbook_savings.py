@@ -57,10 +57,10 @@ class IntegratedWorkbookTests(unittest.TestCase):
                 "Data_Notes_READ_ME",
             },
         )
-        self.assertEqual(self.database.report["total_claim_count"], 3289)
+        self.assertEqual(self.database.report["total_claim_count"], 8235)
         self.assertEqual(self.database.report["claim_column_count"], 148)
         self.assertEqual(len(self.database.selectable_claims), 2473)
-        self.assertEqual(len(self.database.historical_claims), 816)
+        self.assertEqual(len(self.database.historical_claims), 5762)
         self.assertIn("Authorization_Valid_From", self.database.selectable_claims[0]["workbookFields"])
         self.assertIn("Remit_835_Received_Date", self.database.selectable_claims[0]["workbookFields"])
 
@@ -76,6 +76,23 @@ class IntegratedWorkbookTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertTrue(all(not item["isHistoricalReference"] for item in response.get_json()["items"]))
+
+    def test_compact_selectable_claim_directory_excludes_sequence_evidence(self):
+        response = self.client.get(
+            "/api/claims?limit=2000&compact=true&selectableOnly=true"
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["total"], 2473)
+        self.assertEqual(len(payload["items"]), 2000)
+        self.assertTrue(all(not item["isHistoricalReference"] for item in payload["items"]))
+
+    def test_public_dataset_metadata_does_not_expose_local_paths(self):
+        for endpoint in ("/health", "/api/datasets"):
+            response = self.client.get(endpoint)
+            self.assertEqual(response.status_code, 200)
+            for dataset in response.get_json().get("datasets", []):
+                self.assertNotIn("path", dataset)
 
     def test_display_claim_id_alias_resolves_to_canonical_selectable_claim(self):
         claim = self.database.find_claim("CLM-000143", selectable_only=True)

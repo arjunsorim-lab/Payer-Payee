@@ -221,7 +221,11 @@ def workbook_claims_for_request(database, args):
     # The encounter directory is an audit surface: show both current/selectable
     # claims and historical-reference records. Prediction endpoints still use
     # selectable claims only, so historical evidence can never become a target.
-    rows = list(database.claims)
+    rows = list(
+        database.selectable_claims
+        if query_flag(args, "selectableOnly", default=False)
+        else database.claims
+    )
     search = str(args.get("search", "") or "").strip().lower()
     if search:
         rows = [
@@ -655,6 +659,30 @@ def _is_presentation_anchor_claim(claim):
     return bool(reference_id) and "PREDICTION" in reason_code
 
 
+def compact_prediction_scenario(item):
+    """Return only fields rendered by the prediction directory cards."""
+    snapshot = item.get("financial_prediction_snapshot", {})
+    summary = item.get("supported_money_summary", {})
+    return {
+        "claim_id": item.get("claim_id"),
+        "member_id": item.get("member_id"),
+        "episode_id": item.get("episode_id"),
+        "actual_claim_facts": item.get("actual_claim_facts", {}),
+        "confidence": item.get("confidence", {}),
+        "prediction": item.get("prediction", {}),
+        "financial_prediction_snapshot": {
+            "confidence": snapshot.get("confidence", {}),
+            "predicted_provider_payment": snapshot.get("predicted_provider_payment", {}),
+            "predicted_allowed": snapshot.get("predicted_allowed", {}),
+        },
+        "supported_money_summary": {
+            "recoverable_now": summary.get("recoverable_now", 0),
+            "best_action": summary.get("best_action", {}),
+        },
+        "predicted_avoidable_spend": item.get("predicted_avoidable_spend", {}),
+    }
+
+
 @app.get("/api/predictions/scenarios")
 def get_prediction_scenarios():
     """Build provider-facing episode scenarios from the current database rows."""
@@ -696,6 +724,7 @@ def get_prediction_scenarios():
                 )
             ):
                 latest_episode_predictions[episode_key] = item
+        compact = query_flag(request.args, "compact", default=False)
         return json_response({
             "summary": {
                 "totalClaims": len(all_rows),
@@ -722,7 +751,7 @@ def get_prediction_scenarios():
             "page": page,
             "limit": limit,
             "totalClaims": len(all_rows),
-            "items": results,
+            "items": [compact_prediction_scenario(item) for item in results] if compact else results,
             "source": database.source_banner(),
             "model": {
                 "name": database.report["prediction_version"],

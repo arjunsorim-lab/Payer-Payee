@@ -174,6 +174,20 @@ async function fetchJson(path, options = {}) {
   throw lastError
 }
 
+async function fetchJsonWithRetry(path, options = {}, attempts = 15, delayMs = 1500) {
+  let lastError
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await fetchJson(path, options)
+    } catch (error) {
+      lastError = error
+      if (attempt === attempts) break
+      await new Promise((resolve) => window.setTimeout(resolve, delayMs))
+    }
+  }
+  throw lastError
+}
+
 function writeClaimsCache(items, source) {
   try {
     const workbookHash = source?.workbook_hash
@@ -507,21 +521,23 @@ function App() {
 
   useEffect(() => {
     let active = true
-    const claimsPageSize = 500
+    const claimsPageSize = 2000
+    const claimsQuery = `limit=${claimsPageSize}&includeFinancial=false&compact=true&selectableOnly=true`
 
     // Load the complete workbook list without running the expensive per-claim
     // prediction engine. Detailed financial calculations remain available from
     // the member, claim, and prediction endpoints when the user opens a record.
-    fetchJson(`/api/claims?limit=${claimsPageSize}&includeFinancial=false&compact=true`)
+    fetchJsonWithRetry(`/api/claims?${claimsQuery}`)
       .then(async (payload) => {
         if (!active) return
         const firstPageItems = payload.items || []
         const remaining = Math.max(0, Number(payload.total || 0) - firstPageItems.length)
-        const additionalPages = []
-        for (let index = 0; index < Math.ceil(remaining / claimsPageSize); index += 1) {
-          if (!active) return
-          additionalPages.push(await fetchJson(`/api/claims?page=${index + 2}&limit=${claimsPageSize}&includeFinancial=false&compact=true`))
-        }
+        const additionalPages = await Promise.all(
+          Array.from(
+            { length: Math.ceil(remaining / claimsPageSize) },
+            (_, index) => fetchJson(`/api/claims?page=${index + 2}&${claimsQuery}`),
+          ),
+        )
         if (!active) return
         const items = [...firstPageItems, ...additionalPages.flatMap((page) => page.items || [])]
         const source = payload.source || null
@@ -925,22 +941,40 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
   useEffect(() => {
     let cancelled = false
     setScenarioLoading(true)
-    fetchJson('/api/predictions/scenarios')
-      .then((payload) => {
+    const initialScenarioCount = 3
+    const scenarioPageSize = 10
+    const loadScenarios = async () => {
+      try {
+        const payload = await fetchJson(`/api/predictions/scenarios?limit=${initialScenarioCount}&compact=true`)
         if (cancelled) return
         setScenarios(Array.isArray(payload.items) ? payload.items : [])
         setScenarioMeta({ ...payload.model, totalClaims: payload.totalClaims })
         setScenarioSummary(payload.summary || null)
         setScenarioError('')
-      })
-      .catch(() => {
+        setScenarioLoading(false)
+
+        // Render the first page as soon as it is ready, then fill the remaining
+        // directory pages without blocking the user from opening a prediction.
+        const visibleScenarioLimit = 50
+        const completeFirstPage = await fetchJson(`/api/predictions/scenarios?limit=${scenarioPageSize}&compact=true`)
+        if (cancelled) return
+        setScenarios(Array.isArray(completeFirstPage.items) ? completeFirstPage.items : [])
+        const totalPageCount = Math.ceil(
+          Math.min(Number(payload.totalClaims || 0), visibleScenarioLimit) / scenarioPageSize,
+        )
+        for (let page = 2; page <= totalPageCount; page += 1) {
+          const nextPayload = await fetchJson(`/api/predictions/scenarios?page=${page}&limit=${scenarioPageSize}&compact=true`)
+          if (cancelled) return
+          setScenarios((current) => [...current, ...(nextPayload.items || [])])
+        }
+      } catch {
         if (cancelled) return
         setScenarios([])
         setScenarioError('The Python prediction service could not be reached. Start the Flask backend and refresh this page.')
-      })
-      .finally(() => {
-        if (!cancelled) setScenarioLoading(false)
-      })
+        setScenarioLoading(false)
+      }
+    }
+    loadScenarios()
     return () => { cancelled = true }
   }, [claimsData.length])
 

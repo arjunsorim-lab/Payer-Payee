@@ -18,6 +18,7 @@ SIMILARITY_WEIGHTS = {
 }
 MIN_PEERS = 3
 _EARLIER_CACHE = {}
+_PEER_CACHE = {}
 _SHORT_CACHE = {}
 _MEMBER_SHORT_CACHE = {}
 
@@ -109,11 +110,20 @@ def peer_hierarchy(claim):
 
 
 def select_peers(database, claim, minimum=MIN_PEERS):
+    cache_key = (
+        getattr(database, "workbook_hash", id(database)),
+        _text(claim.get("claimId")),
+        _text(claim.get("dos")),
+        minimum,
+    )
+    cached = _PEER_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     prior = earlier_claims(database, claim)
     for level, label, dimensions, matcher in peer_hierarchy(claim):
         matches = [row for row in prior if matcher(row)]
         if len(matches) >= minimum or level == 9:
-            return matches, {
+            result = matches, {
                 "peer_level": level,
                 "peer_label": label,
                 "matching_dimensions": dimensions,
@@ -122,7 +132,12 @@ def select_peers(database, claim, minimum=MIN_PEERS):
                 "prediction_cutoff_date": claim.get("dos"),
                 "readable_basis": f"{label}, {len(matches)} earlier historical claim(s).",
             }
-    return [], {}
+            if len(_PEER_CACHE) >= 128:
+                _PEER_CACHE.pop(next(iter(_PEER_CACHE)), None)
+            _PEER_CACHE[cache_key] = result
+            return result
+    result = ([], {})
+    return result
 
 
 def _denied(row):

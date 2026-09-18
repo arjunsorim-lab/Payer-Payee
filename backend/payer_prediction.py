@@ -15,6 +15,7 @@ import numpy as np
 PAYER_COHORT_EPISODE_DAYS = int(os.getenv("PAYER_COHORT_EPISODE_DAYS", "90"))
 PAYER_SCENARIO1_UNIT_TOLERANCE = float(os.getenv("PAYER_SCENARIO1_UNIT_TOLERANCE", "1"))
 _COHORT_EPISODE_CACHE = {}
+_TARGET_EPISODE_INDEX_CACHE = {}
 _MEMBER_PAYER_SUMMARY_CACHE = {}
 _PORTFOLIO_PAYER_SUMMARY_CACHE = {}
 
@@ -181,6 +182,23 @@ def _database_episodes(database, source):
     episodes = _rolling_episodes(claims)
     _COHORT_EPISODE_CACHE[key] = episodes
     return episodes
+
+
+def _target_episode_index(database):
+    """Index selectable claim IDs once instead of scanning every episode per request."""
+    key = (database.workbook_hash, PAYER_COHORT_EPISODE_DAYS)
+    cached = _TARGET_EPISODE_INDEX_CACHE.get(key)
+    if cached is not None:
+        return cached
+    index = {
+        _claim_id(row): episode
+        for episode in _database_episodes(database, "target")
+        for row in episode["rows"]
+    }
+    if len(_TARGET_EPISODE_INDEX_CACHE) >= 2:
+        _TARGET_EPISODE_INDEX_CACHE.pop(next(iter(_TARGET_EPISODE_INDEX_CACHE)), None)
+    _TARGET_EPISODE_INDEX_CACHE[key] = index
+    return index
 
 
 def _cohort_episode(rows, member_id, family, window_days):
@@ -584,13 +602,32 @@ def _comparison_peer_episodes(target, matches):
 def _historically_available_peer_episodes(database, target):
     """Build peer episodes using only claims known at the selected-claim cutoff."""
     cutoff = target["selected_date"]
-    rows = [
-        row for row in database.claims
-        if _member_id(row) != target["member_id"]
-        and not _is_synthetic_sequence_companion(row)
-        and (_day(_field(row, "Service_Date_From", "dos")) or date.max) <= cutoff
-    ]
-    return _rolling_episodes(rows)
+    available = []
+    for episode in _database_episodes(database, "peer"):
+        if episode["member_id"] == target["member_id"]:
+            continue
+        if _day(episode["start_date"]) > cutoff:
+            continue
+        if _day(episode["end_date"]) <= cutoff:
+            available.append(episode)
+            continue
+
+        # A disease window that crosses the cutoff must expose only the rows
+        # that were known on that date. Rebuilding this one partial episode is
+        # equivalent to rebuilding the entire historical database, at a small
+        # fraction of the cost.
+        rows = [
+            row for row in episode["rows"]
+            if (_day(_field(row, "Service_Date_From", "dos")) or date.max) <= cutoff
+        ]
+        if rows:
+            available.append(_cohort_episode(
+                rows,
+                episode["member_id"],
+                episode["diagnosis_family"],
+                PAYER_COHORT_EPISODE_DAYS,
+            ))
+    return available
 
 
 def _episode_display_value(episode, workbook_field, canonical=None):
@@ -1301,13 +1338,7 @@ def build_payer_prediction_for_claim(database, claim_number):
     if not selected_member_id or not selected_family or not selected_date:
         raise ValueError("The selected claim is missing Member_ID, ICD10_Family, or Service_Date_From.")
 
-    cached_target = next(
-        (
-            episode for episode in _database_episodes(database, "target")
-            if any(_claim_id(row) == selected_claim_id for row in episode["rows"])
-        ),
-        None,
-    )
+    cached_target = _target_episode_index(database).get(selected_claim_id)
     if not cached_target:
         raise ValueError("A 90-day disease comparison episode could not be built for the selected claim.")
     target = dict(cached_target)

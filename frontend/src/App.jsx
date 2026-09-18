@@ -846,6 +846,12 @@ function ClaimsWorkspace({ selectedClaim, searchQuery, onSearchChange, onOpenCla
   const [currentPage, setCurrentPage] = useState(1)
   const pageSize = 10
   const normalizedQuery = searchQuery.trim().toLowerCase()
+  // The directory loads selectable claims only; keep the header count derived from
+  // the loaded rows so it can never drift from the workbook again.
+  const selectableClaimCount = useMemo(
+    () => claimsData.filter((claim) => !claim.isHistoricalReference).length,
+    [claimsData],
+  )
   const searchedClaims = useMemo(() => (
     normalizedQuery
       ? claimsData.filter((claim) => (
@@ -877,7 +883,7 @@ function ClaimsWorkspace({ selectedClaim, searchQuery, onSearchChange, onOpenCla
             <div className="claims-directory-header">
               <div>
                 <h1>Claims</h1>
-                <p>Current selectable 837 claim records; linked sequence evidence loads with each claim</p>
+                <p>Current selectable {selectableClaimCount.toLocaleString()} claim records; linked sequence evidence loads with each claim</p>
               </div>
               <div className="claims-directory-controls">
                 <label className="claims-directory-search">

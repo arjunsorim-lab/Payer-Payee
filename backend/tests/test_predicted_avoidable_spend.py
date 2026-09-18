@@ -30,7 +30,8 @@ class PredictedAvoidableSpendTests(unittest.TestCase):
             2,
         )
         self.assertEqual(predicted["value"], expected)
-        self.assertGreater(predicted["value"], 0)
+        self.assertEqual(predicted["value"], 0)
+        self.assertEqual(predicted["avoidable_given_repeat_probability"], 0)
         self.assertEqual(result["validated_avoidable_spend"]["value"], 0)
         self.assertFalse(result["validated_avoidable_spend"]["available"])
 
@@ -83,8 +84,14 @@ class PredictedAvoidableSpendTests(unittest.TestCase):
         predicted = result["predicted_avoidable_spend"]
         self.assertGreater(predicted["peer_count"], 0)
         self.assertTrue(predicted["peer_level"])
-        self.assertGreater(predicted["value"], 0)
-        self.assertEqual(predicted["zero_reasons"], [])
+        self.assertGreater(predicted["repeat_probability_90d"], 0)
+        self.assertGreater(predicted["expected_extra_repeat_allowed_cost"], 0)
+        self.assertEqual(predicted["avoidable_given_repeat_probability"], 0)
+        self.assertEqual(predicted["value"], 0)
+        self.assertIn(
+            "Blended avoidable-if-repeat probability mathematically evaluated to zero.",
+            predicted["zero_reasons"],
+        )
 
     def test_zero_local_recurrence_can_blend_to_nonzero(self):
         match = None

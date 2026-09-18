@@ -1,9 +1,11 @@
 import unittest
+from datetime import date
 from pathlib import Path
 
 from backend.app import app, configured_workbook_database
 from backend.payer_prediction import (
     _claim_scenario_match,
+    _historically_available_peer_episodes,
     _rolling_episodes,
     build_member_payer_cohort_summary,
     build_payer_cohort_portfolio_summary,
@@ -64,6 +66,25 @@ def scenario_database(*, peer_payer="P1", peer_provider="NPI1", peer_pos="11", p
 
 
 class PayerPredictionModalApiTests(unittest.TestCase):
+    def test_cached_peer_episodes_match_rebuild_at_cutoff(self):
+        rows = [
+            cohort_claim("EARLY", "PEER", "20260101", 100),
+            cohort_claim("CUTOFF", "PEER", "20260201", 200),
+            cohort_claim("FUTURE", "PEER", "20260301", 300),
+            cohort_claim("LATER", "PEER", "20260701", 400),
+        ]
+        database = CohortDatabase([], rows)
+        target = {"member_id": "TARGET", "selected_date": date(2026, 2, 1)}
+        self.assertEqual(
+            _historically_available_peer_episodes(database, target),
+            _rolling_episodes(rows[:2]),
+        )
+        target["selected_date"] = date(2026, 7, 1)
+        self.assertEqual(
+            _historically_available_peer_episodes(database, target),
+            _rolling_episodes(rows),
+        )
+
     @classmethod
     def setUpClass(cls):
         cls.client = app.test_client()

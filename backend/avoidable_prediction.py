@@ -390,6 +390,8 @@ def build_predicted_avoidable_spend(database, claim, predicted_allowed, predicte
         "avoidable",
         AVOIDABLE_PRIOR_STRENGTH,
     )
+
+    # Preserve the evidence-derived probability, including a supported zero.
     cost_peers, cost_level, _ = _cost_peers(observations, selected)
     allowed_costs = [row["extra_allowed"] for row in cost_peers]
     paid_costs = [row["extra_paid"] for row in cost_peers]

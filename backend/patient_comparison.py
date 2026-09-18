@@ -468,13 +468,43 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
         return {"available": False, "member_id": member_id, "diagnosis_family": family, "reason": "No diagnosis family was supplied."}
 
     source_claims = getattr(database, "claims", database.selectable_claims)
+    normalized_anchor = _text(anchor_claim_id).replace("-", "")
+    anchor_claim = next(
+        (
+            claim for claim in source_claims
+            if _claim_id(claim).replace("-", "") == normalized_anchor
+        ),
+        None,
+    ) if normalized_anchor else None
+    linked_sequence_claims = [
+        claim for claim in source_claims
+        if anchor_claim
+        and _member_id(claim) == _member_id(anchor_claim)
+        and _family(claim) == family
+        and _text(_field(claim, "Reference_Claim_ID")).replace("-", "") == normalized_anchor
+    ]
+    worsening_claim = next(
+        (
+            claim for claim in linked_sequence_claims
+            if _text(_field(claim, "Reason_Code")).upper() == "SYNTHETIC_SEQUENCE_WORSENING"
+        ),
+        None,
+    )
+    preventive_claim = next(
+        (
+            claim for claim in linked_sequence_claims
+            if _text(_field(claim, "Reason_Code")).upper() == "SYNTHETIC_SEQUENCE_PREVENTIVE"
+        ),
+        None,
+    )
+    explicit_sequence = bool(anchor_claim and worsening_claim and preventive_claim)
     claims = [
         claim for claim in source_claims
         if not _is_historical_reference(claim) or _is_template_coverage_demo(claim)
     ]
     # The workbook treats each encounter date as one episode. Do not chain
     # several visits together through the broader 90-day comparison window.
-    episodes = sorted(
+    episodes = [] if explicit_sequence else sorted(
         (
             episode for episode in _build_episodes(claims, window_days=0)
             if episode["member_id"] == member_id and episode["diagnosis_family"] == family
@@ -482,14 +512,28 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
         key=lambda episode: (episode["start_date"], episode["end_date"]),
     )
 
-    normalized_anchor = _text(anchor_claim_id).replace("-", "")
     anchor_episode_indexes = {
         index for index, episode in enumerate(episodes)
         if any(_text(line.get("claim_id")).replace("-", "") == normalized_anchor for line in episode["claims"])
     } if normalized_anchor else set()
 
     selected_pair = None
-    for later_index in range(1, len(episodes)):
+    explicit_intervening_episodes = None
+    explicit_sequence_episodes = None
+    if explicit_sequence:
+        earlier = _make_episode([anchor_claim], member_id, family)
+        worsening = _make_episode([worsening_claim], member_id, family)
+        later = _make_episode([preventive_claim], member_id, family)
+        add_on_lines = [
+            line for line in later["claims"]
+            if _is_template_intervention_line(line, earlier["claims"])
+        ]
+        if add_on_lines:
+            selected_pair = (earlier, later, add_on_lines, 2)
+            explicit_intervening_episodes = [worsening]
+            explicit_sequence_episodes = [earlier, worsening, later]
+
+    for later_index in range(1, len(episodes)) if not selected_pair else ():
         if anchor_episode_indexes and later_index not in anchor_episode_indexes:
             continue
         later = episodes[later_index]
@@ -528,8 +572,11 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
         }
 
     earlier, later, add_on_lines, later_index = selected_pair
-    earlier_index = episodes.index(earlier)
-    intervening_episodes = episodes[earlier_index + 1:later_index]
+    if explicit_intervening_episodes is not None:
+        intervening_episodes = explicit_intervening_episodes
+    else:
+        earlier_index = episodes.index(earlier)
+        intervening_episodes = episodes[earlier_index + 1:later_index]
     intervening_billed = _money(sum(episode["total_billed"] for episode in intervening_episodes))
     journey_mode = bool(intervening_episodes)
     earlier_billed = _money(earlier["total_billed"])
@@ -561,7 +608,13 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
         and _text(anchor_line.get("cpt")) == _text(earlier_line.get("cpt"))
     )
     candidate_visits = []
-    ranked_candidates = episodes[:later_index] if journey_mode else list(reversed(episodes[:later_index]))
+    ranked_candidates = (
+        explicit_sequence_episodes[:-1]
+        if explicit_sequence_episodes is not None else
+        episodes[:later_index]
+        if journey_mode else
+        list(reversed(episodes[:later_index]))
+    )
     for rank, candidate in enumerate(ranked_candidates, start=1):
         candidate_line = candidate["claims"][-1] if candidate["claims"] else {}
         selected = candidate is earlier
@@ -615,7 +668,7 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
         "member_id": member_id,
         "diagnosis_family": family,
         "anchor_claim_id": anchor_claim_id or None,
-        "synthetic_demo": bool(earlier.get("synthetic_demo") or later.get("synthetic_demo")),
+        "synthetic_demo": bool(explicit_sequence or earlier.get("synthetic_demo") or later.get("synthetic_demo")),
         "template_logic": {
             "earlier_episode_without_intervention": True,
             "later_related_episode_with_intervention": True,
@@ -628,7 +681,11 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
                 if journey_mode else
                 "Anchor the selected later claim, keep the same member and ICD-10 diagnosis family, then choose the closest qualifying earlier visit. Billed amount does not choose the visit."
             ),
-            "anchor_reason": f"{anchor_line.get('claim_id')} is used because it is the claim opened on this prediction page.",
+            "anchor_reason": (
+                f"{anchor_claim_id} is the selected first visit. Its linked preventive follow-up is {anchor_line.get('claim_id')}."
+                if explicit_sequence else
+                f"{anchor_line.get('claim_id')} is used because it is the claim opened on this prediction page."
+            ),
             "diagnosis_reason": f"Both visits are for ICD-10 family {family}." + (f" Both record the exact diagnosis {anchor_line.get('icd10')}." if exact_diagnosis_match else " The exact diagnosis codes differ within that family."),
             "earlier_visit_reason": (
                 f"{earlier_line.get('claim_id')} is the first symptomatic visit. The later worsening visit is included in the actual journey and treated as the visit that may have been avoided by applying the intervention at this first visit."

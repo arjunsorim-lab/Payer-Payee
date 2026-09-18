@@ -275,9 +275,9 @@ class ClaimAnchoredPayerPopupTests(unittest.TestCase):
         self.assertEqual(result["scenario_selection"]["selected"]["number"], 3)
         self.assertEqual(calculation["excess_claim_count"], 0.0)
         self.assertEqual(calculation["utilisation_reduction_opportunity"], 0.0)
-        self.assertEqual(calculation["lower_spend_benchmark"], 136.35)
-        self.assertEqual(calculation["payer_spend_reduction_opportunity"], 159.42)
-        self.assertEqual(calculation["predicted_payer_avoidable_spend"], 159.42)
+        self.assertEqual(calculation["lower_spend_benchmark"], 200.79)
+        self.assertEqual(calculation["payer_spend_reduction_opportunity"], 94.98)
+        self.assertEqual(calculation["predicted_payer_avoidable_spend"], 94.98)
         self.assertEqual(calculation["confidence"]["level"], "Low")
 
     def test_lower_spend_benchmark_claims_are_traceable_to_workbook_rows(self):
@@ -339,13 +339,13 @@ class ClaimAnchoredPayerPopupTests(unittest.TestCase):
                 self.assertEqual(result["peer_members_used"], [])
                 self.assertNotIn("predicted_payer_avoidable_spend", result["calculation_summary"])
 
-    def test_current_claim_without_a_peer_returns_a_precise_no_cohort_result(self):
+    def test_current_claim_uses_available_same_family_same_payer_cohort(self):
         result = build_payer_prediction_for_claim(configured_workbook_database(), "CLM00001096")
-        self.assertFalse(result["available"])
+        self.assertTrue(result["available"])
         self.assertEqual(result["target"]["claim_id"], "CLM00001096")
-        self.assertEqual(result["scenario_selection"]["selected"]["number"], 0)
-        self.assertEqual(result["peer_members_used"], [])
-        self.assertNotIn("predicted_payer_avoidable_spend", result["calculation_summary"])
+        self.assertEqual(result["scenario_selection"]["selected"]["number"], 2)
+        self.assertTrue(result["peer_members_used"])
+        self.assertEqual(result["calculation_summary"]["predicted_payer_avoidable_spend"], 350.45)
 
     def test_22_production_engine_has_no_hardcoded_result_identity(self):
         source = (ROOT / "backend/payer_prediction.py").read_text()

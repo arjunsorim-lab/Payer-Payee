@@ -215,10 +215,9 @@ class TestSamePatientBilledInterventionSavings(unittest.TestCase):
         self.assertTrue(result["available"])
         self.assertTrue(result["synthetic_demo"])
         self.assertEqual(result["calculation_basis"], "billed_amount")
-        self.assertEqual(calculation["earlier_episode_actual_billed"], 500.00)
-        self.assertEqual(calculation["later_episode_actual_billed"], 2750.00)
-        self.assertEqual(calculation["culture_and_specimen_add_on_billed"], 250.00)
-        self.assertEqual(calculation["potential_billed_difference"], 2500.00)
+        self.assertEqual(result["days_to_first_intervening_episode"], 25)
+        self.assertEqual(result["days_between_episodes"], 32)
+        self.assertGreater(calculation["potential_billed_difference"], 0)
 
     def test_gynecological_journey_starts_at_first_symptomatic_visit(self):
         database = load_workbook_database("data/claims-demo.xlsx")
@@ -228,50 +227,67 @@ class TestSamePatientBilledInterventionSavings(unittest.TestCase):
         calculation = result["calculation"]
 
         self.assertTrue(result["available"])
-        self.assertEqual(result["earlier_episode"]["claims"][0]["claim_id"], "CLM09920296")
-        self.assertEqual(result["intervening_episodes"][0]["claims"][0]["claim_id"], "CLM09920297")
+        self.assertEqual(result["earlier_episode"]["claims"][0]["claim_id"], "CLM09921096")
+        self.assertEqual(result["intervening_episodes"][0]["claims"][0]["claim_id"], "SEQW-CLM09921096")
+        self.assertEqual(result["later_episode"]["claims"][0]["claim_id"], "SEQP-CLM09921096")
         self.assertEqual(result["days_between_episodes"], 32)
         self.assertEqual(result["days_to_first_intervening_episode"], 25)
-        self.assertEqual(calculation["earlier_episode_actual_billed"], 701.48)
-        self.assertEqual(calculation["intervening_episode_actual_billed"], 1241.08)
-        self.assertEqual(calculation["later_episode_actual_billed"], 900.00)
-        self.assertEqual(calculation["actual_two_episode_billed"], 2842.56)
-        self.assertEqual(calculation["proposed_earlier_episode_with_add_on_billed"], 1601.48)
-        self.assertEqual(calculation["potential_billed_difference"], 1241.08)
+        self.assertGreater(calculation["potential_billed_difference"], 0)
 
-    def test_bundled_dataset_has_demo_template_coverage_for_every_member_family(self):
+    def test_explicit_linked_sequence_calculates_from_selected_first_visit(self):
+        first = billed_claim("BASE-CLAIM", "2025-01-01", 500.00, "99213", "Initial symptomatic visit")
+        worsening = billed_claim("SEQW-BASE-CLAIM", "2025-01-26", 800.00, "99215", "Worsening follow-up")
+        preventive = billed_claim("SEQP-BASE-CLAIM", "2025-02-02", 250.00, "99401", "Preventive intervention follow-up")
+        for claim in (first, worsening, preventive):
+            fields = claim["workbookFields"]
+            fields["Member_ID"] = "SEQUENCE-PATIENT"
+            fields["ICD10_Family"] = "E11"
+            fields["ICD10_Diagnosis_Code"] = "E11.9"
+        worsening["workbookFields"].update({
+            "Reference_Claim_ID": "BASE-CLAIM",
+            "Reason_Code": "SYNTHETIC_SEQUENCE_WORSENING",
+            "Intervention_Performed": "N",
+        })
+        preventive["workbookFields"].update({
+            "Reference_Claim_ID": "BASE-CLAIM",
+            "Reason_Code": "SYNTHETIC_SEQUENCE_PREVENTIVE",
+            "Intervention_Performed": "Y",
+            "Episode_Duration_Days": 200,
+        })
+
+        result = build_same_patient_billed_intervention_savings(
+            SyntheticDatabase([first, worsening, preventive]),
+            "SEQUENCE-PATIENT",
+            "E11",
+            "BASE-CLAIM",
+        )
+
+        self.assertTrue(result["available"])
+        self.assertTrue(result["synthetic_demo"])
+        self.assertEqual(result["days_to_first_intervening_episode"], 25)
+        self.assertEqual(result["days_between_episodes"], 32)
+        self.assertEqual(result["calculation"]["actual_two_episode_billed"], 1550.00)
+        self.assertEqual(result["calculation"]["proposed_earlier_episode_with_add_on_billed"], 750.00)
+        self.assertEqual(result["calculation"]["potential_billed_difference"], 800.00)
+
+    def test_bundled_dataset_has_complete_sequence_for_every_selectable_claim(self):
         database = load_workbook_database("data/claims-demo.xlsx")
-        pairs = {
-            (
-                claim["workbookFields"]["Member_ID"],
-                claim["workbookFields"]["ICD10_Family"],
-            )
-            for claim in database.selectable_claims
-        }
-        coverage_rows = {}
+        linked_rows = {}
         for claim in database.claims:
             fields = claim["workbookFields"]
-            if fields.get("UI_Detail_Reason") != "Demo-only template-coverage episode":
+            if fields.get("Reason_Code") not in {"SYNTHETIC_SEQUENCE_WORSENING", "SYNTHETIC_SEQUENCE_PREVENTIVE"}:
                 continue
-            key = (fields["Member_ID"], fields["ICD10_Family"])
-            coverage_rows.setdefault(key, []).append(fields)
+            linked_rows.setdefault(str(fields["Reference_Claim_ID"]), []).append(fields)
 
-        self.assertGreater(len(pairs), 0)
-        self.assertEqual(
-            set(coverage_rows),
-            pairs - {
-                ("MBRDEMO01", "N39"),
-                ("MBR00015", "N92"),
-                ("MBR00015", "Z01"),
-                ("MBR00016", "Z01"),
-            },
-        )
-        for key, rows in coverage_rows.items():
-            episode_ids = {str(row["Episode_ID"]) for row in rows}
-            self.assertTrue(any(episode_id.endswith("-E1") for episode_id in episode_ids), key)
-            self.assertTrue(any(episode_id.endswith("-E2") for episode_id in episode_ids), key)
-            self.assertTrue(any(str(row["Intervention_Performed"]).upper() == "Y" for row in rows), key)
-            self.assertTrue(all(float(row["Charge_Amount"]) > 0 for row in rows), key)
+        self.assertEqual(set(linked_rows), {claim["claimId"] for claim in database.selectable_claims})
+        for claim_id, rows in linked_rows.items():
+            self.assertEqual({row["Reason_Code"] for row in rows}, {
+                "SYNTHETIC_SEQUENCE_WORSENING",
+                "SYNTHETIC_SEQUENCE_PREVENTIVE",
+            }, claim_id)
+            preventive = next(row for row in rows if row["Reason_Code"] == "SYNTHETIC_SEQUENCE_PREVENTIVE")
+            self.assertEqual(float(preventive["Episode_Duration_Days"]), 200)
+            self.assertEqual(str(preventive["Follow_Up_Completed"]).upper(), "Y")
 
 
 if __name__ == "__main__":

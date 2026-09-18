@@ -100,6 +100,38 @@ class TestOutcomeEvidence(unittest.TestCase):
         self.assertEqual(evidence["preventive_claim_id"], "PREVENTIVE-REFERENCE")
         self.assertEqual(evidence["journey_claim_id"], "PREVENTIVE-REFERENCE")
 
+    def test_selected_first_visit_uses_its_linked_preventive_sequence(self):
+        initial = claim(
+            "INITIAL-ONE",
+            "2025-01-01",
+            diagnosis="E11.9",
+            Intervention_Performed="N",
+        )
+        preventive = claim(
+            "SEQP-INITIAL-ONE",
+            "2025-02-02",
+            diagnosis="E11.9",
+            CPT_Code="99401",
+            CPT_Description="Preventive counseling and care-management follow-up",
+            Reference_Claim_ID="INITIAL-ONE",
+            Reason_Code="SYNTHETIC_SEQUENCE_PREVENTIVE",
+            Related_Claim_Flag="Y",
+            Intervention_Performed="Y",
+            Outcome_Claim_Flag="Y",
+            Reference_Claim_Flag="Y",
+            Condition_Resolved="Y",
+            Treatment_Outcome="Improved; no linked readmission during 200-day follow-up",
+            Follow_Up_Completed="Y",
+            Episode_Duration_Days=200,
+        )
+
+        evidence = build_outcome_evidence(Database([initial, preventive]), initial)
+
+        self.assertTrue(evidence["reference_outcome_supported"])
+        self.assertEqual(evidence["reference_claim_id"], "SEQP-INITIAL-ONE")
+        self.assertEqual(evidence["historical_no_readmission_days"], 200)
+        self.assertTrue(evidence["no_later_related_claims"])
+
     def test_does_not_borrow_another_members_outcome(self):
         other_member_outcome = claim(
             "OTHER-OUTCOME",

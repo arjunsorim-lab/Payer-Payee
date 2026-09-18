@@ -67,7 +67,19 @@ def build_outcome_evidence(database, claim):
     explicit_reference_id = _text(
         claim_fields.get("Reference_Claim_ID") or claim_fields.get("Reference claim")
     )
-    historical_reference = _claim_by_id(database, explicit_reference_id) if explicit_reference_id else None
+    linked_sequence_reference = next(
+        (
+            candidate for candidate in database.claims
+            if candidate.get("memberId") == claim.get("memberId")
+            and _diagnosis_family(candidate) == family
+            and _text(candidate.get("workbookFields", {}).get("Reference_Claim_ID")) == claim.get("claimId")
+            and _text(candidate.get("workbookFields", {}).get("Reason_Code")).upper() == "SYNTHETIC_SEQUENCE_PREVENTIVE"
+        ),
+        None,
+    )
+    historical_reference = linked_sequence_reference or (
+        _claim_by_id(database, explicit_reference_id) if explicit_reference_id else None
+    )
     historical_fields = historical_reference.get("workbookFields", {}) if historical_reference else {}
     historical_match = bool(
         historical_reference
@@ -77,6 +89,8 @@ def build_outcome_evidence(database, claim):
         and _text(historical_fields.get("Reference_Claim_Flag")).upper() == "Y"
         and _text(historical_fields.get("Intervention_Performed")).upper() == "Y"
     )
+    if linked_sequence_reference and historical_match:
+        source = linked_sequence_reference
 
     readmission_candidates = [
         candidate
@@ -86,8 +100,17 @@ def build_outcome_evidence(database, claim):
         and _diagnosis_family(candidate) == family
         and _text(candidate.get("dos")) > claim_date
         and (
-            candidate.get("episodeId") == episode_id
-            or _text(candidate.get("workbookFields", {}).get("Reference_Claim_ID")) == explicit_reference_id
+            (
+                linked_sequence_reference
+                and _text(candidate.get("workbookFields", {}).get("Reference_Claim_ID")) == claim.get("claimId")
+            )
+            or (
+                not linked_sequence_reference
+                and (
+                    candidate.get("episodeId") == episode_id
+                    or _text(candidate.get("workbookFields", {}).get("Reference_Claim_ID")) == explicit_reference_id
+                )
+            )
         )
         and _text(candidate.get("workbookFields", {}).get("Related_Claim_Flag")).upper() == "Y"
         and (
@@ -134,7 +157,7 @@ def build_outcome_evidence(database, claim):
         if prediction_date and readmission_date and not claim_is_later_hospitalization
         else None
     )
-    if not _positive_outcome(claim) and episode_id and _preventive_visit(claim):
+    if not linked_sequence_reference and not _positive_outcome(claim) and episode_id and _preventive_visit(claim):
         candidates = [
             candidate
             for candidate in database.claims
@@ -159,6 +182,10 @@ def build_outcome_evidence(database, claim):
         if candidate.get("memberId") == claim.get("memberId")
         and _diagnosis_family(candidate) == family
         and _text(candidate.get("dos")) > source_date
+        and (
+            not linked_sequence_reference
+            or _text(candidate.get("workbookFields", {}).get("Reference_Claim_ID")) == claim.get("claimId")
+        )
         and _text(candidate.get("workbookFields", {}).get("Related_Claim_Flag")).upper() == "Y"
         and not _positive_outcome(candidate)
     ] if positive else []
@@ -167,7 +194,7 @@ def build_outcome_evidence(database, claim):
     # A claim can be both the preventive intervention and the recorded outcome
     # evidence. Keep that claim as the source instead of searching backward and
     # incorrectly presenting an older preventive claim as the intervention.
-    preventive_source = claim if _preventive_visit(claim) else None
+    preventive_source = linked_sequence_reference or (claim if _preventive_visit(claim) else None)
     if positive and preventive_source is None and episode_id:
         prior_preventive_visits = [
             candidate
@@ -258,7 +285,7 @@ def build_outcome_evidence(database, claim):
         "follow_up_completed": follow_up or "Not recorded",
         "outcome_claim_flag": _text(fields.get("Outcome_Claim_Flag")) or ("Y" if positive else "N"),
         "reference_claim_flag": _text(fields.get("Reference_Claim_Flag")) or "N",
-        "reference_claim_id": explicit_reference_id or None,
+        "reference_claim_id": explicit_reference_id or (historical_reference.get("claimId") if linked_sequence_reference else None),
         "reference_outcome_supported": historical_match,
         "reference_diagnosis": historical_reference.get("diagnosisDescription") if historical_reference else None,
         "reference_intervention": historical_reference.get("cptDescription") if historical_reference else None,
@@ -304,7 +331,10 @@ def build_outcome_evidence(database, claim):
             ),
         } if predicted_readmission else None,
         "related_claim_flag": _text(fields.get("Related_Claim_Flag")) or "Not recorded",
-        "synthetic": _text(fields.get("Reason_Code")).upper() in {"SYNTHETIC_PRESENTATION_CASE", "SYNTHETIC_OUTCOME_REFERENCE"},
+        "synthetic": (
+            _text(fields.get("Reason_Code")).upper() in {"SYNTHETIC_PRESENTATION_CASE", "SYNTHETIC_OUTCOME_REFERENCE"}
+            or linked_sequence_reference is not None
+        ),
         "source_claim_id": source.get("claimId"),
         "source_service_date": source.get("dos"),
         "source_procedure": source.get("cptDescription"),

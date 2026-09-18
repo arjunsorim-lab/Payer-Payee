@@ -76,6 +76,14 @@ def _is_historical_reference(claim):
     }
 
 
+def _is_synthetic_sequence_companion(claim):
+    """Keep generated clinical-sequence rows out of unrelated payer cohorts."""
+    return _text(_field(claim, "Reason_Code")).upper() in {
+        "SYNTHETIC_SEQUENCE_WORSENING",
+        "SYNTHETIC_SEQUENCE_PREVENTIVE",
+    }
+
+
 def _episode_id(claim):
     return _text(_field(claim, "Episode_ID", "episodeId")) or _claim_id(claim)
 
@@ -168,7 +176,7 @@ def _database_episodes(database, source):
     claims = (
         [claim for claim in database.selectable_claims if not _is_historical_reference(claim)]
         if source == "target"
-        else list(database.claims)
+        else [claim for claim in database.claims if not _is_synthetic_sequence_companion(claim)]
     )
     episodes = _rolling_episodes(claims)
     _COHORT_EPISODE_CACHE[key] = episodes
@@ -579,6 +587,7 @@ def _historically_available_peer_episodes(database, target):
     rows = [
         row for row in database.claims
         if _member_id(row) != target["member_id"]
+        and not _is_synthetic_sequence_companion(row)
         and (_day(_field(row, "Service_Date_From", "dos")) or date.max) <= cutoff
     ]
     return _rolling_episodes(rows)

@@ -140,6 +140,21 @@ def configured_workbook_database():
         raise ServiceUnavailable(description=str(error)) from error
 
 
+def prediction_anchor_claim_id(database, claim_number):
+    """Resolve a generated sequence companion to its selectable first claim."""
+    claim = database.find_claim(claim_number, selectable_only=False)
+    if not claim:
+        return claim_number
+    fields = claim.get("workbookFields", {})
+    reason = str(fields.get("Reason_Code") or "").strip().upper()
+    reference = str(fields.get("Reference_Claim_ID") or "").strip()
+    if reason in {"SYNTHETIC_SEQUENCE_WORSENING", "SYNTHETIC_SEQUENCE_PREVENTIVE"} and reference:
+        anchor = database.find_claim(reference, selectable_only=True)
+        if anchor:
+            return anchor.get("claimId") or reference
+    return claim_number
+
+
 # Render's first request has a strict upstream response window. Load the
 # configured workbook during process startup so the port is exposed only after
 # the in-memory repository is ready. Tests and special tooling can opt out.
@@ -148,6 +163,7 @@ if os.getenv("PRELOAD_WORKBOOK", "true").strip().lower() not in {"0", "false", "
 
 
 def workbook_prediction_with_rag(database, claim_number):
+    claim_number = prediction_anchor_claim_id(database, claim_number)
     result = build_financial_result(database, claim_number)
     try:
         payer_savings_prediction = build_payer_prediction_for_claim(
@@ -781,7 +797,8 @@ def get_value_based_case(claim_number):
     if not database:
         return json_response({"message": "Configured workbook is required."}, 409)
     try:
-        return json_response(build_value_based_case_for_claim(database, claim_number))
+        anchor_claim_number = prediction_anchor_claim_id(database, claim_number)
+        return json_response(build_value_based_case_for_claim(database, anchor_claim_number))
     except KeyError as error:
         return json_response({"message": str(error)}, 404)
     except ValueError as error:

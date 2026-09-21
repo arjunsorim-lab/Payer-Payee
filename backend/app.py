@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from bson import ObjectId
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, g
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException, ServiceUnavailable
 
@@ -14,6 +14,8 @@ try:
     from .financial_engine import build_financial_result, member_supported_summary
     from .outcome_evidence import build_outcome_evidence
     from .intervention_plans import build_member_intervention_plans
+    from .review_security import configure_security
+    from .review_store import read_reviews, save_review
     from .import_claims import read_claims
     from .llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
     from .ollama_service import OllamaClient, OllamaError
@@ -46,6 +48,8 @@ except ImportError:
     from financial_engine import build_financial_result, member_supported_summary
     from outcome_evidence import build_outcome_evidence
     from intervention_plans import build_member_intervention_plans
+    from review_security import configure_security
+    from review_store import read_reviews, save_review
     from import_claims import read_claims
     from llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
     from ollama_service import OllamaClient, OllamaError
@@ -76,8 +80,10 @@ BUNDLED_WORKBOOK_PATH = (
 )
 
 app = Flask(__name__, static_folder=None)
+configure_security(app)
 CORS(
     app,
+    supports_credentials=True,
     origins=os.getenv(
         "CORS_ORIGIN",
         "http://127.0.0.1:5173,http://localhost:5173",
@@ -574,9 +580,29 @@ def get_member_intervention_plans(member_id):
     claims = database.member_claims(member_id)
     if not claims:
         return json_response({"message": "Member not found in selectable workbook claims"}, 404)
-    return json_response({"member_id": member_id,
-                          "claims_reviewed": len(claims),
-                          "plans": build_member_intervention_plans(claims)})
+    plans = build_member_intervention_plans(claims, bool(getattr(database, "report", {}).get("synthetic")), getattr(database, "workbook_hash", ""))
+    reviews = read_reviews(app.config["REVIEW_DB"], [plan["review_id"] for plan in plans])
+    for plan in plans:
+        plan["review"] = reviews.get(plan["review_id"], {"status": "pending", "version": 0})
+    return json_response({"member_id": member_id, "claims_reviewed": len(claims), "plans": plans})
+
+
+@app.post("/api/reviews/<member_id>/<review_id>")
+def update_intervention_review(member_id, review_id):
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Claims source unavailable."}, 503)
+    plans = build_member_intervention_plans(database.member_claims(member_id), bool(getattr(database, "report", {}).get("synthetic")), getattr(database, "workbook_hash", ""))
+    plan = next((item for item in plans if item["review_id"] == review_id), None)
+    if not plan:
+        return json_response({"message": "Review not found for this member or source version. Reload the member."}, 404)
+    try:
+        result = save_review(app.config["REVIEW_DB"], review_id, request.get_json(silent=True), g.actor, plan)
+    except ValueError as error:
+        return json_response({"message": str(error)}, 400)
+    except RuntimeError as error:
+        return json_response({"message": str(error)}, 409)
+    return json_response({"review": result})
 
 
 @app.get("/api/members/<member_id>")

@@ -3,6 +3,51 @@
 Demo follow-up intervals are illustrative configuration, not clinical protocols.
 """
 
+from hashlib import sha256
+import json
+
+PROFILE_VERSION = "review-profiles-2"
+
+
+def source_type(claim, dataset_synthetic=False):
+    fields = claim.get("workbookFields", claim)
+    synthetic = dataset_synthetic or str(fields.get("Reason_Code", "")).upper().startswith("SYNTHETIC") or str(fields.get("Synthetic_Flag", "")).upper() in {"Y", "YES", "TRUE"}
+    return "synthetic_demonstration" if synthetic else "recorded_claim"
+
+
+def evidence_context(claims, anchor, dataset_synthetic=False):
+    """Report recorded context, never infer absent tests or successful treatment."""
+    cutoff = str(anchor.get("dos") or "")
+    prior = [row for row in claims if str(row.get("dos") or "") <= cutoff]
+    fields = anchor.get("workbookFields", anchor)
+    context = {}
+    names = {
+        "medications": ("Medication_Name", "Current_Medications", "Medication"),
+        "allergies": ("Allergies", "Drug_Allergies"),
+        "lab_results": ("Lab_Results", "Test_Result", "Laboratory_Result"),
+        "symptoms": ("Symptoms", "Presenting_Symptoms"),
+        "treatment_outcome": ("Treatment_Outcome",),
+    }
+    for key, aliases in names.items():
+        value = next((str(fields[name]).strip() for name in aliases if fields.get(name) not in (None, "")), None)
+        if value and value.lower() not in {"unknown", "not recorded", "n/a"}:
+            context[key] = value
+    services = [{"claim_id": row.get("claimId"), "service_date": row.get("dos"),
+                 "cpt": row.get("cptCode"), "description": row.get("cptDescription"),
+                 "source_data_type": source_type(row, dataset_synthetic)}
+                for row in prior if row.get("cptCode")]
+    return {
+        "recorded_context": context,
+        "missing_information": [key.replace("_", " ") for key in ("medications", "allergies", "lab_results", "symptoms") if key not in context],
+        "recent_services": services[:10], "history_claim_count": len(prior),
+        "history_start": min((str(row.get("dos") or "") for row in prior), default=None),
+        "history_end": cutoff or None,
+        "continuous_follow_up": "not_established",
+        "comparison_strength": "not_assessed_for_this_proposal",
+        "causal_effectiveness": "not_established",
+        "financial_evidence": "No verified savings. Recorded charges, payments and reviewer outcomes do not establish an intervention effect.",
+    }
+
 PROFILES = (
     ("urinary", ("N300", "N309", "N390"), "Urinary infection review",
      "Consider urine culture and susceptibility testing if symptoms persist or worsen after antibiotics, and review treatment against the results.",
@@ -84,7 +129,7 @@ def build_intervention_plan(claim):
     return base
 
 
-def build_member_intervention_plans(claims):
+def build_member_intervention_plans(claims, dataset_synthetic=False, workbook_hash=""):
     """Group a member's selectable claims into review plans without scoring savings."""
     grouped = {}
     for claim in sorted(claims, key=lambda row: (str(row.get("dos") or ""), str(row.get("claimId") or "")), reverse=True):
@@ -92,7 +137,19 @@ def build_member_intervention_plans(claims):
         key = plan.get("scenario") or plan["matched_diagnosis"] or "unknown"
         if key not in grouped:
             grouped[key] = {**plan, "anchor_claim_id": claim.get("claimId"),
-                            "source_claim_ids": [], "diagnosis_codes": []}
+                            "anchor_service_date": claim.get("dos"),
+                            "source_data_type": source_type(claim, dataset_synthetic),
+                            "profile_version": PROFILE_VERSION,
+                            "source_claim_ids": [], "diagnosis_codes": [],
+                            "evidence_quality": evidence_context(claims, claim, dataset_synthetic)}
+            identity = [workbook_hash, claim.get("memberId"), key, claim.get("claimId"), PROFILE_VERSION, plan.get("action"), plan.get("follow_up_days")]
+            grouped[key]["review_id"] = sha256(json.dumps(identity).encode()).hexdigest()
+            quality = grouped[key]["evidence_quality"]
+            culture = [row for row in quality["recent_services"] if row["cpt"] in {"87086", "87088"}]
+            if key == "urinary" and culture:
+                grouped[key]["action"] = "A urine culture service appears in the available history. Review its date, result and treatment response before considering another test. A billed service does not confirm the result."
+            if quality["recorded_context"].get("treatment_outcome", "").lower() in {"resolved", "recovered"}:
+                grouped[key]["action"] = "The source claim reports a resolved outcome. Confirm whether symptoms have returned before considering additional intervention."
         item = grouped[key]
         item["source_claim_ids"].append(claim.get("claimId"))
         if plan["matched_diagnosis"] not in item["diagnosis_codes"]:

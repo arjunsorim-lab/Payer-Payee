@@ -2876,6 +2876,57 @@ function InterventionProposal({ plan }) {
   )
 }
 
+function ReviewControls({ memberId, plan, onSaved }) {
+  const current = plan.review || { status: 'pending', version: 0 }
+  const [status, setStatus] = useState(current.status || 'pending')
+  const [reason, setReason] = useState(current.reason || '')
+  const [assignee, setAssignee] = useState(current.assignee || '')
+  const [dueDate, setDueDate] = useState(current.due_date || '')
+  const [completedDate, setCompletedDate] = useState(current.completed_date || '')
+  const [outcome, setOutcome] = useState(current.outcome || '')
+  const [outcomeDate, setOutcomeDate] = useState(current.outcome_date || '')
+  const [outcomeNotes, setOutcomeNotes] = useState(current.outcome_notes || '')
+  const [message, setMessage] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const save = async (event) => {
+    event.preventDefault()
+    setSaving(true)
+    setMessage('')
+    try {
+      const payload = { version: current.version || 0, status, reason, assignee, due_date: dueDate,
+        completed_date: completedDate, outcome, outcome_date: outcomeDate, outcome_notes: outcomeNotes }
+      const result = await fetchJson(`/api/reviews/${encodeURIComponent(memberId)}/${encodeURIComponent(plan.review_id)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+      })
+      onSaved(result.review)
+      setMessage('Review saved.')
+    } catch (error) {
+      setMessage(error.message || 'Review could not be saved.')
+    } finally { setSaving(false) }
+  }
+
+  return (
+    <form className="intervention-review-controls" onSubmit={save}>
+      <label>Status<select value={status} onChange={(event) => setStatus(event.target.value)}>
+        {['pending', 'accepted', 'rejected', 'deferred', 'completed', 'outcome_recorded'].map(value => <option key={value} value={value}>{value.replace('_', ' ')}</option>)}
+      </select></label>
+      <label>Reviewer reason<textarea required minLength="3" value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Explain the decision" /></label>
+      {['accepted', 'deferred'].includes(status) ? <label>Assigned reviewer<input value={assignee} onChange={(event) => setAssignee(event.target.value)} placeholder="Name or team" /></label> : null}
+      {status === 'deferred' ? <label>Review again on<input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} /></label> : null}
+      {status === 'completed' || status === 'outcome_recorded' ? <label>Completed on<input type="date" value={completedDate} onChange={(event) => setCompletedDate(event.target.value)} /></label> : null}
+      {status === 'outcome_recorded' ? <>
+        <label>Observed outcome<select value={outcome} onChange={(event) => setOutcome(event.target.value)}><option value="">Select outcome</option>{['improved', 'unchanged', 'worsened', 'unknown'].map(value => <option key={value} value={value}>{value}</option>)}</select></label>
+        <label>Outcome date<input type="date" value={outcomeDate} onChange={(event) => setOutcomeDate(event.target.value)} /></label>
+        <label>Outcome evidence<textarea value={outcomeNotes} onChange={(event) => setOutcomeNotes(event.target.value)} placeholder="Record what was observed" /></label>
+      </> : null}
+      <button type="submit" disabled={saving || !plan.available}>{saving ? 'Saving…' : 'Save review'}</button>
+      {!plan.available ? <small>Additional clinical evidence is required before accepting this plan.</small> : null}
+      {message ? <small role="status">{message}</small> : null}
+    </form>
+  )
+}
+
 function ClaimOutcomeEvidencePanel({ facts }) {
   const raw = facts.outcome_evidence || facts.outcomeEvidence || facts.workbookFields || facts.syntheticEnrichment || {}
   const evidence = facts.outcome_evidence || facts.outcomeEvidence ? raw : {
@@ -4026,6 +4077,12 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
                     <summary>{plan.title || 'Insufficient clinical evidence'} · {plan.source_claim_ids.length} claims</summary>
                     <p>Diagnosis codes: {plan.diagnosis_codes.join(', ') || 'Not recorded'}. Latest source claim: {plan.anchor_claim_id}.</p>
                     <InterventionProposal plan={plan} />
+                    <ReviewControls memberId={member.memberId} plan={plan} onSaved={(review) => {
+                      setInterventionReview((previous) => previous ? {
+                        ...previous,
+                        plans: previous.plans.map((item) => item.review_id === plan.review_id ? { ...item, review } : item),
+                      } : previous)
+                    }} />
                   </details>
                 ))}
               </>

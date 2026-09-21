@@ -289,6 +289,14 @@ Copy `.env.example` to `.env`. `.env` files are ignored by Git.
 | `MONGODB_TIMEOUT_MS` | `5000` | MongoDB connection timeout |
 | `MONGODB_RETRY_SECONDS` | `60` | Delay before retrying MongoDB after fallback |
 | `CSV_PATH` | local CSV path | Source used by the Mongo import and older provider fallback path |
+| `REQUIRE_AUTH` | `false` locally | Require sign-in for API access; set `true` remotely |
+| `REVIEW_SESSION_SECRET` | empty locally | At least 32 random characters for secure session cookies |
+| `REVIEW_USERS_JSON` | `{}` locally | JSON map of usernames to Werkzeug `password_hash` and `role` (`viewer`, `reviewer`, or `admin`) |
+| `REVIEW_DB_PATH` | `.review-data/reviews.sqlite3` | Private SQLite store for review decisions and audit events |
+
+The local default is explicitly a loopback-only demo mode. A deployed service requires
+`REQUIRE_AUTH=true` (or `APP_ENV=production`), a session secret, and at least one configured
+user. Generate a password hash with `python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('change-me'))"` and store only the hash. Review decisions are versioned and audited; reported outcomes remain unverified savings evidence until independently validated.
 
 ### Workbook settings
 

@@ -2859,6 +2859,23 @@ function OrganSystemComparativeSavingsCard({ scenario, facts }) {
   )
 }
 
+function InterventionProposal({ plan }) {
+  if (!plan) return null
+  return (
+    <section aria-label="Scenario-specific intervention proposal">
+      <strong>{plan.title || 'Intervention: insufficient evidence'}</strong>
+      <p>{plan.action || plan.reason}</p>
+      {plan.available ? (
+        <>
+          <p><strong>{plan.timing_basis === 'illustrative_demo' ? 'Example follow-up' : 'Conditional reassessment'}: {plan.follow_up_days} days.</strong> {plan.timing}</p>
+          <small>Proposed for clinical review. This is not a recorded service and is not included in savings calculations.</small>
+          {plan.source_url ? <p><a href={plan.source_url} target="_blank" rel="noreferrer">Clinical guidance</a></p> : null}
+        </>
+      ) : null}
+    </section>
+  )
+}
+
 function ClaimOutcomeEvidencePanel({ facts }) {
   const raw = facts.outcome_evidence || facts.outcomeEvidence || facts.workbookFields || facts.syntheticEnrichment || {}
   const evidence = facts.outcome_evidence || facts.outcomeEvidence ? raw : {
@@ -2931,19 +2948,7 @@ function ClaimOutcomeEvidencePanel({ facts }) {
 
   return (
     <aside className="claim-outcome-evidence" aria-label="Claim outcome evidence">
-      {evidence.intervention_plan ? (
-        <section aria-label="Scenario-specific intervention proposal">
-          <strong>{evidence.intervention_plan.title || 'Intervention: insufficient evidence'}</strong>
-          <p>{evidence.intervention_plan.action || evidence.intervention_plan.reason}</p>
-          {evidence.intervention_plan.available ? (
-            <>
-              <p><strong>{evidence.intervention_plan.timing_basis === 'illustrative_demo' ? 'Example follow-up' : 'Conditional reassessment'}: {evidence.intervention_plan.follow_up_days} days.</strong> {evidence.intervention_plan.timing}</p>
-              <small>Proposed for clinical review. This is not a recorded service and is not included in savings calculations.</small>
-              {evidence.intervention_plan.source_url ? <p><a href={evidence.intervention_plan.source_url} target="_blank" rel="noreferrer">Clinical guidance</a></p> : null}
-            </>
-          ) : null}
-        </section>
-      ) : null}
+      <InterventionProposal plan={evidence.intervention_plan} />
       <div className="claim-outcome-evidence-heading">
         <ShieldAlert size={18} />
         <div>
@@ -3935,6 +3940,7 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
   const { defaultDateRange } = useAppData()
   const latestClaim = selectedClaim || member.latestClaim
   const [memberMoney, setMemberMoney] = useState(null)
+  const [interventionReview, setInterventionReview] = useState(null)
   const [payerCohortSavings, setPayerCohortSavings] = useState(null)
   const [memberEncountersPage, setMemberEncountersPage] = useState(1)
   const [selectedCondition, setSelectedCondition] = useState(null)
@@ -3956,6 +3962,15 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
   const memberEncountersPageCount = Math.max(1, Math.ceil(filteredMemberClaims.length / memberEncountersPageSize))
   const _safeMemberEncountersPage = Math.min(memberEncountersPage, memberEncountersPageCount)
   const memberStats = buildMemberStats(member, memberMoney, payerCohortSavings)
+
+  useEffect(() => {
+    let active = true
+    setInterventionReview(null)
+    fetchJson(`/api/members/${encodeURIComponent(member.memberId)}/intervention-plans`)
+      .then((payload) => { if (active) setInterventionReview(payload) })
+      .catch(() => { if (active) setInterventionReview({ error: true }) })
+    return () => { active = false }
+  }, [member.memberId])
 
   useEffect(() => {
     setMemberEncountersPage(1)
@@ -4001,6 +4016,21 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
 
       <div className="patient-master-layout">
         <div className="patient-main-content">
+          <Card className="claim-outcome-evidence">
+            <h2>Intervention review by scenario</h2>
+            {!interventionReview ? <p>Loading this member’s intervention review…</p> : interventionReview.error ? <p>Intervention review could not be loaded. Reopen this member to retry.</p> : (
+              <>
+                <p>{interventionReview.claims_reviewed} claims reviewed. Expand a scenario to see its proposed intervention and timing. These proposals do not change recorded visits or establish savings.</p>
+                {interventionReview.plans.map((plan) => (
+                  <details key={`${plan.scenario || plan.matched_diagnosis}-${plan.anchor_claim_id}`}>
+                    <summary>{plan.title || 'Insufficient clinical evidence'} · {plan.source_claim_ids.length} claims</summary>
+                    <p>Diagnosis codes: {plan.diagnosis_codes.join(', ') || 'Not recorded'}. Latest source claim: {plan.anchor_claim_id}.</p>
+                    <InterventionProposal plan={plan} />
+                  </details>
+                ))}
+              </>
+            )}
+          </Card>
           <Card className="patient-master-header">
             <div className="member-profile-section">
               <div className="initials-avatar">{getInitials(member)}</div>

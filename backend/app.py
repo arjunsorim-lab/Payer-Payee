@@ -13,6 +13,7 @@ try:
     from .db import connect_mongo, get_mongo_config
     from .financial_engine import build_financial_result, member_supported_summary
     from .outcome_evidence import build_outcome_evidence
+    from .intervention_plans import build_member_intervention_plans
     from .import_claims import read_claims
     from .llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
     from .ollama_service import OllamaClient, OllamaError
@@ -44,6 +45,7 @@ except ImportError:
     from db import connect_mongo, get_mongo_config
     from financial_engine import build_financial_result, member_supported_summary
     from outcome_evidence import build_outcome_evidence
+    from intervention_plans import build_member_intervention_plans
     from import_claims import read_claims
     from llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
     from ollama_service import OllamaClient, OllamaError
@@ -562,6 +564,19 @@ def get_members():
     items = list(db.members.find(query).sort([("latestServiceDate", -1), ("memberId", 1)]).skip(skip).limit(limit))
     total = db.members.count_documents(query)
     return json_response({"page": page, "limit": limit, "total": total, "items": items})
+
+
+@app.get("/api/members/<member_id>/intervention-plans")
+def get_member_intervention_plans(member_id):
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Intervention review requires a configured claims workbook."}, 503)
+    claims = database.member_claims(member_id)
+    if not claims:
+        return json_response({"message": "Member not found in selectable workbook claims"}, 404)
+    return json_response({"member_id": member_id,
+                          "claims_reviewed": len(claims),
+                          "plans": build_member_intervention_plans(claims)})
 
 
 @app.get("/api/members/<member_id>")

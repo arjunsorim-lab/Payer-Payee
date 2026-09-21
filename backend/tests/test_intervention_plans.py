@@ -1,6 +1,6 @@
 from copy import deepcopy
 
-from backend.intervention_plans import build_intervention_plan
+from backend.intervention_plans import build_intervention_plan, build_member_intervention_plans
 
 
 def test_scenarios_have_distinct_interventions_and_timing():
@@ -13,10 +13,13 @@ def test_scenarios_have_distinct_interventions_and_timing():
 
 
 def test_unrelated_antibiotics_and_urinary_conditions_do_not_imply_uti():
-    for code in ("J18.9", "N39.3", "Z01.419", "", "R10.9"):
+    for code in ("J18.9", "N39.3", "N30.1", "Z01.419", "", "R10.9"):
         plan = build_intervention_plan({"diagnosisCode": code, "cptDescription": "Antibiotic treatment"})
-        assert not plan["available"]
-        assert plan["follow_up_days"] is None
+        assert plan.get("scenario") != "urinary"
+        assert "urine culture" not in plan.get("action", "")
+        if not code or code == "R10.9":
+            assert not plan["available"]
+            assert plan["follow_up_days"] is None
 
 
 def test_plan_preserves_recorded_claim_and_supports_workbook_fields():
@@ -26,3 +29,62 @@ def test_plan_preserves_recorded_claim_and_supports_workbook_fields():
     assert plan["scenario"] == "urinary"
     assert plan["requires_clinical_review"]
     assert claim == before
+
+
+def test_acute_diagnoses_override_routine_profiles():
+    for code in ("E11.641", "I25.110", "I26.99", "J96.01", "R07.9"):
+        plan = build_intervention_plan({"diagnosisCode": code})
+        assert plan["status"] == "clinical_review_required"
+        assert plan["follow_up_days"] is None
+
+
+def test_member_groups_conditions_and_keeps_latest_anchor():
+    claims = [
+        {"claimId": "OLD", "dos": "2026-01-01", "diagnosisCode": "E11.9"},
+        {"claimId": "NEW", "dos": "2026-02-01", "diagnosisCode": "E11.65"},
+        {"claimId": "UTI", "dos": "2026-01-01", "diagnosisCode": "N39.0"},
+        {"claimId": "UNKNOWN", "dos": "2026-01-01", "diagnosisCode": ""},
+    ]
+    plans = build_member_intervention_plans(claims)
+    assert len(plans) == 3
+    diabetes = next(plan for plan in plans if plan.get("scenario") == "diabetes")
+    assert diabetes["anchor_claim_id"] == "NEW"
+    assert diabetes["source_claim_ids"] == ["NEW", "OLD"]
+    assert len(diabetes["diagnosis_codes"]) == 2
+    assert sum(len(plan["source_claim_ids"]) for plan in plans) == len(claims)
+
+
+def test_every_workbook_member_and_claim_is_reviewed():
+    from backend.workbook_enrichment import load_workbook_database
+    database = load_workbook_database()
+    reviewed = []
+    for member in database.members:
+        claims = database.member_claims(member["memberId"])
+        plans = build_member_intervention_plans(claims)
+        assert plans
+        assert any(plan["available"] for plan in plans)
+        ids = [claim_id for plan in plans for claim_id in plan["source_claim_ids"]]
+        assert sorted(ids) == sorted(claim["claimId"] for claim in claims)
+        reviewed.extend(ids)
+        for plan in plans:
+            assert not plan["recorded"] and not plan["included_in_savings"]
+            if not plan["available"]:
+                assert plan["follow_up_days"] is None
+    assert sorted(reviewed) == sorted(claim["claimId"] for claim in database.selectable_claims)
+
+
+def test_member_endpoint_avoids_financial_computation():
+    from unittest.mock import patch
+    from types import SimpleNamespace
+    from backend.app import app
+    database = SimpleNamespace(member_claims=lambda member_id: [
+        {"claimId": "C1", "diagnosisCode": "E03.9"}
+    ] if member_id == "M1" else [])
+    with patch("backend.app.configured_workbook_database", return_value=database), patch(
+        "backend.app.member_supported_summary", side_effect=AssertionError("Unexpected financial computation")
+    ):
+        client = app.test_client()
+        response = client.get("/api/members/M1/intervention-plans")
+        assert response.status_code == 200
+        assert response.get_json()["plans"][0]["scenario"] == "thyroid"
+        assert client.get("/api/members/UNKNOWN/intervention-plans").status_code == 404

@@ -4076,6 +4076,15 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
                   <details key={`${plan.scenario || plan.matched_diagnosis}-${plan.anchor_claim_id}`}>
                     <summary>{plan.title || 'Insufficient clinical evidence'} · {plan.source_claim_ids.length} claims</summary>
                     <p>Diagnosis codes: {plan.diagnosis_codes.join(', ') || 'Not recorded'}. Latest source claim: {plan.anchor_claim_id}.</p>
+                    <dl>
+                      <div><dt>Data source</dt><dd>{plan.source_data_type === 'synthetic_demonstration' ? 'Synthetic demonstration' : 'Recorded claim data'}</dd></div>
+                      <div><dt>Recorded context</dt><dd>{Object.keys(plan.evidence_quality?.recorded_context || {}).length ? Object.entries(plan.evidence_quality.recorded_context).map(([key, value]) => `${key.replace('_', ' ')}: ${value}`).join(' · ') : 'No additional clinical context recorded'}</dd></div>
+                      <div><dt>Missing information</dt><dd>{plan.evidence_quality?.missing_information?.join(', ') || 'All reviewed context fields are present'}</dd></div>
+                      <div><dt>History coverage</dt><dd>{plan.evidence_quality?.history_start || 'Not recorded'} to {plan.evidence_quality?.history_end || 'Not recorded'} · {plan.evidence_quality?.history_claim_count || 0} claims</dd></div>
+                      <div><dt>Comparison strength</dt><dd>{plan.evidence_quality?.comparison_strength || 'Not assessed'}</dd></div>
+                      <div><dt>Clinical effect</dt><dd>{plan.evidence_quality?.causal_effectiveness || 'Not established'}</dd></div>
+                      <div><dt>Financial status</dt><dd>{plan.evidence_quality?.financial_evidence || 'No verified savings'}</dd></div>
+                    </dl>
                     <InterventionProposal plan={plan} />
                     <ReviewControls memberId={member.memberId} plan={plan} onSaved={(review) => {
                       setInterventionReview((previous) => previous ? {

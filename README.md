@@ -16,6 +16,12 @@ PayerPayee is a claims-financial analytics application for exploring members, cl
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [API overview](#api-overview)
+- [Evidence types](#evidence-types)
+- [Patient-specific interventions](#patient-specific-interventions)
+- [Savings validation](#savings-validation)
+- [Review workflow](#review-workflow)
+- [Evidence-quality reporting](#evidence-quality-reporting)
+- [Security and scale readiness](#security-and-scale-readiness)
 - [Testing and quality checks](#testing-and-quality-checks)
 - [Build and deployment](#build-and-deployment)
 - [Optional local AI and RAG](#optional-local-ai-and-rag)
@@ -192,6 +198,112 @@ The provider-side engine is separate from payer cohort savings. It:
 - Produces validation, reconciliation, confidence, action, and supporting-evidence data.
 
 The workbook financial engine also supplies claim-specific adjudication reasons and traceable evidence. Optional LLM output may explain the canonical result, but cannot replace or alter its amounts.
+
+## Evidence types
+
+Every value the application exposes is classified as exactly one evidence type,
+defined once in `backend/evidence.py` and mirrored in `frontend/src/evidenceUi.js`.
+The label is attached to API responses and exports, and rendered as a badge in the
+browser, so a reviewer can always tell what a number is.
+
+| Evidence type | Meaning |
+| --- | --- |
+| `recorded_claim_fact` | A value read directly from the configured claims source |
+| `synthetic_demonstration` | Generated demonstration data; never real care |
+| `recommendation` | Proposed for clinical review; never a recorded service |
+| `reviewer_observation` | A human observation; not independently verified |
+| `model_estimate` | Calculated by the deterministic engines from historical peers |
+| `verified_savings` | Calculated only from post-intervention claims evidence plus a recorded outcome |
+
+Labels appear in claim detail, the Member 360 intervention review, prediction
+results, scenario cards, API responses (via the `evidence_legend` block and
+per-object `evidence`/`evidence_source` blocks) and exports (`Evidence_Type` and
+`Evidence_Label` columns in the CSV endpoints).
+
+## Patient-specific interventions
+
+Intervention review is built from the member's own recorded inputs: diagnosis,
+symptoms, medications, allergies, laboratory results, prior procedures, treatment
+history, previous outcomes and existing tests. The same engine therefore returns
+different recommendations for two members with the same diagnosis but different
+recorded care.
+
+Rules enforced by `backend/intervention_plans.py`:
+
+- A disease-specific recommendation requires recorded treatment history or a
+  previous outcome for that diagnosis family. Without it the plan is
+  `insufficient_evidence` and states which evidence is missing.
+- A test or treatment is never recommended when its required evidence is
+  missing. Test recommendations are withheld until symptom or laboratory
+  evidence exists.
+- Every plan returns the exact `evidence_used` list and the `missing_evidence`
+  that limited the recommendation.
+- Recommendations are labeled `recommendation` and are excluded from savings.
+
+## Savings validation
+
+`backend/savings_validation.py` keeps six money concepts separate and validates
+whether a saving can be called verified:
+
+| Concept | Evidence type |
+| --- | --- |
+| Predicted opportunity | `model_estimate` |
+| Billed charge | `recorded_claim_fact` |
+| Paid amount | `recorded_claim_fact` |
+| Estimated savings | `model_estimate` |
+| Reviewer-reported outcome | `reviewer_observation` |
+| Independently verified savings | `verified_savings` |
+
+Each result also carries an observation window (start, end, days, complete or
+in progress), a comparison cohort (size, member count, claim ids, matching
+dimensions), follow-up completeness, confidence with its method, statistical
+uncertainty (sample size, mean, standard deviation, standard error and a 95%
+interval), and the reasons a result is unreliable or insufficient.
+
+Verified savings require post-intervention claims evidence plus a recorded
+reviewer outcome. Without post-intervention claims the result is
+`insufficient_evidence` and no verified amount is produced. Claims correlation
+alone never establishes causal effectiveness.
+
+## Review workflow
+
+Reviewers can assign, accept, reject, defer, complete and record outcomes for an
+intervention review. The store (`backend/review_store.py`) enforces:
+
+- A reason of at least three characters for every decision.
+- An assignee for assigned, accepted and deferred reviews.
+- A revisit date for deferred reviews.
+- A completion date for completed and outcome-recorded reviews.
+- An outcome, outcome date and outcome evidence for outcome-recorded reviews.
+- Only valid status transitions (see `TRANSITIONS`).
+- Version checks that reject stale edits with `409`.
+
+Every change is persisted and appended to the audit table, which is the durable
+copy independent of any deployment disk reset. The Member 360 review panel shows
+the decision form, the review history (`GET /api/reviews/{review_id}/history`)
+and the audit trail (`GET /api/review-audit`, administrators).
+
+## Evidence-quality reporting
+
+Each intervention review reports calculated evidence quality: history start and
+end dates, claims reviewed, the specific missing medications, allergies,
+symptoms, laboratory results and follow-up data, cohort size, matching strength,
+follow-up completeness, data source type and causal-evidence status. Placeholder
+values such as "not assessed" are replaced by a calculated value wherever the
+data permits, and by an explicit "Not calculated" only when it does not.
+
+## Security and scale readiness
+
+Outside local development the service requires authentication and fails safely
+when credentials are missing. See [DEPLOYMENT.md](DEPLOYMENT.md) for the full
+checklist: viewer/reviewer/admin roles, CSRF checks on write endpoints, secure
+cookies, rate-limited login, audit logging, CORS restrictions, security headers
+and request-size limits.
+
+Every in-process cache is bounded (see `backend/bounded_cache.py`), collection
+endpoints page their results, and the performance tests exercise 100,000 claims
+with concurrent requests while measuring API latency, memory use, cache size and
+initial page-load time.
 
 ## Repository map
 
@@ -412,7 +524,29 @@ npm run lint
 npm run build
 ```
 
-Backend tests cover provider forecasts, workbook calculations, payer cohort rules and modal contracts, avoidable-spend behavior, prediction design boundaries, and optional Ollama/RAG behavior. The frontend test protects provider result formatting and display contracts.
+Backend tests cover provider forecasts, workbook calculations, payer cohort rules and modal contracts, avoidable-spend behavior, prediction design boundaries, optional Ollama/RAG behavior, evidence labels, patient-specific interventions, savings validation, the review workflow, security controls and the 100,000-claim scale run.
+
+Frontend tests (`frontend/src/providerLlmFormat.test.js` and
+`frontend/src/evidenceUi.test.js`) protect provider result formatting, the
+evidence-label vocabulary, the six separated savings amounts, verification
+gating, evidence-quality rows, missing-evidence reporting and the review state
+machine.
+
+Live API and scale checks:
+
+```bash
+# server-side scale run and API smoke tests (requires the backend to import)
+python -m pytest backend/tests -k 'scale or security' -v
+
+# start the service and smoke test the live API
+python -m backend.app &
+curl -s http://127.0.0.1:4000/health
+curl -s 'http://127.0.0.1:4000/api/claims?page=1&limit=5'
+```
+
+The scale test builds 100,000 claims, issues concurrent requests and reports
+latency percentiles, peak memory, cache sizes and initial page-load time; it
+fails if the configured budgets are exceeded.
 
 ## Build and deployment
 
@@ -520,13 +654,15 @@ Restart the backend after replacing the workbook. The loader keys its cache by t
 
 - Treat source workbooks, exports, logs, and generated reports as sensitive claims data.
 - Do not commit real credentials or protected health information. `.env`, generated indexes, virtual environments, build output, and common logs are ignored by Git.
-- The repository does not currently implement an authentication layer; add access control before exposing it to untrusted networks.
+- Authentication is required outside local development. Set `APP_ENV=production`, `REVIEW_SESSION_SECRET` (32+ characters) and `REVIEW_USERS_JSON`; the service returns `503` rather than serving claims when those are missing. See [DEPLOYMENT.md](DEPLOYMENT.md).
+- Never present synthetic demonstration data, recommendations or model estimates as recorded care, and never describe savings as verified without post-intervention claims evidence.
 - The RAG pipeline is evidence retrieval only. Do not expose raw embeddings or vector contents through the UI.
 - Validate workbook field definitions and payer/provider contracts before using financial outputs operationally.
 - No license file is currently included in this repository.
 
 ## Additional documentation
 
+- [DEPLOYMENT.md](DEPLOYMENT.md) — production deployment, credentials, roles, security controls and scale configuration.
 - [OLLAMA_RAG_SETUP.md](OLLAMA_RAG_SETUP.md) — local Ollama and FAISS setup.
 - [PROVIDER_LLM.md](PROVIDER_LLM.md) — provider prediction/explanation implementation notes, including legacy compatibility details.
 - [payer_payee_mongodb/README.md](payer_payee_mongodb/README.md) — isolated MongoDB helper.

@@ -2931,6 +2931,19 @@ function ClaimOutcomeEvidencePanel({ facts }) {
 
   return (
     <aside className="claim-outcome-evidence" aria-label="Claim outcome evidence">
+      {evidence.intervention_plan ? (
+        <section aria-label="Scenario-specific intervention proposal">
+          <strong>{evidence.intervention_plan.title || 'Intervention: insufficient evidence'}</strong>
+          <p>{evidence.intervention_plan.action || evidence.intervention_plan.reason}</p>
+          {evidence.intervention_plan.available ? (
+            <>
+              <p><strong>{evidence.intervention_plan.timing_basis === 'illustrative_demo' ? 'Example follow-up' : 'Conditional reassessment'}: {evidence.intervention_plan.follow_up_days} days.</strong> {evidence.intervention_plan.timing}</p>
+              <small>Proposed for clinical review. This is not a recorded service and is not included in savings calculations.</small>
+              {evidence.intervention_plan.source_url ? <p><a href={evidence.intervention_plan.source_url} target="_blank" rel="noreferrer">Clinical guidance</a></p> : null}
+            </>
+          ) : null}
+        </section>
+      ) : null}
       <div className="claim-outcome-evidence-heading">
         <ShieldAlert size={18} />
         <div>

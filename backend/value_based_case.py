@@ -12,6 +12,11 @@ import json
 import os
 import re
 
+try:
+    from .intervention_plans import build_intervention_plan
+except ImportError:
+    from intervention_plans import build_intervention_plan
+
 YES, NO, UNKNOWN = "YES", "NO", "INSUFFICIENT_EVIDENCE"
 ALIASES = {
     "Claim_ID": ("claimId", "CLAIMID", "SOURCE_CLAIM_ID"),
@@ -629,6 +634,7 @@ def build_value_based_case_for_claim(database, claim_number, *, config=None, _pr
                     "claim_count": len(episode_rows), "episode_claims": [_summary(database, r) for r in episode_rows],
                     "fallback_window_days": settings["episode_window_days"]},
         "earlier_intervention_opportunities": interventions,
+        "intervention_plan": build_intervention_plan(reference),
         "avoidable_repetitive_claims": assessed, "claims_included": included,
         "calculation": {**base["calculation"], "available": bool(included), "eligible_claim_count": len(eligible),
                         "included_claim_count": len(included), "unverified_eligible_claim_count": len(eligible) - len(included),

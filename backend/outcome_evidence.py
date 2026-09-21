@@ -2,6 +2,11 @@
 
 from datetime import date
 
+try:
+    from .intervention_plans import build_intervention_plan
+except ImportError:
+    from intervention_plans import build_intervention_plan
+
 
 POSITIVE_OUTCOME_TERMS = (
     "resolved",
@@ -281,6 +286,7 @@ def build_outcome_evidence(database, claim):
 
     return {
         "condition_resolved": condition or "Not recorded",
+        "intervention_plan": build_intervention_plan(claim),
         "treatment_outcome": treatment or "Not recorded",
         "follow_up_completed": follow_up or "Not recorded",
         "outcome_claim_flag": _text(fields.get("Outcome_Claim_Flag")) or ("Y" if positive else "N"),

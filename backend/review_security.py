@@ -65,6 +65,9 @@ def configure_security(app):
                 return jsonify(message="Local demo access only. Configure authentication for remote access."), 403
             g.actor, g.role = "local-demo", "reviewer"
         if not public and request.method not in {"GET", "HEAD"}:
+            # Viewers are read-only everywhere.
+            if g.role == "viewer":
+                return jsonify(message="Viewer access is read-only."), 403
             if app.config["REVIEW_AUTH_REQUIRED"] and not secrets.compare_digest(
                 request.headers.get("X-CSRF-Token", ""), session.get("csrf", "invalid")
             ):
@@ -73,6 +76,10 @@ def configure_security(app):
                 return jsonify(message="Reviewer access is required."), 403
             if request.path == "/api/rag/rebuild" and g.role != "admin":
                 return jsonify(message="Administrator access is required."), 403
+        # Review history and audit events are reviewer/admin surfaces.
+        if request.path.startswith("/api/reviews/") and request.path.endswith("/history"):
+            if g.role not in {"reviewer", "admin"}:
+                return jsonify(message="Reviewer access is required."), 403
         if request.path == "/api/review-audit" and g.role != "admin":
             return jsonify(message="Administrator access is required."), 403
 
@@ -126,6 +133,22 @@ def configure_security(app):
     def logout():
         session.clear()
         return jsonify(authenticated=False)
+
+    @app.get("/api/reviews/<review_id>/history")
+    def get_review_history(review_id):
+        with connection(app.config["REVIEW_DB"]) as db:
+            rows = db.execute(
+                "SELECT at,actor,event,detail FROM audit WHERE resource=? ORDER BY id ASC",
+                (review_id,),
+            ).fetchall()
+        return jsonify(
+            review_id=review_id,
+            events=[
+                {"at": row["at"], "actor": row["actor"], "event": row["event"],
+                 "detail": json.loads(row["detail"] or "{}")}
+                for row in rows
+            ],
+        )
 
     @app.get("/api/review-audit")
     def get_audit():

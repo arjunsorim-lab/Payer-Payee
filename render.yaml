@@ -21,5 +21,13 @@ services:
         value: data/claims-demo.xlsx
       - key: PRELOAD_WORKBOOK
         value: "true"
+      - key: REQUIRE_AUTH
+        value: "true"
+      - key: REVIEW_SESSION_SECRET
+        sync: false
+      - key: REVIEW_USERS_JSON
+        sync: false
+      - key: REVIEW_DB_PATH
+        value: .review-data/reviews.sqlite3
       - key: MONGODB_URI
         sync: false

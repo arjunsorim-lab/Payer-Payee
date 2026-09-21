@@ -10,12 +10,22 @@ from flask_cors import CORS
 from werkzeug.exceptions import HTTPException, ServiceUnavailable
 
 try:
+    from . import evidence
+    from .bounded_cache import registry_stats as cache_registry_stats
+    from .claim_export import claims_csv, recommendations_csv, export_filename
     from .db import connect_mongo, get_mongo_config
     from .financial_engine import build_financial_result, member_supported_summary
     from .outcome_evidence import build_outcome_evidence
     from .intervention_plans import build_member_intervention_plans
+    from .evidence import claim_source, legend
     from .review_security import configure_security
-    from .review_store import read_reviews, save_review
+    from .review_store import (
+        read_review_history,
+        read_reviews,
+        read_reviews_for_member,
+        save_review,
+    )
+    from .savings_validation import build_savings_validation
     from .import_claims import read_claims
     from .llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
     from .ollama_service import OllamaClient, OllamaError
@@ -44,12 +54,22 @@ try:
     )
     from .uti_case_workbook import dataset_registry, load_uti_case_workbook
 except ImportError:
+    import evidence
+    from bounded_cache import registry_stats as cache_registry_stats
+    from claim_export import claims_csv, recommendations_csv, export_filename
     from db import connect_mongo, get_mongo_config
     from financial_engine import build_financial_result, member_supported_summary
     from outcome_evidence import build_outcome_evidence
     from intervention_plans import build_member_intervention_plans
+    from evidence import claim_source, legend
     from review_security import configure_security
-    from review_store import read_reviews, save_review
+    from review_store import (
+        read_review_history,
+        read_reviews,
+        read_reviews_for_member,
+        save_review,
+    )
+    from savings_validation import build_savings_validation
     from import_claims import read_claims
     from llm_service import generate_provider_chat_answer, generate_provider_llm_analysis
     from ollama_service import OllamaClient, OllamaError
@@ -121,6 +141,8 @@ def serialize(value):
 
 
 def json_response(payload, status=200):
+    if isinstance(payload, dict):
+        payload.setdefault("evidence_legend", legend())
     return jsonify(serialize(payload)), status
 
 
@@ -271,6 +293,7 @@ def workbook_claims_for_request(database, args):
 def workbook_claim_for_api(database, claim, include_summary=True, compact=False):
     payload = {key: value for key, value in claim.items() if key != "raw"}
     fields = claim.get("workbookFields", {})
+    payload["evidence_source"] = claim_source(claim, bool(getattr(database, "report", {}).get("synthetic")))
     # Collection pages do not render outcome evidence. Avoid an O(n²) scan
     # across the workbook for thousands of compact rows; detail endpoints add it.
     if not compact:

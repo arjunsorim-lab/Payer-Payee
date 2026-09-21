@@ -14,15 +14,17 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 try:
+    from .bounded_cache import BoundedCache
     from .provider_prediction import build_provider_prediction_payload
 except ImportError:
+    from bounded_cache import BoundedCache
     from provider_prediction import build_provider_prediction_payload
 
 
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 PROMPT_VERSION = "provider-groq-money-v3.3"
-_ANALYSIS_CACHE = {}
-_CHAT_CACHE = {}
+_ANALYSIS_CACHE = BoundedCache(int(os.getenv("GROQ_CACHE_MAX_ENTRIES", "128")))
+_CHAT_CACHE = BoundedCache(int(os.getenv("GROQ_CHAT_CACHE_MAX_ENTRIES", "256")))
 logger = logging.getLogger(__name__)
 
 OUTPUT_FIELDS = (

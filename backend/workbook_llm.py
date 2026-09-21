@@ -6,6 +6,11 @@ import json
 import os
 import re
 import time
+
+try:
+    from .bounded_cache import BoundedCache, DEFAULT_MAX_SIZE
+except ImportError:  # pragma: no cover - script execution
+    from bounded_cache import BoundedCache, DEFAULT_MAX_SIZE
 from hashlib import sha256
 from threading import RLock
 from urllib.error import HTTPError, URLError
@@ -42,8 +47,8 @@ SUGGESTED_QUESTIONS = [
     "What is the best action?",
     "Why is this amount shown?",
 ]
-_ANALYSIS_CACHE = {}
-_CHAT_CACHE = {}
+_ANALYSIS_CACHE = BoundedCache(int(os.getenv("LLM_CACHE_MAX_ENTRIES", "128")))
+_CHAT_CACHE = BoundedCache(int(os.getenv("LLM_CHAT_CACHE_MAX_ENTRIES", "256")))
 _LOCK = RLock()
 _CURRENCY_PATTERN = re.compile(r"\$[\d,]+(?:\.\d+)?")
 _PERCENT_PATTERN = re.compile(r"(?<![\w.])\d+(?:\.\d+)?%")

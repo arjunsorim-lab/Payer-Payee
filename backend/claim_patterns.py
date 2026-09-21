@@ -5,6 +5,11 @@ from __future__ import annotations
 from datetime import date
 from statistics import median
 
+try:
+    from .bounded_cache import BoundedCache
+except ImportError:  # pragma: no cover - script execution
+    from bounded_cache import BoundedCache
+
 
 SIMILARITY_WEIGHTS = {
     "icd_family": 25,
@@ -17,10 +22,11 @@ SIMILARITY_WEIGHTS = {
     "timeframe": 5,
 }
 MIN_PEERS = 3
-_EARLIER_CACHE = {}
-_PEER_CACHE = {}
-_SHORT_CACHE = {}
-_MEMBER_SHORT_CACHE = {}
+# Bounded so a large workbook cannot grow these caches without limit.
+_EARLIER_CACHE = BoundedCache(256)
+_PEER_CACHE = BoundedCache(128)
+_SHORT_CACHE = BoundedCache(256)
+_MEMBER_SHORT_CACHE = BoundedCache(128)
 
 
 def _text(value):

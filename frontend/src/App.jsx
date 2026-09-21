@@ -8,6 +8,18 @@ import {
 } from './providerLlmFormat.js'
 import { CrossPatientComparatorContent, SamePatientBilledSavings } from './CrossPatientComparator.jsx'
 import {
+  evidenceBadgeClass,
+  evidenceLabel,
+  evidenceQualityRows,
+  missingEvidenceRows,
+  observationWindowSummary,
+  reviewStatusOptions,
+  savingsAmountRows,
+  uncertaintySummary,
+  verificationSummary,
+  verifiedSavingsLabel,
+} from './evidenceUi.js'
+import {
   Activity,
   ArrowLeft,
   ArrowLeftRight,
@@ -140,6 +152,24 @@ function useAppData() {
   return useContext(DataContext)
 }
 
+// Session state shared by every request. The CSRF token is attached to writes so
+// the backend can reject cross-site form posts, and secure cookies are sent with
+// credentials: 'same-origin'.
+let sessionState = { authenticated: false, mode: 'local_demo', role: 'reviewer', csrfToken: '' }
+let onSessionChange = () => {}
+
+function currentSession() {
+  return sessionState
+}
+
+function updateSession(next) {
+  sessionState = { ...sessionState, ...next }
+  onSessionChange(sessionState)
+  return sessionState
+}
+
+const AUTH_STATUSES = new Set([401, 403, 413, 429])
+
 async function fetchJson(path, options = {}) {
   const candidates = [...new Set([
     CONFIGURED_API_BASE_URL,
@@ -148,23 +178,33 @@ async function fetchJson(path, options = {}) {
     import.meta.env.DEV ? '' : RENDER_API_BASE_URL,
   ].filter(Boolean))]
   let lastError = new Error('Backend API could not be reached')
+  const method = (options.method || 'GET').toUpperCase()
+  const headers = { Accept: 'application/json', ...(options.headers || {}) }
+  if (!['GET', 'HEAD'].includes(method) && sessionState.csrfToken) {
+    headers['X-CSRF-Token'] = sessionState.csrfToken
+  }
 
   for (const baseUrl of candidates) {
     try {
       const response = await fetch(`${baseUrl}${path}`, {
         ...options,
-        headers: { Accept: 'application/json', ...(options.headers || {}) },
+        credentials: 'same-origin',
+        headers,
       })
       if (!response.ok) {
         const errorPayload = await response.json().catch(() => null)
         const requestError = new Error(errorPayload?.message || `Request failed: ${response.status}`)
+        requestError.status = response.status
+        if (response.status === 401) {
+          updateSession({ authenticated: false, mode: 'secure' })
+        }
         if (![404, 405].includes(response.status)) throw requestError
         lastError = requestError
         continue
       }
       return await response.json()
     } catch (error) {
-      if (!['Failed to fetch', 'Load failed', 'NetworkError when attempting to fetch resource.'].includes(error.message)) {
+      if (AUTH_STATUSES.has(error.status) || !['Failed to fetch', 'Load failed', 'NetworkError when attempting to fetch resource.'].includes(error.message)) {
         throw error
       }
       lastError = error
@@ -172,6 +212,40 @@ async function fetchJson(path, options = {}) {
   }
 
   throw lastError
+}
+
+async function bootstrapSession() {
+  const payload = await fetchJson('/api/session')
+  return updateSession({
+    authenticated: Boolean(payload.authenticated),
+    mode: payload.mode || 'local_demo',
+    role: payload.role || 'viewer',
+    username: payload.username || null,
+    csrfToken: payload.csrf_token || '',
+  })
+}
+
+async function signIn(username, password) {
+  const payload = await fetchJson('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  })
+  return updateSession({
+    authenticated: true,
+    mode: payload.mode || 'secure',
+    role: payload.role,
+    username: payload.username,
+    csrfToken: payload.csrf_token || '',
+  })
+}
+
+async function signOut() {
+  try {
+    await fetchJson('/api/logout', { method: 'POST' })
+  } finally {
+    updateSession({ authenticated: false, role: 'viewer', username: null, csrfToken: '' })
+  }
 }
 
 async function fetchJsonWithRetry(path, options = {}, attempts = 15, delayMs = 1500) {
@@ -2891,6 +2965,36 @@ function ReviewControls({ memberId, plan, onSaved }) {
 
   const save = async (event) => {
     event.preventDefault()
+    if (!reason.trim() || reason.trim().length < 3) {
+      setMessage('A reason is required for every review decision.')
+      return
+    }
+    if (['assigned', 'accepted', 'deferred'].includes(status) && !assignee.trim()) {
+      setMessage('An assignee is required for assigned, accepted, and deferred reviews.')
+      return
+    }
+    if (status === 'deferred' && !dueDate) {
+      setMessage('A revisit date is required when a review is deferred.')
+      return
+    }
+    if (['completed', 'outcome_recorded'].includes(status) && !completedDate) {
+      setMessage('A completion date is required for completed and outcome-recorded reviews.')
+      return
+    }
+    if (status === 'outcome_recorded') {
+      if (!outcome) {
+        setMessage('Select an observed outcome before recording an outcome.')
+        return
+      }
+      if (!outcomeDate) {
+        setMessage('Record the date the outcome was observed.')
+        return
+      }
+      if (!outcomeNotes.trim()) {
+        setMessage('Record outcome evidence before saving the outcome.')
+        return
+      }
+    }
     setSaving(true)
     setMessage('')
     try {
@@ -2909,10 +3013,10 @@ function ReviewControls({ memberId, plan, onSaved }) {
   return (
     <form className="intervention-review-controls" onSubmit={save}>
       <label>Status<select value={status} onChange={(event) => setStatus(event.target.value)}>
-        {['pending', 'accepted', 'rejected', 'deferred', 'completed', 'outcome_recorded'].map(value => <option key={value} value={value}>{value.replace('_', ' ')}</option>)}
+        {['pending', 'assigned', 'accepted', 'rejected', 'deferred', 'completed', 'outcome_recorded'].map(value => <option key={value} value={value}>{value.replace('_', ' ')}</option>)}
       </select></label>
       <label>Reviewer reason<textarea required minLength="3" value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Explain the decision" /></label>
-      {['accepted', 'deferred'].includes(status) ? <label>Assigned reviewer<input value={assignee} onChange={(event) => setAssignee(event.target.value)} placeholder="Name or team" /></label> : null}
+      {['assigned', 'accepted', 'deferred'].includes(status) ? <label>Assigned reviewer<input value={assignee} onChange={(event) => setAssignee(event.target.value)} placeholder="Name or team" /></label> : null}
       {status === 'deferred' ? <label>Review again on<input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} /></label> : null}
       {status === 'completed' || status === 'outcome_recorded' ? <label>Completed on<input type="date" value={completedDate} onChange={(event) => setCompletedDate(event.target.value)} /></label> : null}
       {status === 'outcome_recorded' ? <>
@@ -2924,6 +3028,38 @@ function ReviewControls({ memberId, plan, onSaved }) {
       {!plan.available ? <small>Additional clinical evidence is required before accepting this plan.</small> : null}
       {message ? <small role="status">{message}</small> : null}
     </form>
+  )
+}
+
+function ReviewHistoryPanel({ reviewId }) {
+  const [events, setEvents] = useState([])
+  const [loading, setLoading] = useState(false)
+  useEffect(() => {
+    if (!reviewId) return undefined
+    let active = true
+    setLoading(true)
+    fetchJson(`/api/reviews/${encodeURIComponent(reviewId)}/history`)
+      .then((payload) => { if (active) setEvents(payload.events || []) })
+      .catch(() => { if (active) setEvents([]) })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [reviewId])
+
+  if (!reviewId) return null
+  return (
+    <div className="review-history-panel">
+      <h4>Review history</h4>
+      {loading ? <p>Loading review history…</p> : events.length ? (
+        <ul>
+          {events.map((event, index) => (
+            <li key={`${event.at || index}-${event.event}`}>
+              <strong>{event.event}</strong> by {event.actor || 'system'} on {event.at || 'unknown date'}
+              {event.detail && Object.keys(event.detail).length ? <span> · {JSON.stringify(event.detail)}</span> : null}
+            </li>
+          ))}
+        </ul>
+      ) : <p>No review activity recorded yet.</p>}
+    </div>
   )
 }
 
@@ -4077,13 +4213,15 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
                     <summary>{plan.title || 'Insufficient clinical evidence'} · {plan.source_claim_ids.length} claims</summary>
                     <p>Diagnosis codes: {plan.diagnosis_codes.join(', ') || 'Not recorded'}. Latest source claim: {plan.anchor_claim_id}.</p>
                     <dl>
-                      <div><dt>Data source</dt><dd>{plan.source_data_type === 'synthetic_demonstration' ? 'Synthetic demonstration' : 'Recorded claim data'}</dd></div>
+                      <div><dt>Evidence type</dt><dd>{plan.evidence_type || 'Recommendation (not recorded care)'}</dd></div>
+                      <div><dt>Data source</dt><dd>{plan.source_data_type === 'synthetic_demonstration' ? 'Synthetic demonstration data' : 'Recorded claim data'}</dd></div>
                       <div><dt>Recorded context</dt><dd>{Object.keys(plan.evidence_quality?.recorded_context || {}).length ? Object.entries(plan.evidence_quality.recorded_context).map(([key, value]) => `${key.replace('_', ' ')}: ${value}`).join(' · ') : 'No additional clinical context recorded'}</dd></div>
-                      <div><dt>Missing information</dt><dd>{plan.evidence_quality?.missing_information?.join(', ') || 'All reviewed context fields are present'}</dd></div>
+                      <div><dt>Evidence used</dt><dd>{plan.evidence_used && plan.evidence_used.length ? plan.evidence_used.map((item) => `${item.input || item.key || 'input'}=${item.value ?? 'missing'}`).join(' · ') : 'No specific evidence was recorded in the recommendation'}</dd></div>
+                      <div><dt>Missing information</dt><dd>{plan.missing_evidence && plan.missing_evidence.length ? plan.missing_evidence.join(', ') : (plan.evidence_quality?.missing_information?.join(', ') || 'All reviewed context fields are present')}</dd></div>
                       <div><dt>History coverage</dt><dd>{plan.evidence_quality?.history_start || 'Not recorded'} to {plan.evidence_quality?.history_end || 'Not recorded'} · {plan.evidence_quality?.history_claim_count || 0} claims</dd></div>
-                      <div><dt>Comparison strength</dt><dd>{plan.evidence_quality?.comparison_strength || 'Not assessed'}</dd></div>
-                      <div><dt>Clinical effect</dt><dd>{plan.evidence_quality?.causal_effectiveness || 'Not established'}</dd></div>
-                      <div><dt>Financial status</dt><dd>{plan.evidence_quality?.financial_evidence || 'No verified savings'}</dd></div>
+                      <div><dt>Comparison strength</dt><dd>{plan.evidence_quality?.comparison_strength || 'No comparable cohort available'}</dd></div>
+                      <div><dt>Clinical effect</dt><dd>{plan.evidence_quality?.causal_effectiveness || 'Not established from claims alone'}</dd></div>
+                      <div><dt>Financial status</dt><dd>{plan.savings_validation?.verification_status ? `${plan.savings_validation.verification_status} (${plan.savings_validation.amounts?.verified_savings?.evidence_label || 'No verified savings'})` : (plan.evidence_quality?.financial_evidence || 'No verified savings')}</dd></div>
                     </dl>
                     <InterventionProposal plan={plan} />
                     <ReviewControls memberId={member.memberId} plan={plan} onSaved={(review) => {
@@ -4092,6 +4230,7 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
                         plans: previous.plans.map((item) => item.review_id === plan.review_id ? { ...item, review } : item),
                       } : previous)
                     }} />
+                    <ReviewHistoryPanel reviewId={plan.review_id} />
                   </details>
                 ))}
               </>

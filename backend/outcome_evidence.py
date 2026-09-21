@@ -1,11 +1,16 @@
-"""Data-driven linking of preventive visits to later recorded outcomes."""
-
+"""Data-driven linking of preventive visits to later outcomes."""
 from datetime import date
 
-try:
-    from .intervention_plans import build_intervention_plan
-except ImportError:
-    from intervention_plans import build_intervention_plan
+from .evidence import (
+    entry,
+    RECORDED_CLAIM_FACT,
+    SYNTHETIC_DEMONSTRATION,
+    RECOMMENDATION,
+    REVIEWER_OBSERVATION,
+    MODEL_ESTIMATE,
+    VERIFIED_SAVINGS,
+)
+from .intervention_plans import build_intervention_plan
 
 
 POSITIVE_OUTCOME_TERMS = (
@@ -15,7 +20,6 @@ POSITIVE_OUTCOME_TERMS = (
     "positive",
     "documented outcome assessment",
 )
-
 
 def _text(value):
     return str(value or "").strip()
@@ -196,8 +200,7 @@ def build_outcome_evidence(database, claim):
     ] if positive else []
     # An explicit positive-outcome row can reuse a preventive CPT code, but it
     # must not serve as both the intervention and its own outcome evidence.
-    # A claim can be both the preventive intervention and the recorded outcome
-    # evidence. Keep that claim as the source instead of searching backward and
+    # A claim can be both the preventive intervention and the recorded outcome evidence. Keep that claim as the source instead of searching backward and
     # incorrectly presenting an older preventive claim as the intervention.
     preventive_source = linked_sequence_reference or (claim if _preventive_visit(claim) else None)
     if positive and preventive_source is None and episode_id:
@@ -207,7 +210,6 @@ def build_outcome_evidence(database, claim):
             if candidate.get("memberId") == claim.get("memberId")
             and candidate.get("episodeId") == episode_id
             and _diagnosis_family(candidate) == family
-            and _text(candidate.get("dos")) < source_date
             and _preventive_visit(candidate)
         ]
         if prior_preventive_visits:
@@ -231,39 +233,20 @@ def build_outcome_evidence(database, claim):
             f"and an improved outcome with no related readmission recorded for {no_readmission_days} days. "
             f"Claim {claim.get('claimId')} has the same diagnosis family ({family}) and records that the "
             f"preventive intervention was not performed. "
-        )
-        if claim_is_later_hospitalization:
-            conclusion += (
-                f"This claim is the linked later hospitalization dated {claim.get('dos')}"
-                + (
-                    f", after prediction claim {linked_prediction_claim_id} in the same member episode"
-                    if linked_prediction_claim_id
-                    else ""
-                )
-                + ". Its recorded billed charge is the potentially avoidable amount."
-            )
-        elif predicted_readmission:
-            conclusion += (
-                f"The same patient later had hospitalization claim {predicted_readmission.get('claimId')} "
-                f"{predicted_gap_days} days later. The recommendation is to provide "
-                f"{historical_reference.get('cptDescription')} earlier. The potentially avoidable amount is "
-                f"the hospitalization's recorded billed charge, not an allowed or paid amount."
-            )
-        else:
-            conclusion += f"The recommendation is to provide {historical_reference.get('cptDescription')} earlier."
-    elif positive and _preventive_visit(claim) and source.get("claimId") == claim.get("claimId"):
-        follow_up_days = fields.get("Episode_Duration_Days")
-        conclusion = (
-            f"Preventive claim {claim.get('claimId')} dated {claim.get('dos')} records "
-            f"Treatment outcome = {treatment or 'Not recorded'} and "
-            f"Follow-up completed = {follow_up or 'Not recorded'}. "
+            f"Claim {claim.get('claimId')} is the linked later hospitalization dated {claim.get('dos')}"
             + (
-                f"No later related claim or readmission is recorded for this diagnosis family during the "
-                f"{follow_up_days}-day follow-up period. "
-                if follow_up_days and not later_related
+                f", after prediction claim {linked_prediction_claim_id} in the same member episode"
+                if linked_prediction_claim_id
                 else ""
             )
-            + "This historical pattern supports recommending the preventive intervention immediately after the first episode."
+            + ". Its recorded billed charge is the potentially avoidable amount."
+        )
+    elif predicted_readmission:
+        conclusion += (
+            f"The same patient later had hospitalization claim {predicted_readmission.get('claimId')} "
+            f"{predicted_gap_days} days later. The recommendation is to provide "
+            f"{historical_reference.get('cptDescription')} earlier. The potentially avoidable amount is "
+            f"the hospitalization's recorded billed charge, not an allowed or paid amount."
         )
     elif positive and preventive_source:
         conclusion = (

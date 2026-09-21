@@ -45,7 +45,14 @@ INDEX_ROOT = Path(
         str(Path(__file__).resolve().parent / ".rag_index"),
     )
 )
-_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
+try:
+    from .bounded_cache import BoundedCache
+except ImportError:  # pragma: no cover - script execution
+    from bounded_cache import BoundedCache
+
+_CACHE: dict[tuple[str, str, str], dict[str, Any]] = BoundedCache(
+    int(os.getenv("RAG_CACHE_MAX_ENTRIES", "8"))
+)
 _LOCK = RLock()
 _MEMBER_ID_PATTERN = re.compile(r"\b(?:MBR|PATMBR)\d+\b", re.IGNORECASE)
 _PHI_FIELD_PATTERN = re.compile(

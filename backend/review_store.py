@@ -1,4 +1,4 @@
-"""Transactional review decisions and audit events for a single deployment."""
+from __future__ import annotations
 import json
 import os
 import sqlite3
@@ -53,6 +53,22 @@ def read_reviews(path, ids):
     with connection(path) as db:
         rows = db.execute(f"SELECT review_id,payload FROM reviews WHERE review_id IN ({','.join('?' for _ in ids)})", ids)
         return {row["review_id"]: json.loads(row["payload"]) for row in rows}
+
+
+def read_reviews_for_member(path, review_ids):
+    reviews = read_reviews(path, review_ids)
+    history = {review_id: read_review_history(path, review_id) for review_id in review_ids}
+    return reviews, history
+
+
+def read_review_history(path, review_id):
+    with connection(path) as db:
+        rows = db.execute(
+            "SELECT at,actor,event,detail FROM audit WHERE resource=? ORDER BY id ASC",
+            (review_id,),
+        ).fetchall()
+    return [{"at": row["at"], "actor": row["actor"], "event": row["event"],
+             "detail": json.loads(row["detail"] or "{}")} for row in rows]
 
 
 TRANSITIONS = {
@@ -115,8 +131,8 @@ def save_review(path, review_id, data, actor, plan):
                 raise ValueError("The outcome cannot precede intervention completion.")
         # A reviewer observation is not causal proof or a verified savings claim.
         updated.update(version=current["version"] + 1, updated_by=actor, updated_at=now(),
-                       financial_status="unverified", verified_savings=None,
-                       evidence_type="reviewer_reported", source_data_type=plan.get("source_data_type"))
+               financial_status="unverified", verified_savings=None,
+               evidence_type=REVIEWER_OBSERVATION, source_data_type=plan.get("source_data_type"))
         db.execute("INSERT INTO reviews VALUES(?,?,?) ON CONFLICT(review_id) DO UPDATE SET version=excluded.version,payload=excluded.payload",
                    (review_id, updated["version"], json.dumps(updated)))
         audit(db, actor, "review_updated", review_id, {"before": current, "after": updated})

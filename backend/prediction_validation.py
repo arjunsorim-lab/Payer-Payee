@@ -7,7 +7,14 @@ from collections import Counter, defaultdict
 from statistics import median
 from typing import Any
 
-_VALIDATION_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
+try:
+    from .bounded_cache import BoundedCache, DEFAULT_MAX_SIZE
+except ImportError:  # pragma: no cover - script execution
+    from bounded_cache import BoundedCache, DEFAULT_MAX_SIZE
+
+_VALIDATION_CACHE: dict[tuple[str, str, str], dict[str, Any]] = BoundedCache(
+    int(DEFAULT_MAX_SIZE)
+)
 
 
 def clear_validation_cache():

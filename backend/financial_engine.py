@@ -8,6 +8,7 @@ never calculate or modify them.
 from __future__ import annotations
 
 import json
+import os
 from datetime import date
 from hashlib import sha256
 from statistics import median
@@ -16,6 +17,7 @@ from threading import RLock
 import numpy as np
 
 try:
+    from .bounded_cache import BoundedCache, DEFAULT_MAX_SIZE
     from .claim_patterns import (
         historical_patterns,
         select_peers,
@@ -36,6 +38,7 @@ try:
         SAVINGS_VERSION,
     )
 except ImportError:
+    from bounded_cache import BoundedCache, DEFAULT_MAX_SIZE
     from claim_patterns import (
         historical_patterns,
         select_peers,
@@ -57,7 +60,8 @@ except ImportError:
     )
 
 
-_RESULT_CACHE = {}
+# Bounded so a large workbook or many claims cannot grow memory without limit.
+_RESULT_CACHE = BoundedCache(int(os.getenv("FINANCIAL_CACHE_MAX_ENTRIES", str(DEFAULT_MAX_SIZE))))
 _LOCK = RLock()
 MIN_COMPARATOR_EPISODES = 5
 PATIENT_BALANCE_DAYS_THRESHOLD = 30
@@ -376,6 +380,8 @@ def _prediction(database, claim):
     sample_size = len(peers)
     confidence = min(0.95, round(0.45 + min(sample_size, 100) / 200, 4))
     return {
+        "evidence_type": "model_estimate",
+        "evidence_label": "Model estimate",
         "predicted_allowed": predicted_allowed,
         "predicted_paid": predicted_paid,
         "predicted_patient_responsibility": predicted_patient,

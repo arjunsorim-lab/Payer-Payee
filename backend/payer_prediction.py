@@ -11,13 +11,19 @@ from statistics import median
 
 import numpy as np
 
+try:
+    from .bounded_cache import BoundedCache, DEFAULT_MAX_SIZE
+except ImportError:  # pragma: no cover - script execution
+    from bounded_cache import BoundedCache, DEFAULT_MAX_SIZE
+
 
 PAYER_COHORT_EPISODE_DAYS = int(os.getenv("PAYER_COHORT_EPISODE_DAYS", "90"))
 PAYER_SCENARIO1_UNIT_TOLERANCE = float(os.getenv("PAYER_SCENARIO1_UNIT_TOLERANCE", "1"))
-_COHORT_EPISODE_CACHE = {}
-_TARGET_EPISODE_INDEX_CACHE = {}
-_MEMBER_PAYER_SUMMARY_CACHE = {}
-_PORTFOLIO_PAYER_SUMMARY_CACHE = {}
+# Bounded so a large member population cannot grow these caches without limit.
+_COHORT_EPISODE_CACHE = BoundedCache(int(os.getenv("PAYER_COHORT_CACHE_MAX_ENTRIES", str(DEFAULT_MAX_SIZE))))
+_TARGET_EPISODE_INDEX_CACHE = BoundedCache(64)
+_MEMBER_PAYER_SUMMARY_CACHE = BoundedCache(int(os.getenv("PAYER_MEMBER_CACHE_MAX_ENTRIES", "128")))
+_PORTFOLIO_PAYER_SUMMARY_CACHE = BoundedCache(16)
 
 
 def _field(claim, name, canonical=None, default=""):

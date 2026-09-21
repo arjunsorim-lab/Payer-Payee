@@ -17,6 +17,11 @@ from threading import RLock
 
 import numpy as np
 
+try:
+    from .bounded_cache import BoundedCache, DEFAULT_MAX_SIZE
+except ImportError:  # pragma: no cover - script execution
+    from bounded_cache import BoundedCache, DEFAULT_MAX_SIZE
+
 
 PRIOR_STRENGTH = float(
     os.getenv(
@@ -57,7 +62,7 @@ FIELD_ALIASES = {
     "paid": ("Paid_Amount", "PaidAmount"),
 }
 
-_CACHE = {}
+_CACHE = BoundedCache(int(os.getenv("AVOIDABLE_CACHE_MAX_ENTRIES", str(DEFAULT_MAX_SIZE))))
 _LOCK = RLock()
 
 

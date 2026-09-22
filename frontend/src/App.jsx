@@ -633,23 +633,15 @@ function App() {
     if (!sessionReady || (session.mode === 'secure' && !session.authenticated)) return undefined
     let active = true
     setDataLoading(true)
-    const claimsPageSize = 2000
+    const claimsPageSize = 250
     const claimsQuery = `limit=${claimsPageSize}&includeFinancial=false&compact=true&selectableOnly=true`
 
-    // Bound in-flight page requests while retaining the complete member directory.
+    // Keep the first render fast. Detail views and searches fetch from the API
+    // instead of loading every claim before the app becomes usable.
     fetchJsonWithRetry(`/api/claims?${claimsQuery}`)
-      .then(async (payload) => {
+      .then((payload) => {
         if (!active) return
         const items = [...(payload.items || [])]
-        const pageCount = Math.ceil(Number(payload.total || 0) / claimsPageSize)
-        for (let start = 2; start <= pageCount && active; start += 4) {
-          const pages = await Promise.all(Array.from(
-            { length: Math.min(4, pageCount - start + 1) },
-            (_, offset) => fetchJson(`/api/claims?page=${start + offset}&${claimsQuery}`),
-          ))
-          items.push(...pages.flatMap(page => page.items || []))
-        }
-        if (!active) return
         const source = payload.source || null
         setClaimsData(items)
         setWorkbookSource(source)

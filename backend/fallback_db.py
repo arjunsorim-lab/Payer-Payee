@@ -76,8 +76,15 @@ class FallbackCollection:
     def __init__(self, rows):
         self.rows = rows
 
-    def find(self, query=None):
-        return FallbackCursor(row for row in self.rows if _matches(row, query or {}))
+    def find(self, query=None, projection=None):
+        rows = (row for row in self.rows if _matches(row, query or {}))
+        if projection:
+            excluded = {key for key, value in projection.items() if value == 0}
+            rows = (
+                {key: value for key, value in row.items() if key not in excluded}
+                for row in rows
+            )
+        return FallbackCursor(rows)
 
     def find_one(self, query=None):
         return next((deepcopy(row) for row in self.rows if _matches(row, query or {})), None)

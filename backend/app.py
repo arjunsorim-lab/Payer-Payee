@@ -191,10 +191,10 @@ def prediction_anchor_claim_id(database, claim_number):
     return claim_number
 
 
-# Render's first request has a strict upstream response window. Load the
-# configured workbook during process startup so the port is exposed only after
-# the in-memory repository is ready. Tests and special tooling can opt out.
-if os.getenv("PRELOAD_WORKBOOK", "true").strip().lower() not in {"0", "false", "no", "off"}:
+# Render free instances need to answer their first request quickly. Keep
+# workbook loading lazy by default; deployments that prefer startup warming can
+# still opt in with PRELOAD_WORKBOOK=true.
+if os.getenv("PRELOAD_WORKBOOK", "false").strip().lower() in {"1", "true", "yes", "on"}:
     configured_workbook_database()
 
 
@@ -367,6 +367,39 @@ def financial_summary(rows):
         "totalAdjustment": total_adjustment,
         "deniedClaims": denied_claims,
     }
+
+
+def mongo_financial_summary(collection, query):
+    pipeline = [
+        {"$match": query},
+        {"$group": {
+            "_id": None,
+            "totalClaims": {"$sum": 1},
+            "totalCharges": {"$sum": {"$ifNull": ["$totalCharge", 0]}},
+            "totalAllowed": {"$sum": {"$ifNull": ["$allowed", 0]}},
+            "totalPaid": {"$sum": {"$ifNull": ["$paid", 0]}},
+            "totalPatientResp": {"$sum": {"$ifNull": ["$patientResp", 0]}},
+            "totalAdjustment": {"$sum": {"$ifNull": ["$adjustment", 0]}},
+            "deniedClaims": {"$sum": {"$cond": [{"$eq": ["$status", "Denied"]}, 1, 0]}},
+        }},
+    ]
+    result = next(iter(collection.aggregate(pipeline, maxTimeMS=8000)), None)
+    if not result:
+        return financial_summary([])
+    return {
+        "totalClaims": int(result.get("totalClaims") or 0),
+        "totalCharges": round(float(result.get("totalCharges") or 0), 2),
+        "totalAllowed": round(float(result.get("totalAllowed") or 0), 2),
+        "totalPaid": round(float(result.get("totalPaid") or 0), 2),
+        "totalPatientResp": round(float(result.get("totalPatientResp") or 0), 2),
+        "totalAdjustment": round(float(result.get("totalAdjustment") or 0), 2),
+        "deniedClaims": int(result.get("deniedClaims") or 0),
+    }
+
+
+def distinct_limited(collection, field, limit=100):
+    values = collection.distinct(field)
+    return sorted(value for value in values if value)[:limit]
 
 
 def risk_level(score):
@@ -697,15 +730,34 @@ def get_member_claims(member_id):
 def get_dashboard():
     db = connect_mongo()
     query = build_claim_query(request.args)
-    rows = list(db.claims.find(query).sort([("dos", -1), ("claimId", 1)]))
+    page, limit, _ = page_options(request.args, default_limit=10, max_limit=50)
+    recent_limit = min(limit, 50)
+    projection = {
+        "raw": 0,
+        "workbookFields": 0,
+        "outcomeEvidence": 0,
+        "supportedMoneySummary": 0,
+    }
+    recent_claims = list(
+        db.claims.find(query, projection)
+        .sort([("dos", -1), ("claimId", 1)])
+        .limit(recent_limit)
+    )
+    if hasattr(db.claims, "aggregate"):
+        summary = mongo_financial_summary(db.claims, query)
+    else:
+        rows = list(db.claims.find(query))
+        summary = financial_summary(rows)
     return json_response({
-        "summary": financial_summary(rows),
-        "recentClaims": rows[:10],
+        "summary": summary,
+        "recentClaims": recent_claims,
         "filters": {
-            "payers": sorted(value for value in db.claims.distinct("payer") if value),
-            "plans": sorted(value for value in db.claims.distinct("filingIndicator") if value),
-            "providerGroups": sorted(value for value in db.claims.distinct("billingProvider") if value),
+            "payers": distinct_limited(db.claims, "payer"),
+            "plans": distinct_limited(db.claims, "filingIndicator"),
+            "providerGroups": distinct_limited(db.claims, "billingProvider"),
         },
+        "page": page,
+        "limit": recent_limit,
     })
 
 
@@ -713,7 +765,18 @@ def get_dashboard():
 def get_prediction_dashboard():
     db = connect_mongo()
     query = build_claim_query(request.args)
-    claims = list(db.claims.find(query).sort([("dos", -1), ("claimId", 1)]))
+    _, limit, _ = page_options(request.args, default_limit=10, max_limit=50)
+    projection = {
+        "raw": 0,
+        "workbookFields": 0,
+        "outcomeEvidence": 0,
+        "supportedMoneySummary": 0,
+    }
+    claims = list(
+        db.claims.find(query, projection)
+        .sort([("totalCharge", -1), ("dos", -1), ("claimId", 1)])
+        .limit(limit)
+    )
     predictions_by_claim = {
         doc["claimId"]: stored_or_basic_prediction(doc, {})
         for doc in db.claim_predictions.find({"claimId": {"$in": [claim["claimId"] for claim in claims]}})
@@ -738,7 +801,7 @@ def get_prediction_dashboard():
             [{"claim": claim, "prediction": predictions[index]} for index, claim in enumerate(claims)],
             key=lambda item: item["prediction"]["risks"]["overall"]["score"],
             reverse=True,
-        )[: int(request.args.get("limit", 10) or 10)],
+        )[:limit],
     })
 
 
@@ -1114,14 +1177,6 @@ def get_provider_case_prediction(claim_number):
 
 @app.get("/api/ai/health")
 def get_ai_health():
-    database = configured_workbook_database()
-    client = OllamaClient()
-    ollama = client.health()
-    rag = index_status(database, client) if database else {"ready": False}
-    public_rag = {
-        key: value for key, value in rag.items()
-        if key not in {"path", "index_path", "index_location"}
-    }
     try:
         from .workbook_enrichment import (
             CALCULATION_VERSION,
@@ -1129,13 +1184,30 @@ def get_ai_health():
         )
     except ImportError:
         from workbook_enrichment import CALCULATION_VERSION, PREDICTION_VERSION
+
+    deep = query_flag(request.args, "deep", default=False)
+    database_available = False
+    if deep:
+        database = configured_workbook_database()
+        database_available = bool(database)
+        client = OllamaClient()
+        ollama = client.health()
+        rag = index_status(database, client) if database else {"ready": False}
+        public_rag = {
+            key: value for key, value in rag.items()
+            if key not in {"path", "index_path", "index_location"}
+        }
+    else:
+        ollama = {"checked": False, "available": None}
+        public_rag = {"checked": False, "ready": None}
     return json_response({
         "ollama": ollama,
         "rag": public_rag,
         "prediction": {
             "model_version": PREDICTION_VERSION,
             "calculation_version": CALCULATION_VERSION,
-            "available": bool(database),
+            "available": database_available if deep else None,
+            "checked": deep,
         },
     })
 

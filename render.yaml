@@ -5,7 +5,7 @@ services:
     plan: free
     autoDeploy: true
     buildCommand: pip install -r backend/requirements.txt && npm ci && npm run build
-    startCommand: gunicorn backend.app:app --preload --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
+    startCommand: gunicorn backend.app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.8
@@ -14,13 +14,13 @@ services:
       - key: CORS_ORIGIN
         value: https://payer-payee-1.onrender.com,https://payer-payee.onrender.com
       - key: MONGODB_TIMEOUT_MS
-        value: 5000
+        value: 1500
       - key: MONGODB_RETRY_SECONDS
         value: 60
       - key: SAVINGS_WORKBOOK_PATH
         value: data/claims-demo.xlsx
       - key: PRELOAD_WORKBOOK
-        value: "true"
+        value: "false"
       - key: REQUIRE_AUTH
         value: "true"
       - key: REVIEW_SESSION_SECRET

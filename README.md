@@ -1,11 +1,88 @@
-# PayerPayee
+# PayerPayee — Explainable Claims Review R&D Prototype
 
-PayerPayee is a claims-financial analytics application for exploring members, claims, provider revenue forecasts, and rule-based payer savings opportunities. The browser application is built with React and Vite; a Flask API loads the enriched claims workbook, runs deterministic Python calculations, and optionally uses local retrieval and Ollama for evidence-grounded explanations.
+PayerPayee is a research and development prototype for testing how health-claim records can support transparent financial and care-review workflows. It lets a reader move from a claim or member to the source records, see how a comparison was selected, inspect the arithmetic, and record a human review decision.
 
-> This project is claims-utilisation and financial decision support. It is not clinical advice, does not determine medical necessity, and should not be used to infer that care was unnecessary or preventable.
+The application combines a React/Vite interface with a Flask API and an enriched demonstration workbook. Its primary calculations are deterministic and reproducible. Optional language-model features explain an existing result; they do not create the canonical financial amounts.
+
+> **Research boundary:** PayerPayee is an explainable claims-review prototype. It is not a clinical decision system, does not determine medical necessity, and does not prove that an intervention caused an outcome. A modeled opportunity is not verified savings.
+
+## Read this first
+
+The application intentionally shows several kinds of information together. The evidence badge beside a value tells the reader how to interpret it:
+
+| What the reader sees | What it means |
+| --- | --- |
+| Recorded claim fact | A value present in the configured source workbook |
+| Synthetic demonstration | A generated example used to demonstrate a sequence; it is not recorded care |
+| Recommendation | A proposed item for human review; it is not an order or recorded service |
+| Reviewer observation | A statement entered by a reviewer; it has not been independently verified |
+| Model estimate | A deterministic calculation based on the available comparison evidence |
+| Verified savings | A restricted label requiring supported post-intervention claim evidence and a recorded outcome |
+
+When reading any result, use this order:
+
+1. Confirm the selected member, claim, diagnosis, dates, and source label.
+2. Check whether the displayed sequence is recorded or synthetic.
+3. Review the evidence used, missing fields, comparison cohort, and follow-up coverage.
+4. Inspect the formula and source amounts.
+5. Treat the result as a review opportunity until independent evidence satisfies the verification rules.
+
+## Current research questions
+
+This prototype explores whether a claims-review tool can:
+
+- explain why a claim, peer group, or scenario was selected;
+- keep recorded facts separate from synthetic examples and recommendations;
+- create member-specific suggestions only when the required evidence is available;
+- show uncertainty, missing data, observation coverage, and comparison strength;
+- distinguish provider revenue exposure from payer savings opportunities; and
+- support an auditable accept, reject, defer, assign, complete, and outcome-recording workflow.
+
+It does **not** establish clinical effectiveness, causal impact, or production readiness from claims correlation alone.
+
+## Application tour
+
+| Area | What it is for | How to interpret it |
+| --- | --- | --- |
+| Home | High-level claim, payment, denial, and status totals | Descriptive summary of the loaded source |
+| Patient 360 | Search members and inspect their available encounters | The encounter table contains selectable recorded claims; linked demonstration sequence rows load as evidence where applicable |
+| Predictions | Browse claim-anchored provider cases and open a detailed explanation | Forecasts and opportunities are estimates, with confidence and supporting records shown separately |
+| Patient Comparison | Compare supported member or episode patterns | A billed difference is a review flag, not automatically a saving or quality improvement |
+| Claims | Search claims and inspect adjudication and source fields | Use the evidence badge and source metadata to determine provenance |
+| Member intervention review | Inspect member-specific care-review proposals and missing evidence | Recommendations are withheld when required evidence is absent |
+| Review workflow | Accept, reject, defer, assign, complete, and record an outcome | Human decisions are versioned and written to the audit history |
+| Exports | Download labeled review or evidence results | Evidence type travels with exported values so synthetic and estimated data remain identifiable |
+
+## Demonstration dataset and scenarios
+
+The default research dataset is `data/claims-demo.xlsx`. It contains selectable base claims plus linked demonstration rows that let the interface show a complete sequence without presenting those generated rows as real care.
+
+A demonstration sequence can contain:
+
+1. an initial claim or symptomatic visit;
+2. a related worsening visit within the scenario-specific interval;
+3. a separately labeled intervention or follow-up visit; and
+4. a documented follow-up window, such as 200 days without a recorded related readmission.
+
+The absence of a later claim means only that no later related claim was found in the available observation window. It does not establish continuous clinical observation or prove the intervention was effective.
+
+The bundled workbook varies the intervention and timing by scenario rather than applying one seven-day preventive visit to every member:
+
+| Scenario family | Demonstration intervention | Example timing |
+| --- | --- | --- |
+| Urinary or antibiotic review | Urine culture and susceptibility testing | 2 days after the worsening event |
+| Fever or respiratory review | Vaccine eligibility and immunization follow-up | 14 days |
+| Chronic metabolic or cardiac review | Metabolic laboratory, blood-pressure, or cardiac monitoring | 30 days |
+| Rehabilitation or specialist review | Functional reassessment, medication-safety, or specialist follow-up | 21 days |
+
+These are demonstration profiles for research and interface evaluation. Patient-specific recommendation logic still checks the member's diagnosis, symptoms, medications, allergies, laboratory results, prior procedures, treatment history, previous outcomes, and existing tests. If the required inputs are missing, the application reports insufficient evidence instead of inventing a recommendation.
 
 ## Contents
 
+- [Read this first](#read-this-first)
+- [Current research questions](#current-research-questions)
+- [Application tour](#application-tour)
+- [Demonstration dataset and scenarios](#demonstration-dataset-and-scenarios)
 - [What the application does](#what-the-application-does)
 - [Prediction perspectives](#prediction-perspectives)
 - [Architecture](#architecture)
@@ -23,6 +100,8 @@ PayerPayee is a claims-financial analytics application for exploring members, cl
 - [Evidence-quality reporting](#evidence-quality-reporting)
 - [Security and scale readiness](#security-and-scale-readiness)
 - [Testing and quality checks](#testing-and-quality-checks)
+- [R&D evaluation workflow](#rd-evaluation-workflow)
+- [Known limitations](#known-limitations)
 - [Build and deployment](#build-and-deployment)
 - [Optional local AI and RAG](#optional-local-ai-and-rag)
 - [Utility projects](#utility-projects)
@@ -278,10 +357,12 @@ intervention review. The store (`backend/review_store.py`) enforces:
 - Only valid status transitions (see `TRANSITIONS`).
 - Version checks that reject stale edits with `409`.
 
-Every change is persisted and appended to the audit table, which is the durable
-copy independent of any deployment disk reset. The Member 360 review panel shows
-the decision form, the review history (`GET /api/reviews/{review_id}/history`)
-and the audit trail (`GET /api/review-audit`, administrators).
+Every change is persisted to the configured review database and appended to its
+audit table. The Member 360 review panel shows the decision form, the review
+history (`GET /api/reviews/{review_id}/history`) and the audit trail
+(`GET /api/review-audit`, administrators). The default SQLite file is suitable
+for local R&D. A deployed environment must use persistent storage or a durable
+database if review history must survive service replacement or disk reset.
 
 ## Evidence-quality reporting
 
@@ -547,6 +628,51 @@ curl -s 'http://127.0.0.1:4000/api/claims?page=1&limit=5'
 The scale test builds 100,000 claims, issues concurrent requests and reports
 latency percentiles, peak memory, cache sizes and initial page-load time; it
 fails if the configured budgets are exceeded.
+
+## R&D evaluation workflow
+
+Use the following process when evaluating a scenario or demonstrating the
+prototype:
+
+1. Record the workbook hash, application commit, calculation version, and test
+   date.
+2. Open the source claim and confirm the member, diagnosis family, service date,
+   procedure, billed amount, and paid amount.
+3. Identify which rows are recorded facts and which are synthetic demonstration
+   rows.
+4. Open the prediction and inspect the selected episode, peer hierarchy,
+   comparison cohort, missing evidence, confidence, and uncertainty.
+5. Recalculate the displayed formula from the listed source amounts.
+6. Review the observation window and the exact number of follow-up days. Do not
+   translate “no related claim found” into “the patient had no problem.”
+7. Record a reviewer decision, reason, assignee, and required follow-up fields.
+8. Call a saving verified only when the verification gate identifies qualifying
+   post-intervention claim evidence and a supported outcome.
+
+For a reproducible report, retain the input workbook, workbook hash, Git commit,
+API response, exported evidence, reviewer history, and test output. Do not place
+real credentials or protected health information in the repository.
+
+## Known limitations
+
+- The bundled workbook contains synthetic demonstration sequences. It is useful
+  for workflow and explainability testing, not for measuring real-world clinical
+  effectiveness.
+- Claims data omit clinical context that may exist in notes, medication systems,
+  laboratory feeds, referral records, or external providers. Missing information
+  is not evidence that an event did not occur.
+- Peer comparisons may be affected by coding practices, benefit design, network,
+  geography, severity, enrollment, and incomplete history.
+- The deterministic engines identify associations and financial review
+  opportunities. They do not make causal or medical-necessity determinations.
+- A 200-day no-readmission field describes the available follow-up interval; it
+  does not by itself prove that an intervention caused the absence of a claim.
+- Optional language-model explanations can be unavailable or imperfect. The
+  canonical result remains the Python calculation and its cited evidence.
+- The default local SQLite review store and single-worker Render configuration
+  are R&D defaults. Production use requires durable storage, operational
+  monitoring, secret rotation, backup and recovery, privacy review, and formal
+  clinical and statistical validation.
 
 ## Build and deployment
 

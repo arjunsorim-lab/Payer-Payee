@@ -44,10 +44,15 @@ def _preventive_visit(claim):
     fields = claim.get("workbookFields", {})
     description = f"{claim.get('cptDescription', '')} {fields.get('Procedure_Description', '')}".lower()
     cpt = _text(claim.get("cptCode"))
+    reason = _text(fields.get("Reason_Code")).upper()
     return (
         "preventive" in description
         or cpt in {str(code) for code in range(99381, 99398)}
         or (_text(fields.get("Intervention_Performed")).upper() == "Y" and "visit" in description)
+        or (
+            _text(fields.get("Intervention_Performed")).upper() == "Y"
+            and reason == "SYNTHETIC_SEQUENCE_PREVENTIVE"
+        )
     )
 
 

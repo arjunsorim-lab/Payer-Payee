@@ -3199,7 +3199,11 @@ function ClaimOutcomeEvidencePanel({ facts }) {
     ['Outcome claim flag', evidence.outcome_claim_flag],
     ['Reference claim flag', evidence.reference_claim_flag],
     ['Related claim flag', evidence.related_claim_flag],
-    ['Later related claims after outcome', evidence.no_later_related_claims === true ? 'None recorded' : evidence.later_related_claim_ids?.join(', ') || 'Not evaluated'],
+    ['Later related claims after outcome', evidence.no_later_related_claims === true
+      ? (evidence.historical_no_readmission_days != null
+        ? `None recorded during ${evidence.historical_no_readmission_days}-day follow-up`
+        : 'None recorded')
+      : evidence.later_related_claim_ids?.join(', ') || 'Not evaluated'],
     ...(evidence.historical_no_readmission_days != null && evidence.no_later_related_claims === true
       ? [['No related claims/readmissions during follow-up', `${evidence.historical_no_readmission_days} days`]]
       : []),

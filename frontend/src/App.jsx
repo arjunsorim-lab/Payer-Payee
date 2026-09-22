@@ -313,8 +313,14 @@ function routeFromHash(hash, claimsData) {
   const params = new URLSearchParams(hash.replace(/^#/, ''))
   const requestedView = params.get('view') || 'home'
   const activeView = VALID_VIEWS.has(requestedView) ? requestedView : 'home'
-  const selectedClaim = activeView === 'claims' ? findClaimByNumber(claimsData, params.get('claim')) : null
-  const selectedPredictionClaim = activeView === 'predictions' ? findClaimByNumber(claimsData, params.get('prediction')) : null
+  const claimParam = params.get('claim')
+  const predictionParam = params.get('prediction')
+  const selectedClaim = activeView === 'claims' && claimParam
+    ? findClaimByNumber(claimsData, claimParam) || { claimId: claimParam, number: claimParam }
+    : null
+  const selectedPredictionClaim = activeView === 'predictions' && predictionParam
+    ? findClaimByNumber(claimsData, predictionParam) || { claimId: predictionParam, number: predictionParam }
+    : null
   const selectedMemberId = activeView === 'member' ? params.get('member') : null
 
   return {
@@ -1224,7 +1230,10 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
                 <PredictionScenarioDirectory
                   scenarios={displayedScenarios}
                   totalCount={filteredScenarios.length}
-                  onOpenScenario={(scenario) => onOpenPrediction(claimsData.find((claim) => claim.claimId === scenario.claim_id))}
+                  onOpenScenario={(scenario) => onOpenPrediction(
+                    claimsData.find((claim) => claim.claimId === scenario.claim_id || claim.number === scenario.claim_id)
+                    || { claimId: scenario.claim_id, number: scenario.claim_id },
+                  )}
                   emptyMessage="No patient episodes match the current scenario filters."
                   footer={(
                     <ClaimsTableFooter
@@ -1244,7 +1253,7 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
                 onClose={() => setPayerModalOpen(false)}
                 onOpenProviderForecast={(claimId) => {
                   const targetClaim = claimsData.find((claim) => claim.claimId === claimId || claim.number === claimId)
-                  if (targetClaim) onOpenPrediction(targetClaim)
+                  onOpenPrediction(targetClaim || { claimId, number: claimId })
                 }}
               />
             ) : null}
@@ -2001,9 +2010,9 @@ function PlainLanguageClaimNarrative({ scenario, facts, summary, snapshot, histo
   return (
     <section className="plain-claim-narrative" aria-labelledby="plain-claim-narrative-title">
       <header>
-        <span>Start here</span>
-        <h2 id="plain-claim-narrative-title">What this prediction means: A simple story about this visit</h2>
-        <p><strong>Presenting?</strong> Start on the Predictions page, open <strong>claim {facts.claim_id}</strong>, and read this story top to bottom. The Outcome evidence panel directly below shows the recorded claims behind every number; further down, the Claim-anchored billed comparison lists the claim IDs and billed amounts of every line it uses. Each other amount below is a separate model estimate and is labeled as such — do not add them together.</p>
+        <span>Quick explanation</span>
+        <h2 id="plain-claim-narrative-title">What this claim prediction is saying</h2>
+        <p>This section explains claim <strong>{facts.claim_id}</strong> in plain language: what happened, what the app is estimating, and which recorded claims support the recommendation. The outcome box below shows the claim evidence, including any no-readmission follow-up period. Model estimates are separate from recorded facts, so they should not be added together.</p>
       </header>
 
       {historicalEvidence?.reference_outcome_supported === true ? (
@@ -2015,7 +2024,7 @@ function PlainLanguageClaimNarrative({ scenario, facts, summary, snapshot, histo
           {historicalEvidence.prediction_readmission_billed_amount != null
             ? <> and later had a related hospitalization (claim {historicalEvidence.prediction_readmission_claim_id}) billed at {formatOptionalCurrency(historicalEvidence.prediction_readmission_billed_amount)}</>
             : null}
-          . Click the Outcome evidence panel below to show this, then the Claim-anchored billed comparison further down.
+          . Use the outcome evidence below to verify the claim IDs, dates, and billed amounts used in this example.
         </aside>
       ) : null}
 
@@ -3498,7 +3507,7 @@ function EncounterSearch({ searchQuery, onSearchChange, onSelectMember, onOpenCl
   const { claimsData } = useAppData()
   const [statusFilter, setStatusFilter] = useState('All Statuses')
   const [currentPage, setCurrentPage] = useState(1)
-  const pageSize = 10
+  const pageSize = 6
   const normalizedQuery = searchQuery.trim().toLowerCase()
   const statusOptions = useMemo(() => ['All Statuses', ...uniqueValues(claimsData, 'status')], [claimsData])
   const filteredEncounters = useMemo(() => claimsData.filter((claim) => {
@@ -4280,11 +4289,11 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
       <div className="patient-master-layout">
         <div className="patient-main-content">
           <Card className="claim-outcome-evidence">
-            <h2>Intervention review by scenario</h2>
+            <h2>Care options found from this member’s claims</h2>
             <a href={`${CONFIGURED_API_BASE_URL}/api/members/${encodeURIComponent(member.memberId)}/intervention-plans/export`}>Export recommendations with evidence labels</a>
             {!interventionReview ? <p>Loading this member’s intervention review…</p> : interventionReview.error ? <p>Intervention review could not be loaded. Reopen this member to retry.</p> : (
               <>
-                <p>{interventionReview.claims_reviewed} claims reviewed. Expand a scenario to see its proposed intervention and timing. These proposals do not change recorded visits or establish savings.</p>
+                <p>The app reviewed {interventionReview.claims_reviewed} claims for this member and found possible care-review ideas. Open a row to see what evidence was used, what information is missing, and when a reviewer might follow up. These are suggestions for review; they are not recorded care and they do not prove savings.</p>
                 {interventionReview.plans.map((plan) => (
                   <details key={`${plan.scenario || plan.matched_diagnosis}-${plan.anchor_claim_id}`}>
                     <summary>{plan.title || 'Insufficient clinical evidence'} · {plan.source_claim_ids.length} claims</summary>
@@ -4786,7 +4795,7 @@ function RecentEncounters({
     <Card className="encounters-card">
       <SectionTitle title={title} />
       <div className="table-wrap">
-        <table className="data-table encounters-table">
+        <table className="data-table encounters-table compact-encounters-table">
           <thead>
             <tr>
               <th>Date</th>

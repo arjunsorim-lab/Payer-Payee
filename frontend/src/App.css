@@ -1060,6 +1060,43 @@ button {
   table-layout: auto;
 }
 
+.compact-encounters-table {
+  min-width: 920px;
+  font-size: 12px;
+}
+
+.compact-encounters-table th {
+  padding: 8px 10px;
+  font-size: 10.5px;
+}
+
+.compact-encounters-table td {
+  padding: 8px 10px;
+}
+
+.compact-encounters-table .claim-source-badge {
+  margin-top: 3px;
+}
+
+.compact-encounters-table th:nth-child(5),
+.compact-encounters-table td:nth-child(5),
+.compact-encounters-table th:nth-child(6),
+.compact-encounters-table td:nth-child(6) {
+  max-width: 130px;
+}
+
+.compact-encounters-table th:nth-child(7),
+.compact-encounters-table td:nth-child(7) {
+  max-width: 210px;
+}
+
+.compact-encounters-table td:nth-child(5),
+.compact-encounters-table td:nth-child(6),
+.compact-encounters-table td:nth-child(7) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .encounters-table th:nth-child(1) { width: 100px; }
 .encounters-table th:nth-child(2) { width: 105px; }
 .encounters-table th:nth-child(3) { width: 110px; }

@@ -86,16 +86,20 @@ def earlier_claims(database, claim):
 
 
 def peer_hierarchy(claim):
+    fields = {"member": "memberId", "payer": "payerId", "provider": "billingProviderNpi",
+              "cpt": "cptCode", "place_of_service": "placeOfServiceCode"}
+    target = {dimension: _text(claim.get(name)) for dimension, name in fields.items()}
+    target["icd_family"] = icd_family(claim)
+
     def same(row, *dimensions):
-        values = {
-            "member": (_text(row.get("memberId")), _text(claim.get("memberId"))),
-            "payer": (_text(row.get("payerId")), _text(claim.get("payerId"))),
-            "provider": (_text(row.get("billingProviderNpi")), _text(claim.get("billingProviderNpi"))),
-            "cpt": (_text(row.get("cptCode")), _text(claim.get("cptCode"))),
-            "icd_family": (icd_family(row), icd_family(claim)),
-            "place_of_service": (_text(row.get("placeOfServiceCode")), _text(claim.get("placeOfServiceCode"))),
-        }
-        return all(values[key][1] and values[key][0] == values[key][1] for key in dimensions)
+        for dimension in dimensions:
+            expected = target[dimension]
+            if not expected:
+                return False
+            actual = icd_family(row) if dimension == "icd_family" else _text(row.get(fields[dimension]))
+            if actual != expected:
+                return False
+        return True
 
     def similar_units(row):
         selected = _number(claim.get("units"))

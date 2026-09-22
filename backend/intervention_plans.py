@@ -116,6 +116,7 @@ def clinical_inputs(claims, anchor, dataset_synthetic=False):
         row for row in claims
         if row.get("claimId") != anchor.get("claimId")
         and _text(row.get("dos")) and (not cutoff or _text(row.get("dos")) <= cutoff)
+        and evidence.source_type(row, dataset_synthetic) == evidence.source_type(anchor, dataset_synthetic)
     ]
     family = _claim_family(anchor)
     related = [row for row in prior if family and _claim_family(row) == family]
@@ -468,6 +469,8 @@ def build_intervention_plan(claim, clinical=None, dataset_synthetic=False):
         recorded_inputs=sorted(inputs),
     )
     base.update(
+        evidence_type=evidence.RECOMMENDATION,
+        evidence_label=evidence.label(evidence.RECOMMENDATION),
         evidence_used=clinical["evidence_used"],
         missing_evidence=[key for key in INPUT_KEYS if key not in inputs],
         clinical_inputs=inputs,
@@ -476,8 +479,6 @@ def build_intervention_plan(claim, clinical=None, dataset_synthetic=False):
             "recorded_context": {key: value for key, value in inputs.items() if key in INPUT_KEYS},
             "financial_evidence": "No verified savings. Recorded charges, payments and reviewer outcomes do not establish an intervention effect.",
         },
-        evidence_type=evidence.RECOMMENDATION,
-        evidence_label=evidence.label(evidence.RECOMMENDATION),
         source_data_type=evidence.source_type(claim, dataset_synthetic),
     )
     if not code:
@@ -575,15 +576,18 @@ def build_intervention_plan(claim, clinical=None, dataset_synthetic=False):
     }
 
 
-def _cohort_paid_values(claims, anchor):
+def _cohort_claims(claims, anchor):
     family = _claim_family(anchor)
-    return [
-        float(row.get("paid") or 0)
-        for row in claims
-        if row.get("claimId") != anchor.get("claimId")
-        and family and _claim_family(row) == family
-        and row.get("paid") is not None
-    ]
+    return [row for row in claims
+            if row.get("claimId") != anchor.get("claimId")
+            and family and _claim_family(row) == family
+            and str(row.get("dos") or "") < str(anchor.get("dos") or "")
+            and evidence.source_type(row) == evidence.source_type(anchor)
+            and row.get("paid") is not None]
+
+
+def _cohort_paid_values(claims, anchor):
+    return [float(row["paid"]) for row in _cohort_claims(claims, anchor)]
 
 
 def build_member_intervention_plans(claims, dataset_synthetic=False, workbook_hash=""):
@@ -626,6 +630,18 @@ def build_member_intervention_plans(claims, dataset_synthetic=False, workbook_ha
             item["diagnosis_codes"].append(plan["matched_diagnosis"])
     for plan in grouped.values():
         plan["savings_validation"] = _plan_savings_validation(claims, plan)
+        validation = plan["savings_validation"]
+        if validation:
+            cohort = validation["comparison_cohort"]
+            follow_up = validation["follow_up_completeness"]
+            plan["evidence_quality"].update({
+                "cohort_size": cohort["size"],
+                "comparison_strength": f"Within-member historical reference: {cohort['size']} earlier claim(s); not an independent comparison cohort.",
+                "matching_strength": cohort["similarity"],
+                "matching_strength_label": cohort["matching_strength_label"],
+                "follow_up_completeness": follow_up["ratio"],
+                "follow_up_status": follow_up["status"],
+            })
     return list(grouped.values())
 
 
@@ -635,8 +651,8 @@ def _plan_savings_validation(claims, plan):
     )
     if anchor_claim is None:
         return None
-    anchor_fields = anchor_claim.get("workbookFields", {})
-    cohort_values = _cohort_paid_values(claims, anchor_claim)
+    cohort_claims = _cohort_claims(claims, anchor_claim)
+    cohort_values = [float(row["paid"]) for row in cohort_claims]
     related_after = [
         {"claim_id": row.get("claimId"), "service_date": row.get("dos"),
          "paid": row.get("paid"),
@@ -667,13 +683,13 @@ def _plan_savings_validation(claims, plan):
     return build_savings_validation(
         anchor_service_date=anchor_claim.get("dos"),
         intervention_date=None,
-        predicted_opportunity=float(anchor_fields.get("Comparable_Episodes_Count") or 0),
+        predicted_opportunity=None,
         billed_charge=float(anchor_claim.get("totalCharge") or 0),
         paid_amount=float(anchor_claim.get("paid") or 0),
-        estimated_savings=0.0,
+        estimated_savings=None,
         cohort_paid_values=cohort_values,
-        cohort_claim_ids=[row.get("claimId") for row in claims if _claim_family(row) == _claim_family(anchor_claim)][:20],
-        cohort_member_count=1,
+        cohort_claim_ids=[row.get("claimId") for row in cohort_claims][:20],
+        cohort_member_count=1 if cohort_claims else 0,
         matching_dimensions=matched_dimensions,
         expected_follow_up_contacts=expected_follow_up,
         observed_follow_up_contacts=observed_follow_up,

@@ -181,20 +181,20 @@ def _window(anchor_service_date, days, today=None):
 
 
 def _amount_block(predicted_opportunity, billed_charge, paid_amount, estimated_savings,
-                  reviewer_reported_outcome, verified_amount, verified_basis):
+                  reviewer_reported_outcome, verified_amount, verified_basis, source_data_type=evidence.RECORDED_CLAIM_FACT):
     return {
         "predicted_opportunity": evidence.model_estimate(
-            _money(predicted_opportunity),
+            _money(predicted_opportunity) if predicted_opportunity is not None else None,
             "Deterministic cohort engine. Not observed care and not verified savings.",
         ),
-        "billed_charge": evidence.recorded_fact(
-            _money(billed_charge), "Charge_Amount read from the claims source."
+        "billed_charge": evidence.entry(source_data_type,
+            _money(billed_charge) if billed_charge is not None else None, "Charge_Amount read from the claims source."
         ),
-        "paid_amount": evidence.recorded_fact(
-            _money(paid_amount), "Paid_Amount read from the claims source."
+        "paid_amount": evidence.entry(source_data_type,
+            _money(paid_amount) if paid_amount is not None else None, "Paid_Amount read from the claims source."
         ),
         "estimated_savings": evidence.model_estimate(
-            _money(estimated_savings),
+            _money(estimated_savings) if estimated_savings is not None else None,
             "Model estimate of the opportunity. It is not a confirmed saving.",
         ),
         "reviewer_reported_outcome": evidence.reviewer_observation(
@@ -297,13 +297,18 @@ def build_savings_validation(
     follow_up = follow_up_completeness(expected_follow_up_contacts, observed_follow_up_contacts)
     cohort_size = len(cohort_values) or int(_number(cohort_member_count, 0))
 
-    intervention_day = _day(intervention_date or anchor_service_date)
+    intervention_day = _day(intervention_date)
     post_claims = []
     for claim in verification_claims or []:
         service_date = _day(claim.get("service_date") or claim.get("dos"))
-        if not service_date:
+        if not service_date or not intervention_day or service_date <= intervention_day:
             continue
-        if intervention_day and service_date < intervention_day:
+        if service_date > _day(window["end"]) or claim.get("related") is not True:
+            continue
+        paid = claim.get("paid", claim.get("paid_amount"))
+        if paid is None or not math.isfinite(_number(paid, float("nan"))) or _number(paid) < 0:
+            continue
+        if evidence.is_synthetic(claim):
             continue
         post_claims.append({"claim_id": claim.get("claim_id") or claim.get("claimId"),
                             "service_date": service_date.isoformat(),
@@ -340,26 +345,19 @@ def build_savings_validation(
     if not post_claims:
         reasons.append("No post-intervention claims evidence is available in the observation window.")
 
+    # An observed cohort difference plus a reviewer note does not independently
+    # validate an intervention's savings. Keep it explicitly unverified.
     verified_amount = None
-    if post_claims and outcome_recorded and cohort_stats["mean"] is not None:
-        baseline = cohort_stats["mean"]
-        verified_amount = _money(max(baseline - observed_post_paid, 0.0))
-        if verified_amount == 0:
-            reasons.append(
-                "Post-intervention paid spend is at or above the comparison cohort baseline, so no "
-                "verified saving is established."
-            )
-    if verified_amount is not None and not outcome_recorded:
-        verified_amount = None
-    if post_claims and not outcome_recorded:
-        reasons.append("A reviewer outcome with supporting evidence is required to verify a saving.")
-
-    if verified_amount is not None:
-        verification_status = "verified"
-    elif not post_claims:
-        verification_status = "insufficient_evidence"
-    else:
-        verification_status = "unverified"
+    observed_difference = (
+        _money(cohort_stats["mean"] - observed_post_paid)
+        if post_claims and cohort_stats["mean"] is not None else None
+    )
+    reasons.append("Independent savings validation is unavailable; claims comparisons and reviewer observations do not establish attributable savings.")
+    if not intervention_day:
+        reasons.append("No recorded intervention date is available.")
+    if not outcome_recorded:
+        reasons.append("No supported reviewer outcome has been recorded.")
+    verification_status = "unverified" if post_claims else "insufficient_evidence"
     verification_basis = (
         f"Post-intervention claims {', '.join(item['claim_id'] or 'claim' for item in post_claims[:5])} "
         f"show {observed_post_paid:.2f} paid against a cohort baseline of "
@@ -394,6 +392,7 @@ def build_savings_validation(
         )
 
     return {
+        "observed_cohort_difference": evidence.model_estimate(observed_difference, "Unadjusted comparison; not attributable or verified savings."),
         "amounts": _amount_block(
             predicted_opportunity,
             billed_charge,
@@ -403,6 +402,7 @@ def build_savings_validation(
              "outcome_date": review.get("outcome_date"), "notes": review.get("outcome_notes")},
             verified_amount,
             verification_basis,
+            source_data_type,
         ),
         "observation_window": window,
         "comparison_cohort": {

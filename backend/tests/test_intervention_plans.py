@@ -4,11 +4,19 @@ from backend.intervention_plans import build_intervention_plan, build_member_int
 
 
 def test_scenarios_have_distinct_interventions_and_timing():
-    plans = [build_intervention_plan({"diagnosisCode": code}) for code in ("N39.0", "E11.9", "I10", "N92.0")]
+    plans = []
+    for index, code in enumerate(("N39.0", "E11.9", "I10", "N92.0")):
+        anchor = {"claimId": f"ANCHOR-{index}", "diagnosisCode": code, "dos": "2026-01-01",
+                  "workbookFields": {"Treatment_History": "Follow-up care documented"}}
+        followup = {"claimId": f"FOLLOW-{index}", "diagnosisCode": code, "dos": "2025-12-20",
+                    "cptDescription": "Follow-up treatment visit"}
+        from backend.intervention_plans import clinical_inputs
+        plans.append(build_intervention_plan(anchor, clinical_inputs([anchor, followup], anchor)))
     assert all(plan["available"] for plan in plans)
     assert len({plan["action"] for plan in plans}) == 4
     assert len({plan["follow_up_days"] for plan in plans}) == 4
-    assert "urine culture" in plans[0]["action"]
+    assert plans[0]["test_recommendation_available"] is False
+    assert "test is not recommended" in plans[0]["action"]
     assert all(not plan["recorded"] and not plan["included_in_savings"] for plan in plans)
 
 
@@ -27,6 +35,8 @@ def test_plan_preserves_recorded_claim_and_supports_workbook_fields():
     before = deepcopy(claim)
     plan = build_intervention_plan(claim)
     assert plan["scenario"] == "urinary"
+    assert not plan["available"]
+    assert "treatment_history" in plan["missing_evidence"]
     assert plan["requires_clinical_review"]
     assert claim == before
 
@@ -40,9 +50,9 @@ def test_acute_diagnoses_override_routine_profiles():
 
 def test_member_groups_conditions_and_keeps_latest_anchor():
     claims = [
-        {"claimId": "OLD", "dos": "2026-01-01", "diagnosisCode": "E11.9"},
-        {"claimId": "NEW", "dos": "2026-02-01", "diagnosisCode": "E11.65"},
-        {"claimId": "UTI", "dos": "2026-01-01", "diagnosisCode": "N39.0"},
+        {"claimId": "OLD", "memberId": "M1", "dos": "2026-01-01", "diagnosisCode": "E11.9", "cptDescription": "Diabetes treatment follow-up"},
+        {"claimId": "NEW", "memberId": "M1", "dos": "2026-02-01", "diagnosisCode": "E11.65", "cptDescription": "Diabetes treatment follow-up"},
+        {"claimId": "UTI", "memberId": "M1", "dos": "2026-01-01", "diagnosisCode": "N39.0", "cptDescription": "UTI follow-up visit"},
         {"claimId": "UNKNOWN", "dos": "2026-01-01", "diagnosisCode": ""},
     ]
     plans = build_member_intervention_plans(claims)
@@ -62,7 +72,6 @@ def test_every_workbook_member_and_claim_is_reviewed():
         claims = database.member_claims(member["memberId"])
         plans = build_member_intervention_plans(claims)
         assert plans
-        assert any(plan["available"] for plan in plans)
         ids = [claim_id for plan in plans for claim_id in plan["source_claim_ids"]]
         assert sorted(ids) == sorted(claim["claimId"] for claim in claims)
         reviewed.extend(ids)

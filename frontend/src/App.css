@@ -429,6 +429,40 @@ button {
   gap: 10px;
 }
 
+.auth-gate {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--page);
+}
+
+.auth-card {
+  width: min(420px, 100%);
+  padding: 28px;
+  display: grid;
+  gap: 14px;
+}
+
+.auth-card form,
+.auth-card label {
+  display: grid;
+  gap: 8px;
+}
+
+.auth-card input {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+
+.auth-card button {
+  color: white;
+  background: var(--blue);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+}
+
 .section-title {
   display: flex;
   align-items: center;
@@ -9138,3 +9172,7 @@ button {
   .technical-details-toggle-help { display: none; }
   .same-patient-billed-equation span { overflow-wrap: anywhere; }
 }
+
+.evidence-legend { padding: 0.7rem 1.5rem; background: #f4f7fb; color: #334155; }
+.evidence-legend summary { cursor: pointer; }
+.claim-link-button + .evidence-badge { display: block; font-size: 0.7rem; margin-top: 0.2rem; }

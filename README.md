@@ -666,3 +666,13 @@ Restart the backend after replacing the workbook. The loader keys its cache by t
 - [OLLAMA_RAG_SETUP.md](OLLAMA_RAG_SETUP.md) — local Ollama and FAISS setup.
 - [PROVIDER_LLM.md](PROVIDER_LLM.md) — provider prediction/explanation implementation notes, including legacy compatibility details.
 - [payer_payee_mongodb/README.md](payer_payee_mongodb/README.md) — isolated MongoDB helper.
+
+### Verification and deployment status
+
+Run `python -m pytest -q backend/tests` using an environment with
+`backend/requirements-dev.txt`, then `npm run test:frontend`, `npm run lint`, and
+`npm run build`. The scale fixture and deployment smoke checker are documented
+in [DEPLOYMENT.md](DEPLOYMENT.md). See [VERIFICATION.md](VERIFICATION.md) for
+measured results and remaining external verification requirements. Synthetic
+examples, reviewer observations, and modeled opportunities do not establish
+verified savings or causal effectiveness.

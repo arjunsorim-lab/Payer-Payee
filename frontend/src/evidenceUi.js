@@ -74,6 +74,15 @@ export function verificationSummary(validation) {
   return { status, label: labels[status] || labels.insufficient_evidence, reasons: validation.reliability_reasons || [] }
 }
 
+export function evidenceValue(value) {
+  if (value === null || value === undefined || value === '') return 'Not recorded'
+  if (Array.isArray(value)) return value.map(evidenceValue).join('; ')
+  if (typeof value === 'object') return Object.entries(value)
+    .filter(([, item]) => item !== null && item !== undefined && item !== '')
+    .map(([key, item]) => `${key.replace(/_/g, ' ')}: ${evidenceValue(item)}`).join(' · ') || 'Not recorded'
+  return String(value)
+}
+
 // Amount rows keep six money concepts visibly separate.
 export function savingsAmountRows(amounts) {
   if (!amounts) return []
@@ -99,7 +108,7 @@ export function savingsAmountRows(amounts) {
         basis: item.basis,
         display: isMoney && typeof item.value === 'number'
           ? `$${Number(item.value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-          : (item.value === null || item.value === undefined ? 'Not recorded' : String(item.value)),
+          : evidenceValue(item.value),
         verified: key === 'verified_savings' && item.value !== null && item.value !== undefined,
       }
     })
@@ -147,4 +156,19 @@ export function observationWindowSummary(validation) {
   const window = validation?.observation_window
   if (!window || !window.start) return 'No observation window is defined.'
   return `${window.start} to ${window.end} (${window.days} days, ${window.status})`
+}
+
+// CSV cells are quoted and formula-like text is escaped before download.
+export function claimsExportCsv(claims) {
+  const columns = ['claimId', 'memberId', 'dos', 'diagnosisCode', 'cptCode', 'totalCharge', 'allowed', 'paid', 'evidence_type', 'evidence_label']
+  const cell = (value) => {
+    let text = value == null ? '' : String(value)
+    if (/^[\s]*[=+@-]/.test(text)) text = "'" + text
+    return '"' + text.replace(/"/g, '""') + '"'
+  }
+  return [columns, ...claims.map(claim => {
+    const source = claim.evidence_source || {}
+    return columns.map(key => key === 'evidence_type' ? (source.evidence_type || 'unknown')
+      : key === 'evidence_label' ? evidenceLabel(source.evidence_type) : claim[key])
+  })].map(row => row.map(cell).join(',')).join('\r\n')
 }

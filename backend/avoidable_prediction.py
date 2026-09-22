@@ -64,11 +64,13 @@ FIELD_ALIASES = {
 
 _CACHE = BoundedCache(int(os.getenv("AVOIDABLE_CACHE_MAX_ENTRIES", str(DEFAULT_MAX_SIZE))))
 _LOCK = RLock()
+_OBSERVATION_CACHE = BoundedCache(32)
 
 
 def clear_avoidable_prediction_cache():
     with _LOCK:
         _CACHE.clear()
+        _OBSERVATION_CACHE.clear()
 
 
 def _field(claim, logical_name, default=""):
@@ -175,6 +177,12 @@ def _avoidable_evidence(claim):
 
 
 def _historical_episode_observations(database, cutoff):
+    # Immutable workbook revision + cutoff preserve temporal leakage boundaries.
+    cache_key = (database.workbook_hash, cutoff)
+    with _LOCK:
+        cached = _OBSERVATION_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
     cutoff_date = _date(cutoff)
     prior = [
         row
@@ -230,6 +238,8 @@ def _historical_episode_observations(database, cutoff):
                 "repeat_claim_ids": [_text(_field(row, "claim_id")) for row in repeats],
             }
         )
+    with _LOCK:
+        _OBSERVATION_CACHE[cache_key] = observations
     return observations
 
 

@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from bson import ObjectId
-from flask import Flask, jsonify, request, send_from_directory, g
+from flask import Flask, jsonify, request, send_from_directory, g, Response
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException, ServiceUnavailable
 
@@ -16,7 +16,7 @@ try:
     from .db import connect_mongo, get_mongo_config
     from .financial_engine import build_financial_result, member_supported_summary
     from .outcome_evidence import build_outcome_evidence
-    from .intervention_plans import build_member_intervention_plans
+    from .intervention_plans import build_member_intervention_plans, _plan_savings_validation
     from .evidence import claim_source, legend
     from .review_security import configure_security
     from .review_store import (
@@ -60,7 +60,7 @@ except ImportError:
     from db import connect_mongo, get_mongo_config
     from financial_engine import build_financial_result, member_supported_summary
     from outcome_evidence import build_outcome_evidence
-    from intervention_plans import build_member_intervention_plans
+    from intervention_plans import build_member_intervention_plans, _plan_savings_validation
     from evidence import claim_source, legend
     from review_security import configure_security
     from review_store import (
@@ -257,11 +257,14 @@ def workbook_claims_for_request(database, args):
     # The encounter directory is an audit surface: show both current/selectable
     # claims and historical-reference records. Prediction endpoints still use
     # selectable claims only, so historical evidence can never become a target.
-    rows = list(
-        database.selectable_claims
-        if query_flag(args, "selectableOnly", default=False)
-        else database.claims
-    )
+    rows = database.selectable_claims if query_flag(args, "selectableOnly", default=False) else database.claims
+    # Directory indexes are sorted once at load time. Keep the common paginated
+    # directory path bounded; filtered requests still apply full search/filtering.
+    if not any(args.get(key) for key in ("search", "payer", "plan", "providerGroup", "status", "from", "to")):
+        attribute = "directory_selectable_claims" if query_flag(args, "selectableOnly", default=False) else "directory_claims"
+        indexed = getattr(database, attribute, None)
+        return indexed if indexed is not None else sorted(rows, key=lambda row: (row.get("dos", ""), row.get("claimId", "")), reverse=True)
+    rows = list(rows)
     search = str(args.get("search", "") or "").strip().lower()
     if search:
         rows = [
@@ -458,25 +461,16 @@ def stored_or_basic_prediction(prediction_doc, claim):
 
 @app.get("/health")
 def health():
-    database = configured_workbook_database()
-    if database:
-        return json_response({
-            "ok": True,
-            "dataSource": "integrated-workbook",
-            "workbook": database.source_banner(),
-            "datasets": dataset_registry(),
-        })
-    db = connect_mongo()
-    db.command("ping")
-    return json_response({"ok": True, "mongo": get_mongo_config()})
+    # Public liveness must not disclose claims, database addresses or local paths.
+    return json_response({"ok": True, "revision": os.getenv("RENDER_GIT_COMMIT") or os.getenv("APP_REVISION")})
 
 
 @app.get("/api/claims")
 def get_claims():
     database = configured_workbook_database()
     if database:
-        rows = workbook_claims_for_request(database, request.args)
         page, limit, skip = page_options(request.args)
+        rows = workbook_claims_for_request(database, request.args)
         page_rows = rows[skip: skip + limit]
         include_financial = query_flag(request.args, "includeFinancial", default=False)
         compact = query_flag(request.args, "compact", default=False)
@@ -523,6 +517,36 @@ def get_claims():
     items = list(collection.find(query).sort([("dos", -1), ("claimId", 1)]).skip(skip).limit(limit))
     total = collection.count_documents(query)
     return json_response({"page": page, "limit": limit, "total": total, "items": items})
+
+
+def csv_response(content, prefix):
+    return Response(content, mimetype="text/csv", headers={
+        "Content-Disposition": f'attachment; filename="{export_filename(prefix)}"',
+    })
+
+
+@app.get("/api/exports/claims")
+def export_claims():
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Claims source unavailable."}, 503)
+    page, limit, skip = page_options(request.args, default_limit=200, max_limit=2000)
+    rows = workbook_claims_for_request(database, request.args)
+    return csv_response(claims_csv(rows[skip:skip + limit], bool(database.report.get("synthetic"))), "claims")
+
+
+@app.get("/api/members/<member_id>/intervention-plans/export")
+def export_member_plans(member_id):
+    database = configured_workbook_database()
+    if not database:
+        return json_response({"message": "Claims source unavailable."}, 503)
+    claims = database.member_claims(member_id)
+    if not claims:
+        return json_response({"message": "Member not found."}, 404)
+    plans = build_member_intervention_plans(claims, bool(database.report.get("synthetic")), database.workbook_hash)
+    for plan in plans:
+        plan["member_id"] = member_id
+    return csv_response(recommendations_csv(plans), "recommendations")
 
 
 @app.get("/api/claims/<claim_number>")
@@ -607,6 +631,7 @@ def get_member_intervention_plans(member_id):
     reviews = read_reviews(app.config["REVIEW_DB"], [plan["review_id"] for plan in plans])
     for plan in plans:
         plan["review"] = reviews.get(plan["review_id"], {"status": "pending", "version": 0})
+        plan["savings_validation"] = _plan_savings_validation(claims, plan)
     return json_response({"member_id": member_id, "claims_reviewed": len(claims), "plans": plans})
 
 

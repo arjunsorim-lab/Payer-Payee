@@ -227,27 +227,19 @@ def build_outcome_evidence(database, claim):
     if historical_match:
         no_readmission_days = historical_fields.get("Episode_Duration_Days")
         conclusion = (
-            "Why this recommendation was made: "
-            f"historical claim {historical_reference.get('claimId')} records "
-            f"{historical_reference.get('cptDescription')} for {_diagnosis_family(historical_reference)} "
-            f"and an improved outcome with no related readmission recorded for {no_readmission_days} days. "
-            f"Claim {claim.get('claimId')} has the same diagnosis family ({family}) and records that the "
-            f"preventive intervention was not performed. "
-            f"Claim {claim.get('claimId')} is the linked later hospitalization dated {claim.get('dos')}"
-            + (
-                f", after prediction claim {linked_prediction_claim_id} in the same member episode"
-                if linked_prediction_claim_id
-                else ""
+            f"Historical claim {historical_reference.get('claimId')} records "
+            f"{historical_reference.get('cptDescription')} and an improved outcome. "
+            f"Its source records a {no_readmission_days}-day follow-up period. "
+            "This is comparison evidence for review; it does not establish that earlier care would prevent admission. "
+        )
+        if claim_is_later_hospitalization:
+            conclusion += f"This is the linked later hospitalization after initial claim {linked_prediction_claim_id or 'not identified'}. Its billed charge is a review exposure, not verified savings."
+        elif predicted_readmission:
+            conclusion += (
+                f"Related hospitalization claim {predicted_readmission.get('claimId')} occurred "
+                f"{predicted_gap_days} days after the initial visit. Its billed charge is a review exposure, "
+                "not verified savings."
             )
-            + ". Its recorded billed charge is the potentially avoidable amount."
-        )
-    elif predicted_readmission:
-        conclusion += (
-            f"The same patient later had hospitalization claim {predicted_readmission.get('claimId')} "
-            f"{predicted_gap_days} days later. The recommendation is to provide "
-            f"{historical_reference.get('cptDescription')} earlier. The potentially avoidable amount is "
-            f"the hospitalization's recorded billed charge, not an allowed or paid amount."
-        )
     elif positive and preventive_source:
         conclusion = (
             f"Preventive claim {preventive_source.get('claimId')} dated {preventive_source.get('dos')} "
@@ -257,7 +249,7 @@ def build_outcome_evidence(database, claim):
             f"Follow-up completed = {follow_up or 'Not recorded'}. "
             "The records match on member, episode, and diagnosis family. "
             + (
-                "No later related claim is recorded for this diagnosis family."
+                ((f"The source documents a {fields.get('Episode_Duration_Days')}-day follow-up period immediately after the first episode. " if fields.get("Episode_Duration_Days") else "") + "No later related claim is recorded for this diagnosis family; continuous observation is not established by absence alone.")
                 if not later_related
                 else f"Later related claims are recorded: {', '.join(later_related)}."
             )

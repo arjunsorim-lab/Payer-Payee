@@ -158,3 +158,50 @@ enforced; stop and fix the configuration before proceeding.
 | `429` on sign-in | Rate limit reached | Wait 15 minutes |
 | `413` on a POST | Body over 1 MiB | Reduce the payload |
 | `409` "This review changed. Reload before saving." | Stale review edit | Reload the member and re-apply the decision |
+
+## Reproducible verification
+
+Use a Python environment with `backend/requirements-dev.txt` installed. The
+backend test command uses pytest so pytest-style contracts are included:
+
+```bash
+python -m pytest -q backend/tests
+npm run test:frontend
+npm run lint
+npm run build
+python -m pytest -q -s backend/tests/test_scale_readiness.py
+python scripts/serve_scale_fixture.py --claims 100000 --port 4002
+```
+
+The scale suite measures handler latency, concurrent requests, process peak RSS,
+request allocation peaks, cache bounds, and all directory pages. The loopback
+fixture allows separate browser measurement against the production frontend
+build. It uses synthetic records and a disposable review database. It does not
+measure full-workbook ingestion, prediction throughput, or production network
+latency. The frontend currently loads all compact directory pages before showing
+complete totals, so first-page API latency is **not** initial UI load time.
+
+For each deployed branch, supply its actual URL and expected commit:
+
+```bash
+python scripts/smoke_deployment.py https://your-deployment.example EXPECTED_COMMIT
+```
+
+Provide `SMOKE_USERNAME` and `SMOKE_PASSWORD` through a secure local environment
+for authenticated checks; never commit them or pass them as command arguments.
+Without credentials the smoke script reports authentication checks as blocked.
+A git push alone does not prove successful deployment or correct credentials.
+
+### Persistent storage is a production prerequisite
+
+The bundled free Render configuration uses a relative SQLite path. That path is
+not durable across replacement instances or deployments. Before production use,
+configure `REVIEW_DB_PATH` on persistent storage (or migrate the review store to
+a managed database) and verify backup/restore. The repository does not provision
+paid storage or a second `new-version` environment. Configure each environment's
+branch, origin allowlist, credentials, and storage in the hosting dashboard.
+
+Savings validation currently reports model opportunities and observed cohort
+differences as unverified. Reviewer notes and post-intervention claims alone do
+not independently establish attributable savings; no automatic verified-savings
+claim is made by this implementation.

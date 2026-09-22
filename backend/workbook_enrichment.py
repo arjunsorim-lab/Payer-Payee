@@ -46,7 +46,12 @@ SAVINGS_VERSION = "workbook-opportunity-v1"
 RAG_INDEX_VERSION = "workbook-rag-v1"
 GROQ_PROMPT_VERSION = "workbook-ollama-explanation-v2"
 
-_CACHE: dict[tuple[str, int, int], "WorkbookDatabase"] = {}
+try:
+    from .bounded_cache import BoundedCache
+except ImportError:  # pragma: no cover
+    from bounded_cache import BoundedCache
+
+_CACHE: dict[tuple[str, int, int], "WorkbookDatabase"] = BoundedCache(4)
 _ACTIVE_HASH = ""
 _LOCK = RLock()
 
@@ -149,6 +154,9 @@ class WorkbookDatabase:
     value_based_config: dict = field(default_factory=dict)
 
     def __post_init__(self):
+        order = lambda row: (row.get("dos", ""), row.get("claimId", ""))
+        object.__setattr__(self, "directory_claims", tuple(sorted(self.claims, key=order, reverse=True)))
+        object.__setattr__(self, "directory_selectable_claims", tuple(sorted(self.selectable_claims, key=order, reverse=True)))
         object.__setattr__(
             self,
             "claims_by_id",
@@ -225,6 +233,7 @@ class WorkbookDatabase:
     def source_banner(self):
         return {
             "message": f"Workbook demonstration database active: {self.path.name}",
+            "synthetic": bool(self.report.get("synthetic", False)),
             "workbook_name": self.path.name,
             "workbook_hash": self.report["workbook_hash"],
             "workbook_hash_short": self.report["workbook_hash"][:12],

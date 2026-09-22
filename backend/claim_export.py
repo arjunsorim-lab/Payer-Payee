@@ -18,7 +18,9 @@ except ImportError:  # pragma: no cover - script execution
 
 
 def _text(value):
-    return "" if value is None else str(value)
+    text = "" if value is None else str(value)
+    # Prevent spreadsheet formula execution when opening untrusted claim text.
+    return "\'" + text if text.lstrip().startswith(("=", "+", "-", "@", "\t", "\r")) else text
 
 
 CLAIM_COLUMNS = (

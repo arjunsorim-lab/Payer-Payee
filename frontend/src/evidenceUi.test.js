@@ -7,6 +7,8 @@ import {
   EVIDENCE_TYPES,
   MISSING_EVIDENCE_LABELS,
   REVIEW_TRANSITIONS,
+  claimsExportCsv,
+  evidenceValue,
   evidenceBadgeClass,
   evidenceLabel,
   evidenceQualityRows,
@@ -163,4 +165,12 @@ test('the UI renders evidence labels, savings validation and review history from
   assert.match(app, /evidenceLabel/)
   assert.match(app, /savingsAmountRows/)
   assert.match(app, /verificationSummary/)
+})
+
+test('exports preserve provenance, unknown values, and escape spreadsheet formulas', () => {
+  const csv = claimsExportCsv([{claimId: '=CMD()', paid: null, evidence_source: {evidence_type: 'synthetic_demonstration'}}])
+  assert.ok(csv.includes("'=CMD()"))
+  assert.ok(csv.includes('Synthetic demonstration data'))
+  assert.ok(!csv.includes('Recorded claim fact'))
+  assert.equal(evidenceValue({claim_id: 'C1', result: ['normal']}), 'claim id: C1 · result: normal')
 })

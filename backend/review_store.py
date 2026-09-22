@@ -6,6 +6,11 @@ from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+try:
+    from .evidence import REVIEWER_OBSERVATION
+except ImportError:
+    from evidence import REVIEWER_OBSERVATION
+
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -72,11 +77,12 @@ def read_review_history(path, review_id):
 
 
 TRANSITIONS = {
-    "pending": {"accepted", "rejected", "deferred"},
+    "pending": {"assigned", "accepted", "rejected", "deferred"},
+    "assigned": {"assigned", "accepted", "rejected", "deferred", "completed"},
     "accepted": {"accepted", "rejected", "deferred", "completed"},
-    "deferred": {"accepted", "rejected", "deferred"},
-    "rejected": {"accepted", "deferred", "rejected"},
-    "completed": {"outcome_recorded"},
+    "deferred": {"assigned", "accepted", "rejected", "deferred"},
+    "rejected": {"assigned", "accepted", "deferred", "rejected"},
+    "completed": {"completed", "outcome_recorded"},
     "outcome_recorded": {"outcome_recorded"},
 }
 
@@ -105,7 +111,7 @@ def save_review(path, review_id, data, actor, plan):
         if status in {"accepted", "completed"} and not plan["available"]:
             raise ValueError("This plan needs additional clinical evidence before acceptance.")
         updated = {**current, **data, "reason": reason}
-        if status in {"accepted", "deferred"} and not updated.get("assignee", "").strip():
+        if status in {"assigned", "accepted", "deferred"} and not updated.get("assignee", "").strip():
             raise ValueError("Assign the review to a responsible person.")
         if status == "deferred" and not updated.get("due_date"):
             raise ValueError("Set a date to revisit the deferred decision.")
@@ -118,7 +124,9 @@ def save_review(path, review_id, data, actor, plan):
                     raise ValueError("Dates must use YYYY-MM-DD.") from None
                 if key != "due_date" and parsed > date.today():
                     raise ValueError("Completed care and observed outcomes cannot be future-dated.")
-        if status == "completed" and not updated.get("completed_date"):
+        if status in {"completed", "outcome_recorded"} and not updated.get("outcome_notes", "").strip():
+            raise ValueError("Record supporting outcome evidence before completion.")
+        if status in {"completed", "outcome_recorded"} and not updated.get("completed_date"):
             raise ValueError("Record when the intervention was completed.")
         if updated.get("completed_date") and updated["completed_date"] < (plan.get("anchor_service_date") or ""):
             raise ValueError("Completion cannot precede the source claim.")

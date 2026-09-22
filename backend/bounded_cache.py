@@ -9,6 +9,7 @@ keep working) but evicts the oldest entry once ``max_size`` is exceeded.
 from __future__ import annotations
 
 import os
+from threading import RLock
 
 
 DEFAULT_MAX_SIZE = int(os.getenv("CACHE_MAX_ENTRIES", "512"))
@@ -21,16 +22,18 @@ class BoundedCache(dict):
         super().__init__(*args, **kwargs)
         self.max_size = max(int(max_size), 1)
         self._evictions = 0
+        self._lock = RLock()
 
     def __setitem__(self, key, value):
-        if key in self:
-            # Re-insert so the touched entry becomes the newest.
-            super().__delitem__(key)
-        super().__setitem__(key, value)
-        while len(self) > self.max_size:
-            oldest = next(iter(self))
-            super().__delitem__(oldest)
-            self._evictions += 1
+        with self._lock:
+            if key in self:
+                # Re-insert so the touched entry becomes the newest.
+                super().__delitem__(key)
+            super().__setitem__(key, value)
+            while len(self) > self.max_size:
+                oldest = next(iter(self))
+                super().__delitem__(oldest)
+                self._evictions += 1
 
     @property
     def evictions(self):

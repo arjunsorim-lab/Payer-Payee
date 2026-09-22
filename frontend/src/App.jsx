@@ -8,8 +8,11 @@ import {
 } from './providerLlmFormat.js'
 import { CrossPatientComparatorContent, SamePatientBilledSavings } from './CrossPatientComparator.jsx'
 import {
+  EVIDENCE_LABELS,
+  claimsExportCsv,
   evidenceBadgeClass,
   evidenceLabel,
+  evidenceValue,
   evidenceQualityRows,
   missingEvidenceRows,
   observationWindowSummary,
@@ -17,7 +20,6 @@ import {
   savingsAmountRows,
   uncertaintySummary,
   verificationSummary,
-  verifiedSavingsLabel,
 } from './evidenceUi.js'
 import {
   Activity,
@@ -119,7 +121,6 @@ const CONFIGURED_API_BASE_URL = (
   || ''
 ).replace(/\/$/, '')
 const LOCAL_API_BASE_URL = 'http://127.0.0.1:4000'
-const RENDER_API_BASE_URL = 'https://payer-payee.onrender.com'
 const CLAIMS_CACHE_PREFIX = 'payerpayee.claims.workbook.'
 const EMPTY_DATE_RANGE = { from: '', to: '' }
 const CLICKABLE_NAV_LABELS = new Set(['Patient 360', 'Predictions', 'Claims', 'Patient Comparison'])
@@ -158,10 +159,6 @@ function useAppData() {
 let sessionState = { authenticated: false, mode: 'local_demo', role: 'reviewer', csrfToken: '' }
 let onSessionChange = () => {}
 
-function currentSession() {
-  return sessionState
-}
-
 function updateSession(next) {
   sessionState = { ...sessionState, ...next }
   onSessionChange(sessionState)
@@ -175,7 +172,6 @@ async function fetchJson(path, options = {}) {
     CONFIGURED_API_BASE_URL,
     window.location.origin,
     import.meta.env.DEV ? LOCAL_API_BASE_URL : '',
-    import.meta.env.DEV ? '' : RENDER_API_BASE_URL,
   ].filter(Boolean))]
   let lastError = new Error('Backend API could not be reached')
   const method = (options.method || 'GET').toUpperCase()
@@ -255,7 +251,7 @@ async function fetchJsonWithRetry(path, options = {}, attempts = 15, delayMs = 1
       return await fetchJson(path, options)
     } catch (error) {
       lastError = error
-      if (attempt === attempts) break
+      if (AUTH_STATUSES.has(error.status) || error.status === 503 || attempt === attempts) break
       await new Promise((resolve) => window.setTimeout(resolve, delayMs))
     }
   }
@@ -263,6 +259,7 @@ async function fetchJsonWithRetry(path, options = {}, attempts = 15, delayMs = 1
 }
 
 function writeClaimsCache(items, source) {
+  if (sessionState.mode !== 'local_demo') return
   try {
     const workbookHash = source?.workbook_hash
     if (!workbookHash) return
@@ -327,6 +324,17 @@ function routeFromHash(hash, claimsData) {
     selectedClaim,
     selectedPredictionClaim,
   }
+}
+
+function downloadClaims(claims, filename) {
+  const url = URL.createObjectURL(new Blob([claimsExportCsv(claims)], { type: 'text/csv;charset=utf-8' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 function uniqueValues(rows, key) {
@@ -397,9 +405,8 @@ function getService(claim) {
   return `${claim.placeOfServiceCode} - ${claim.placeOfService}`.trim()
 }
 
-function getPayerContact(payer) {
-  const slug = String(payer || 'payer').toLowerCase().replace(/[^a-z0-9]+/g, '')
-  return `claims@${slug || 'payer'}.com`
+function getPayerContact(claim) {
+  return claim.payerContact || 'Not recorded'
 }
 
 function buildMembers(rows) {
@@ -412,7 +419,7 @@ function buildMembers(rows) {
 
   return [...grouped.entries()]
     .map(([memberId, claims]) => {
-      const sortedClaims = [...claims].sort((a, b) => b.dos.localeCompare(a.dos) || b.number.localeCompare(a.number))
+      const sortedClaims = [...claims].sort((a, b) => b.dos.localeCompare(a.dos) || String(b.number || b.claimId || '').localeCompare(String(a.number || a.claimId || '')))
       const latestClaim = sortedClaims[0]
       const deniedCount = claims.filter((claim) => claim.status === 'Denied').length
 
@@ -564,7 +571,36 @@ function App() {
   const [workbookSource, setWorkbookSource] = useState(null)
   const [dataLoading, setDataLoading] = useState(true)
   const [dataError, setDataError] = useState('')
+  const [session, setSession] = useState(sessionState)
+  const [sessionReady, setSessionReady] = useState(false)
+  const [loginUser, setLoginUser] = useState('')
+  const [loginPassword, setLoginPassword] = useState('')
+  const [loginError, setLoginError] = useState('')
+  const [loginBusy, setLoginBusy] = useState(false)
   const routeInitializedRef = useRef(false)
+
+  useEffect(() => {
+    const listener = (next) => setSession(next)
+    onSessionChange = listener
+    bootstrapSession()
+      .catch(() => updateSession({ authenticated: false, mode: 'secure', role: 'viewer' }))
+      .finally(() => setSessionReady(true))
+    return () => { if (onSessionChange === listener) onSessionChange = () => {} }
+  }, [])
+
+  const handleLogin = async (event) => {
+    event.preventDefault()
+    setLoginBusy(true)
+    setLoginError('')
+    try {
+      await signIn(loginUser, loginPassword)
+      setLoginPassword('')
+    } catch (error) {
+      setLoginError(error.message || 'Sign in failed.')
+    } finally {
+      setLoginBusy(false)
+    }
+  }
 
   const setRouteState = (route, historyMode = 'push') => {
     const nextRoute = {
@@ -594,26 +630,26 @@ function App() {
   }
 
   useEffect(() => {
+    if (!sessionReady || (session.mode === 'secure' && !session.authenticated)) return undefined
     let active = true
+    setDataLoading(true)
     const claimsPageSize = 2000
     const claimsQuery = `limit=${claimsPageSize}&includeFinancial=false&compact=true&selectableOnly=true`
 
-    // Load the complete workbook list without running the expensive per-claim
-    // prediction engine. Detailed financial calculations remain available from
-    // the member, claim, and prediction endpoints when the user opens a record.
+    // Bound in-flight page requests while retaining the complete member directory.
     fetchJsonWithRetry(`/api/claims?${claimsQuery}`)
       .then(async (payload) => {
         if (!active) return
-        const firstPageItems = payload.items || []
-        const remaining = Math.max(0, Number(payload.total || 0) - firstPageItems.length)
-        const additionalPages = await Promise.all(
-          Array.from(
-            { length: Math.ceil(remaining / claimsPageSize) },
-            (_, index) => fetchJson(`/api/claims?page=${index + 2}&${claimsQuery}`),
-          ),
-        )
+        const items = [...(payload.items || [])]
+        const pageCount = Math.ceil(Number(payload.total || 0) / claimsPageSize)
+        for (let start = 2; start <= pageCount && active; start += 4) {
+          const pages = await Promise.all(Array.from(
+            { length: Math.min(4, pageCount - start + 1) },
+            (_, offset) => fetchJson(`/api/claims?page=${start + offset}&${claimsQuery}`),
+          ))
+          items.push(...pages.flatMap(page => page.items || []))
+        }
         if (!active) return
-        const items = [...firstPageItems, ...additionalPages.flatMap((page) => page.items || [])]
         const source = payload.source || null
         setClaimsData(items)
         setWorkbookSource(source)
@@ -633,7 +669,7 @@ function App() {
     return () => {
       active = false
     }
-  }, [])
+  }, [sessionReady, session.authenticated, session.mode])
 
   useEffect(() => {
     if (dataLoading || dataError) return undefined
@@ -736,13 +772,31 @@ function App() {
     })
   }, [])
 
-  const dataModel = useMemo(() => ({ ...buildDataModel(claimsData), workbookSource, onNavigate: navigate }), [claimsData, workbookSource, navigate])
+  const dataModel = useMemo(() => ({ ...buildDataModel(claimsData), workbookSource, session, onNavigate: navigate }), [claimsData, workbookSource, session, navigate])
 
   return (
     <DataContext.Provider value={dataModel}>
+      {!sessionReady ? (
+        <section className="auth-gate"><Card className="state-card">Checking secure access…</Card></section>
+      ) : session.mode === 'secure' && !session.authenticated ? (
+        <section className="auth-gate">
+          <Card className="auth-card">
+            <ShieldCheck size={28} />
+            <h1>Sign in to PayerPayee</h1>
+            <p>Your account role controls which review actions are available.</p>
+            <form onSubmit={handleLogin}>
+              <label>Username<input autoComplete="username" value={loginUser} onChange={(event) => setLoginUser(event.target.value)} required /></label>
+              <label>Password<input type="password" autoComplete="current-password" value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} required /></label>
+              {loginError ? <p role="alert">{loginError}</p> : null}
+              <button type="submit" disabled={loginBusy}>{loginBusy ? 'Signing in…' : 'Sign in'}</button>
+            </form>
+          </Card>
+        </section>
+      ) : (
       <div className="app-shell">
         <Sidebar activeNav={activeNav} onNavigate={navigate} />
         <main className="workspace">
+          {session.authenticated && !dataLoading ? <EvidenceLegend /> : null}
           {dataLoading ? (
             <>
               <TopBar />
@@ -797,8 +851,21 @@ function App() {
           )}
         </main>
       </div>
+      )}
     </DataContext.Provider>
   )
+}
+
+function ClaimSourceBadge({ claim }) {
+  const type = claim?.evidence_source?.evidence_type
+  return <span className={evidenceBadgeClass(type)}>{evidenceLabel(type)}</span>
+}
+
+function EvidenceLegend() {
+  return <details className="evidence-legend"><summary>How to read the evidence labels</summary>
+    <ul>{Object.entries(EVIDENCE_LABELS).map(([type, label]) => <li key={type}><span className={evidenceBadgeClass(type)}>{label}</span></li>)}</ul>
+    <p>Recorded claim facts describe the supplied records. Recommendations and model estimates do not prove care occurred or caused savings.</p>
+  </details>
 }
 
 function Sidebar({ activeNav, onNavigate }) {
@@ -850,12 +917,12 @@ function Sidebar({ activeNav, onNavigate }) {
 }
 
 function TopBar() {
-  const { onNavigate } = useAppData()
+  const { onNavigate, session = sessionState } = useAppData()
   return (
     <header className="topbar">
       <div className="topbar-welcome">
         <span>Welcome Back</span>
-        <strong>Alex Admin</strong>
+        <strong>{sessionState.username || 'Local reviewer'}</strong>
       </div>
       <div className="topbar-actions">
         <button
@@ -874,10 +941,10 @@ function TopBar() {
         <div className="user-chip">
           <span className="avatar">AA</span>
           <div>
-            <strong>Alex Admin</strong>
-            <span>Operations</span>
+            <strong>{session.username || 'Local reviewer'}</strong>
+            <span>{session.role || 'reviewer'}</span>
           </div>
-          <ChevronDown size={18} />
+          {session.mode === 'secure' && session.authenticated ? <button type="button" aria-label="Sign out" onClick={() => signOut()}>Sign out</button> : <ChevronDown size={18} />}
         </div>
       </div>
     </header>
@@ -929,8 +996,7 @@ function ClaimsWorkspace({ selectedClaim, searchQuery, onSearchChange, onOpenCla
   const searchedClaims = useMemo(() => (
     normalizedQuery
       ? claimsData.filter((claim) => (
-        claim.patient.toLowerCase().includes(normalizedQuery) ||
-        claim.memberId.toLowerCase().includes(normalizedQuery)
+        [claim.patient, claim.memberId, claim.claimId, claim.number].some(value => String(value || '').toLowerCase().includes(normalizedQuery))
       ))
       : claimsData
   ), [claimsData, normalizedQuery])
@@ -957,6 +1023,7 @@ function ClaimsWorkspace({ selectedClaim, searchQuery, onSearchChange, onOpenCla
             <div className="claims-directory-header">
               <div>
                 <h1>Claims</h1>
+                <button className="text-button" type="button" onClick={() => downloadClaims(pagedClaims, 'claims-page.csv')}>Export this claims page</button>
                 <p>Current selectable {selectableClaimCount.toLocaleString()} claim records; linked sequence evidence loads with each claim</p>
               </div>
               <div className="claims-directory-controls">
@@ -967,7 +1034,7 @@ function ClaimsWorkspace({ selectedClaim, searchQuery, onSearchChange, onOpenCla
                     value={searchQuery}
                     onChange={(event) => onSearchChange(event.target.value)}
                     placeholder="Search claim"
-                    aria-label="Search claims by patient name or member ID"
+                    aria-label="Search claims by patient name, member ID, or claim ID"
                   />
                 </label>
                 <label className="claims-time-filter">
@@ -1417,6 +1484,8 @@ function PredictionDetailPage({ claim, onBackToPredictions }) {
           <RefreshCw size={15} />
         </div>
       </div>
+      <ClaimSourceBadge claim={claim} />
+      <p className="evidence-badge model-estimate">Model estimates and recommendations; not recorded care or verified savings.</p>
       <PredictionScenarioMap
         scenario={scenario}
         valueBasedCase={valueBasedCase}
@@ -2937,6 +3006,7 @@ function InterventionProposal({ plan }) {
   if (!plan) return null
   return (
     <section aria-label="Scenario-specific intervention proposal">
+      <span className={evidenceBadgeClass('recommendation')}>{evidenceLabel('recommendation')}</span>
       <strong>{plan.title || 'Intervention: insufficient evidence'}</strong>
       <p>{plan.action || plan.reason}</p>
       {plan.available ? (
@@ -2952,7 +3022,7 @@ function InterventionProposal({ plan }) {
 
 function ReviewControls({ memberId, plan, onSaved }) {
   const current = plan.review || { status: 'pending', version: 0 }
-  const [status, setStatus] = useState(current.status || 'pending')
+  const [status, setStatus] = useState(() => reviewStatusOptions(current.status || 'pending')[0].value)
   const [reason, setReason] = useState(current.reason || '')
   const [assignee, setAssignee] = useState(current.assignee || '')
   const [dueDate, setDueDate] = useState(current.due_date || '')
@@ -2962,6 +3032,9 @@ function ReviewControls({ memberId, plan, onSaved }) {
   const [outcomeNotes, setOutcomeNotes] = useState(current.outcome_notes || '')
   const [message, setMessage] = useState('')
   const [saving, setSaving] = useState(false)
+  const allowedStatuses = reviewStatusOptions(current.status || 'pending')
+  const canReview = ['reviewer', 'admin'].includes(sessionState.role)
+  useEffect(() => { setStatus(reviewStatusOptions(current.status)[0].value) }, [current.status, current.version])
 
   const save = async (event) => {
     event.preventDefault()
@@ -2979,6 +3052,10 @@ function ReviewControls({ memberId, plan, onSaved }) {
     }
     if (['completed', 'outcome_recorded'].includes(status) && !completedDate) {
       setMessage('A completion date is required for completed and outcome-recorded reviews.')
+      return
+    }
+    if (['completed', 'outcome_recorded'].includes(status) && !outcomeNotes.trim()) {
+      setMessage('Record supporting outcome evidence before completion.')
       return
     }
     if (status === 'outcome_recorded') {
@@ -3012,43 +3089,46 @@ function ReviewControls({ memberId, plan, onSaved }) {
 
   return (
     <form className="intervention-review-controls" onSubmit={save}>
+      <p>Saved review: {current.status.replace(/_/g, ' ')} · version {current.version || 0} · {evidenceLabel('reviewer_observation')}</p>
       <label>Status<select value={status} onChange={(event) => setStatus(event.target.value)}>
-        {['pending', 'assigned', 'accepted', 'rejected', 'deferred', 'completed', 'outcome_recorded'].map(value => <option key={value} value={value}>{value.replace('_', ' ')}</option>)}
+        {allowedStatuses.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
       </select></label>
       <label>Reviewer reason<textarea required minLength="3" value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Explain the decision" /></label>
       {['assigned', 'accepted', 'deferred'].includes(status) ? <label>Assigned reviewer<input value={assignee} onChange={(event) => setAssignee(event.target.value)} placeholder="Name or team" /></label> : null}
       {status === 'deferred' ? <label>Review again on<input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} /></label> : null}
       {status === 'completed' || status === 'outcome_recorded' ? <label>Completed on<input type="date" value={completedDate} onChange={(event) => setCompletedDate(event.target.value)} /></label> : null}
+      {['completed', 'outcome_recorded'].includes(status) ? <label>Outcome evidence<textarea required value={outcomeNotes} onChange={(event) => setOutcomeNotes(event.target.value)} placeholder="Record what was observed" /></label> : null}
       {status === 'outcome_recorded' ? <>
         <label>Observed outcome<select value={outcome} onChange={(event) => setOutcome(event.target.value)}><option value="">Select outcome</option>{['improved', 'unchanged', 'worsened', 'unknown'].map(value => <option key={value} value={value}>{value}</option>)}</select></label>
         <label>Outcome date<input type="date" value={outcomeDate} onChange={(event) => setOutcomeDate(event.target.value)} /></label>
-        <label>Outcome evidence<textarea value={outcomeNotes} onChange={(event) => setOutcomeNotes(event.target.value)} placeholder="Record what was observed" /></label>
       </> : null}
-      <button type="submit" disabled={saving || !plan.available}>{saving ? 'Saving…' : 'Save review'}</button>
+      <button type="submit" disabled={saving || !canReview || (!plan.available && ['accepted', 'completed'].includes(status))}>{saving ? 'Saving…' : 'Save review'}</button>
       {!plan.available ? <small>Additional clinical evidence is required before accepting this plan.</small> : null}
       {message ? <small role="status">{message}</small> : null}
     </form>
   )
 }
 
-function ReviewHistoryPanel({ reviewId }) {
+function ReviewHistoryPanel({ reviewId, version }) {
   const [events, setEvents] = useState([])
   const [loading, setLoading] = useState(false)
+  const [historyError, setHistoryError] = useState('')
   useEffect(() => {
     if (!reviewId) return undefined
     let active = true
     setLoading(true)
     fetchJson(`/api/reviews/${encodeURIComponent(reviewId)}/history`)
       .then((payload) => { if (active) setEvents(payload.events || []) })
-      .catch(() => { if (active) setEvents([]) })
+      .catch((error) => { if (active) setHistoryError(error.message) })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [reviewId])
+  }, [reviewId, version])
 
   if (!reviewId) return null
   return (
     <div className="review-history-panel">
       <h4>Review history</h4>
+      {historyError ? <p role="alert">{historyError}</p> : null}
       {loading ? <p>Loading review history…</p> : events.length ? (
         <ul>
           {events.map((event, index) => (
@@ -3443,7 +3523,7 @@ function EncounterSearch({ searchQuery, onSearchChange, onSelectMember, onOpenCl
         return leftIsFeaturedClaim ? -1 : 1
       }
 
-      return right.dos.localeCompare(left.dos) || right.number.localeCompare(left.number)
+      return right.dos.localeCompare(left.dos) || String(right.number || right.claimId || '').localeCompare(String(left.number || left.claimId || ''))
     })
   ), [filteredEncounters])
   const pageCount = Math.max(1, Math.ceil(featuredEncounterFirst.length / pageSize))
@@ -3462,7 +3542,7 @@ function EncounterSearch({ searchQuery, onSearchChange, onSelectMember, onOpenCl
       <div className="patient-header-row search-results-header">
         <div>
           <h1>Patient 360</h1>
-          <p>Recent encounters from the current 837 claims database</p>
+          <p>Recent encounters from the selectable claims database</p>
         </div>
         <div className="patient-grid-controls">
           <label className="claims-directory-search patient-search-inline">
@@ -3645,7 +3725,7 @@ function DiseaseOverviewTable({ conditions, totalClaimsCount, onOpenPrediction, 
         <div className="disease-controls">
           <select className="disease-select"><option>All Time</option></select>
           <select className="disease-select"><option>Group by: Condition</option></select>
-          <button type="button" className="disease-export-btn"><Download size={14}/> Export</button>
+          <button type="button" className="disease-export-btn" onClick={() => downloadClaims(memberClaims, 'member-claims.csv')}><Download size={14}/> Export</button>
         </div>
       </div>
 
@@ -4205,6 +4285,7 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
         <div className="patient-main-content">
           <Card className="claim-outcome-evidence">
             <h2>Intervention review by scenario</h2>
+            <a href={`${CONFIGURED_API_BASE_URL}/api/members/${encodeURIComponent(member.memberId)}/intervention-plans/export`}>Export recommendations with evidence labels</a>
             {!interventionReview ? <p>Loading this member’s intervention review…</p> : interventionReview.error ? <p>Intervention review could not be loaded. Reopen this member to retry.</p> : (
               <>
                 <p>{interventionReview.claims_reviewed} claims reviewed. Expand a scenario to see its proposed intervention and timing. These proposals do not change recorded visits or establish savings.</p>
@@ -4213,16 +4294,26 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
                     <summary>{plan.title || 'Insufficient clinical evidence'} · {plan.source_claim_ids.length} claims</summary>
                     <p>Diagnosis codes: {plan.diagnosis_codes.join(', ') || 'Not recorded'}. Latest source claim: {plan.anchor_claim_id}.</p>
                     <dl>
-                      <div><dt>Evidence type</dt><dd>{plan.evidence_type || 'Recommendation (not recorded care)'}</dd></div>
+                      <div><dt>Evidence type</dt><dd><span className={evidenceBadgeClass(plan.evidence_type || 'recommendation')}>{evidenceLabel(plan.evidence_type || 'recommendation')}</span></dd></div>
                       <div><dt>Data source</dt><dd>{plan.source_data_type === 'synthetic_demonstration' ? 'Synthetic demonstration data' : 'Recorded claim data'}</dd></div>
-                      <div><dt>Recorded context</dt><dd>{Object.keys(plan.evidence_quality?.recorded_context || {}).length ? Object.entries(plan.evidence_quality.recorded_context).map(([key, value]) => `${key.replace('_', ' ')}: ${value}`).join(' · ') : 'No additional clinical context recorded'}</dd></div>
-                      <div><dt>Evidence used</dt><dd>{plan.evidence_used && plan.evidence_used.length ? plan.evidence_used.map((item) => `${item.input || item.key || 'input'}=${item.value ?? 'missing'}`).join(' · ') : 'No specific evidence was recorded in the recommendation'}</dd></div>
-                      <div><dt>Missing information</dt><dd>{plan.missing_evidence && plan.missing_evidence.length ? plan.missing_evidence.join(', ') : (plan.evidence_quality?.missing_information?.join(', ') || 'All reviewed context fields are present')}</dd></div>
+                      <div><dt>Recorded context</dt><dd>{evidenceValue(plan.clinical_inputs)}</dd></div>
+                      <div><dt>Evidence used</dt><dd>{plan.evidence_used && plan.evidence_used.length ? plan.evidence_used.map((item) => `${item.input || item.key || 'input'}: ${evidenceValue(item.value)} (claim ${item.claim_id || 'not recorded'}, ${evidenceLabel(item.evidence_type)})`).join(' · ') : 'No specific evidence was recorded in the recommendation'}</dd></div>
+                      <div><dt>Missing information</dt><dd>{missingEvidenceRows(plan.evidence_quality).missingText}</dd></div>
                       <div><dt>History coverage</dt><dd>{plan.evidence_quality?.history_start || 'Not recorded'} to {plan.evidence_quality?.history_end || 'Not recorded'} · {plan.evidence_quality?.history_claim_count || 0} claims</dd></div>
-                      <div><dt>Comparison strength</dt><dd>{plan.evidence_quality?.comparison_strength || 'No comparable cohort available'}</dd></div>
+                      {evidenceQualityRows(plan.evidence_quality).map((row) => <div key={row.label}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}
                       <div><dt>Clinical effect</dt><dd>{plan.evidence_quality?.causal_effectiveness || 'Not established from claims alone'}</dd></div>
-                      <div><dt>Financial status</dt><dd>{plan.savings_validation?.verification_status ? `${plan.savings_validation.verification_status} (${plan.savings_validation.amounts?.verified_savings?.evidence_label || 'No verified savings'})` : (plan.evidence_quality?.financial_evidence || 'No verified savings')}</dd></div>
+                      <div><dt>Financial status</dt><dd>{verificationSummary(plan.savings_validation).label}</dd></div>
                     </dl>
+                    {plan.savings_validation ? <section aria-label="Savings validation evidence">
+                      <h4>Financial evidence</h4>
+                      <dl>{savingsAmountRows(plan.savings_validation.amounts).map((row) => (
+                        <div key={row.key}><dt>{row.label}</dt><dd><span className={evidenceBadgeClass(row.evidenceType)}>{row.evidenceLabel}</span> {row.display}</dd></div>
+                      ))}</dl>
+                      <p>{verificationSummary(plan.savings_validation).label}</p>
+                      <p>{observationWindowSummary(plan.savings_validation)}</p>
+                      <p>{uncertaintySummary(plan.savings_validation)}</p>
+                      {plan.savings_validation.reliability_reasons?.length ? <ul>{plan.savings_validation.reliability_reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul> : null}
+                    </section> : null}
                     <InterventionProposal plan={plan} />
                     <ReviewControls memberId={member.memberId} plan={plan} onSaved={(review) => {
                       setInterventionReview((previous) => previous ? {
@@ -4230,7 +4321,7 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
                         plans: previous.plans.map((item) => item.review_id === plan.review_id ? { ...item, review } : item),
                       } : previous)
                     }} />
-                    <ReviewHistoryPanel reviewId={plan.review_id} />
+                    <ReviewHistoryPanel reviewId={plan.review_id} version={plan.review?.version} />
                   </details>
                 ))}
               </>
@@ -4349,7 +4440,7 @@ function ExecutiveDashboard({ onOpenClaim, onViewAllClaims }) {
       <header className="executive-topbar">
         <div className="topbar-welcome executive-welcome">
           <span>Welcome Back</span>
-          <strong>Alex Admin</strong>
+          <strong>{sessionState.username || 'Local reviewer'}</strong>
         </div>
         <div className="executive-actions">
           <button className="icon-button has-alert" type="button" aria-label="Notifications">
@@ -4362,8 +4453,8 @@ function ExecutiveDashboard({ onOpenClaim, onViewAllClaims }) {
           <div className="user-chip">
             <span className="avatar blue">AB</span>
             <div>
-              <strong>Admin User</strong>
-              <span>Administrator</span>
+              <strong>{sessionState.username || 'Local reviewer'}</strong>
+              <span>{sessionState.role}</span>
             </div>
             <ChevronDown size={18} />
           </div>
@@ -4437,7 +4528,7 @@ function ExecutiveDashboard({ onOpenClaim, onViewAllClaims }) {
               ) : null}
             </div>
             <button className="text-button" type="button" onClick={resetFilters}>Reset</button>
-            <button className="export-button" type="button">
+            <button className="export-button" type="button" onClick={() => downloadClaims(filteredClaims, 'filtered-claims.csv')}>
               <Download size={18} />
               Export
             </button>
@@ -4506,7 +4597,7 @@ function MetricCard({ label, value, delta, dir = 'up', note, compact = false }) 
 }
 
 function SelectedClaimDetail({ claim }) {
-  const payerContact = getPayerContact(claim.payer)
+  const payerContact = getPayerContact(claim)
   const financialSummary = [
     { label: 'Total Charge', value: formatCurrency(claim.totalCharge), note: `${claim.units || 1} unit(s) billed`, tone: 'blue' },
     { label: 'Allowed', value: formatCurrency(claim.allowed), note: `${formatCurrency(claim.adjustment)} adjusted`, tone: 'teal' },
@@ -4544,6 +4635,7 @@ function SelectedClaimDetail({ claim }) {
       <Card className="claim-hero-card">
         <div className="claim-hero-main">
           <h1>{claim.number}</h1>
+          <ClaimSourceBadge claim={claim} />
           <p>{claim.patient} · {claim.memberId} · {claim.payer} · {payerContact}</p>
         </div>
         <div className="claim-hero-meta">
@@ -4726,6 +4818,7 @@ function RecentEncounters({
                   <button className="claim-link-button" type="button" onClick={() => onOpenClaim?.(claim)}>
                     {claim.number}
                   </button>
+                  <ClaimSourceBadge claim={claim} />
                 </td>
                 <td>{claim.patient}</td>
                 <td>{claim.billingProvider}</td>
@@ -6150,6 +6243,7 @@ function ProviderPredictionChat({ result }) {
   const storageKey = `payerpayee.provider-chat.${claimId}.${episodeId}.${predictionIdentity}`
   const conversationId = useMemo(() => `${claimId}-${episodeId}-${Date.now().toString(36)}`, [claimId, episodeId])
   const [messages, setMessages] = useState(() => {
+    if (sessionState.mode !== 'local_demo') return []
     const legacyWelcome = 'Ask me to explain any backend-calculated prediction, financial exposure, sample basis, backtest result or provider action. I cannot change the calculated values.'
     try {
       const cached = JSON.parse(window.localStorage.getItem(storageKey) || 'null')
@@ -6165,6 +6259,7 @@ function ProviderPredictionChat({ result }) {
   const suggested = result.suggested_questions || ['How much can be saved?', 'How was the predicted allowed amount calculated?', 'How much provider revenue is at risk?', 'Which historical claims were used?', 'How confident is the model and why?']
 
   useEffect(() => {
+    if (sessionState.mode !== 'local_demo') return
     try { window.localStorage.setItem(storageKey, JSON.stringify(messages)) } catch { /* storage optional */ }
   }, [messages, storageKey])
 
@@ -6464,6 +6559,7 @@ function RecentClaims({
                   <button className="claim-link-button" type="button" onClick={() => onOpenClaim?.(claim)}>
                     {claim.number}
                   </button>
+                  <ClaimSourceBadge claim={claim} />
                 </td>
                 <td>{claim.patient}</td>
                 <td>{formatDate(claim.dos)}</td>

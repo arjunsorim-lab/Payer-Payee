@@ -4208,7 +4208,9 @@ function MemberFinancialPredictionSidebar({ member, latestClaim, payerCohortSavi
 
 function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMember: _onSelectMember, onOpenClaim: _onOpenClaim, onOpenPrediction }) {
   const { defaultDateRange } = useAppData()
-  const latestClaim = selectedClaim || member.latestClaim
+  const [hydratedMember, setHydratedMember] = useState(member)
+  const displayMember = hydratedMember?.memberId === member.memberId ? hydratedMember : member
+  const latestClaim = selectedClaim || displayMember.latestClaim || member.latestClaim
   const [memberMoney, setMemberMoney] = useState(null)
   const [interventionReview, setInterventionReview] = useState(null)
   const [payerCohortSavings, setPayerCohortSavings] = useState(null)
@@ -4217,21 +4219,21 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
   const memberEncountersPageSize = 10
 
   const memberConditions = useMemo(
-    () => buildMemberConditions(member.claims),
-    [member.claims],
+    () => buildMemberConditions(displayMember.claims),
+    [displayMember.claims],
   )
 
   const filteredMemberClaims = useMemo(() => {
-    if (!selectedCondition) return member.claims
-    return member.claims.filter((claim) => {
+    if (!selectedCondition) return displayMember.claims
+    return displayMember.claims.filter((claim) => {
       const key = `${claim.diagnosisCode || 'Z00'}|${claim.diagnosisDescription || 'General Medical Treatment'}`
       return key === selectedCondition
     })
-  }, [member.claims, selectedCondition])
+  }, [displayMember.claims, selectedCondition])
 
   const memberEncountersPageCount = Math.max(1, Math.ceil(filteredMemberClaims.length / memberEncountersPageSize))
   const _safeMemberEncountersPage = Math.min(memberEncountersPage, memberEncountersPageCount)
-  const memberStats = buildMemberStats(member, memberMoney, payerCohortSavings)
+  const memberStats = buildMemberStats(displayMember, memberMoney, payerCohortSavings)
 
   useEffect(() => {
     let active = true
@@ -4243,9 +4245,17 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
   }, [member.memberId])
 
   useEffect(() => {
+    setHydratedMember(member)
+  }, [member])
+
+  useEffect(() => {
     setMemberEncountersPage(1)
     setSelectedCondition(null)
   }, [member.memberId])
+
+  useEffect(() => {
+    setHydratedMember(member)
+  }, [member])
 
   useEffect(() => {
     setMemberEncountersPage(1)
@@ -4258,6 +4268,9 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
     fetchJson(`/api/members/${encodeURIComponent(member.memberId)}`)
       .then((payload) => {
         if (active) {
+          if (payload.item?.claims?.length) {
+            setHydratedMember({ ...member, ...payload.item })
+          }
           setMemberMoney(payload.item?.supportedMoneySummary || null)
           setPayerCohortSavings(payload.item?.payerCohortSavingsSummary || null)
         }
@@ -4269,7 +4282,7 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
         }
       })
     return () => { active = false }
-  }, [member.memberId, member.supportedMoneySummary])
+  }, [member, member.memberId, member.supportedMoneySummary])
 
   return (
     <div className="patient-360-container">

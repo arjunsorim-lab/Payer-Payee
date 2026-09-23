@@ -1412,7 +1412,11 @@ def build_financial_result(database, claim_id):
 
 
 def member_supported_summary(database, member_id):
-    claims = database.member_claims(member_id)
+    claims = [
+        claim
+        for claim in database.member_claims(member_id)
+        if database.find_claim(claim.get("claimId"), selectable_only=True)
+    ]
     results = [build_financial_result(database, claim["claimId"]) for claim in claims]
     recoverable = _money(sum(item["supported_money_summary"]["recoverable_now"] for item in results))
     future_denial = _money(sum(item["supported_money_summary"]["future_denial_exposure"] for item in results))

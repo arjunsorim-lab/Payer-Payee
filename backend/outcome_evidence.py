@@ -193,6 +193,7 @@ def build_outcome_evidence(database, claim):
         and _text(candidate.get("workbookFields", {}).get("Related_Claim_Flag")).upper() == "Y"
         and (
             "READMISSION" in _text(candidate.get("workbookFields", {}).get("Reason_Code")).upper()
+            or "WORSENING" in _text(candidate.get("workbookFields", {}).get("Reason_Code")).upper()
             or "hospital" in _text(candidate.get("placeOfService")).lower()
             or "hospital" in _text(candidate.get("cptDescription")).lower()
         )

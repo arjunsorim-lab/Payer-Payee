@@ -174,7 +174,7 @@ class WorkbookDatabase:
             },
         )
         grouped = {}
-        for claim in self.selectable_claims:
+        for claim in self.claims:
             grouped.setdefault(claim.get("memberId"), []).append(claim)
         object.__setattr__(
             self,
@@ -187,7 +187,7 @@ class WorkbookDatabase:
         object.__setattr__(
             self,
             "members",
-            tuple(sorted(build_member_documents(list(self.selectable_claims)), key=lambda item: (item.get("latestServiceDate", ""), item.get("memberId", "")), reverse=True)),
+            tuple(sorted(build_member_documents(list(self.claims)), key=lambda item: (item.get("latestServiceDate", ""), item.get("memberId", "")), reverse=True)),
         )
 
     @property

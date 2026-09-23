@@ -696,9 +696,13 @@ def get_member(member_id):
         )
         if not member:
             return json_response({"message": "Member not found in selectable workbook claims"}, 404)
+        member_claims = database.member_claims(member_id)
+        latest_claim = member_claims[0] if member_claims else None
         return json_response({
             "item": {
                 **member,
+                "claims": [workbook_claim_for_api(database, claim, include_summary=False) for claim in member_claims],
+                "latestClaim": workbook_claim_for_api(database, latest_claim, include_summary=False) if latest_claim else None,
                 "supportedMoneySummary": member_supported_summary(database, member_id),
                 "payerCohortSavingsSummary": build_member_payer_cohort_summary(database, member_id),
             },

@@ -3668,7 +3668,12 @@ function buildMemberConditions(claims) {
     group.patientResponsibility += claim.patientResp || 0
   })
 
-  return [...groups.values()].sort((a, b) => b.claims.length - a.claims.length || b.totalCharge - a.totalCharge)
+  return [...groups.values()].sort((a, b) => {
+    const aGeneralExam = a.code === 'Z00.00' || a.code === 'Z00'
+    const bGeneralExam = b.code === 'Z00.00' || b.code === 'Z00'
+    if (aGeneralExam !== bGeneralExam) return aGeneralExam ? -1 : 1
+    return b.claims.length - a.claims.length || b.totalCharge - a.totalCharge
+  })
 }
 
 function DiseaseOverviewTable({ conditions, totalClaimsCount, onOpenPrediction, memberClaims = [] }) {

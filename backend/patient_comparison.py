@@ -140,6 +140,26 @@ def _claim_id(claim):
     return _text(_field(claim, "Claim_ID", "claimId"))
 
 
+def _display_claim_number(claim):
+    return _text(_field(claim, "Claim_Number", "number"))
+
+
+def _normalize_claim_identifier(value):
+    text = _text(value).replace("-", "").upper()
+    if text.startswith("CLM") and text[3:].isdigit():
+        digits = text[3:]
+        return f"CLM{digits.zfill(8)}"
+    return text
+
+
+def _claim_matches_identifier(claim, identifier):
+    normalized = _normalize_claim_identifier(identifier)
+    return normalized in {
+        _normalize_claim_identifier(_claim_id(claim)),
+        _normalize_claim_identifier(_display_claim_number(claim)),
+    }
+
+
 def _member_id(claim):
     return _text(_field(claim, "Member_ID", "memberId"))
 
@@ -272,7 +292,7 @@ def build_reference_intervention_counterfactual(database, member_id, diagnosis_f
     if not claims or not member_id or not family:
         return _counterfactual_unavailable("Claims, member_id, and diagnosis_family are required.")
 
-    normalized_anchor = _text(anchor_claim_id).replace("-", "").upper()
+    normalized_anchor = _normalize_claim_identifier(anchor_claim_id)
     prediction_candidates = [
         claim for claim in claims
         if _member_id(claim) == member_id
@@ -284,7 +304,7 @@ def build_reference_intervention_counterfactual(database, member_id, diagnosis_f
     if normalized_anchor:
         prediction_candidates = [
             claim for claim in prediction_candidates
-            if _claim_id(claim).replace("-", "").upper() == normalized_anchor
+            if _claim_matches_identifier(claim, normalized_anchor)
         ]
     else:
         prediction_candidates = sorted(
@@ -809,11 +829,11 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
         return reference_counterfactual
 
     source_claims = getattr(database, "claims", database.selectable_claims)
-    normalized_anchor = _text(anchor_claim_id).replace("-", "")
+    normalized_anchor = _normalize_claim_identifier(anchor_claim_id)
     anchor_claim = next(
         (
             claim for claim in source_claims
-            if _claim_id(claim).replace("-", "") == normalized_anchor
+            if _claim_matches_identifier(claim, normalized_anchor)
         ),
         None,
     ) if normalized_anchor else None
@@ -822,7 +842,7 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
         if anchor_claim
         and _member_id(claim) == _member_id(anchor_claim)
         and _family(claim) == family
-        and _text(_field(claim, "Reference_Claim_ID")).replace("-", "") == normalized_anchor
+        and _normalize_claim_identifier(_field(claim, "Reference_Claim_ID")) == normalized_anchor
     ]
     worsening_claim = next(
         (
@@ -855,7 +875,7 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
 
     anchor_episode_indexes = {
         index for index, episode in enumerate(episodes)
-        if any(_text(line.get("claim_id")).replace("-", "") == normalized_anchor for line in episode["claims"])
+        if any(_normalize_claim_identifier(line.get("claim_id")) == normalized_anchor for line in episode["claims"])
     } if normalized_anchor else set()
 
     selected_pair = None
@@ -879,7 +899,7 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
             continue
         later = episodes[later_index]
         anchor_line = next(
-            (line for line in later["claims"] if _text(line.get("claim_id")).replace("-", "") == normalized_anchor),
+            (line for line in later["claims"] if _normalize_claim_identifier(line.get("claim_id")) == normalized_anchor),
             later["claims"][0] if later["claims"] else {},
         )
         gynecological_journey = (

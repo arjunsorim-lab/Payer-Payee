@@ -126,8 +126,9 @@ const EMPTY_DATE_RANGE = { from: '', to: '' }
 const CLICKABLE_NAV_LABELS = new Set(['Patient 360', 'Predictions', 'Claims', 'Patient Comparison'])
 const VALID_VIEWS = new Set(['home', 'member', 'predictions', 'claims', 'compare'])
 const isReferenceClaim = (claim) => Boolean(
-  claim.workbookFields?.Reference_Claim_Flag
-  ?? claim.workbookFields?.reference_claim_flag,
+  claim.isHistoricalReference
+  || claim.workbookFields?.Reference_Claim_Flag
+  || claim.workbookFields?.reference_claim_flag,
 )
 
 function buildDataModel(claimsData) {

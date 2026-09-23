@@ -426,6 +426,23 @@ function sum(rows, key) {
   return rows.reduce((total, row) => total + (row[key] || 0), 0)
 }
 
+function isDeniedClaimStatus(status) {
+  return String(status || '').trim().toLowerCase() === 'denied'
+}
+
+function isOpenClaimStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase()
+  if (!normalized) return false
+  if (normalized.includes('processed') || normalized.includes('paid') || normalized.includes('adjudicated')) return false
+  return normalized.includes('open')
+    || normalized.includes('pending')
+    || normalized.includes('submitted')
+    || normalized.includes('review')
+    || normalized.includes('appeal')
+    || normalized.includes('rejected')
+    || normalized === 'denied'
+}
+
 function getInitials(member) {
   return `${member.firstName?.[0] || ''}${member.lastName?.[0] || ''}`.toUpperCase()
 }
@@ -454,7 +471,7 @@ function buildMembers(rows) {
     .map(([memberId, claims]) => {
       const sortedClaims = [...claims].sort((a, b) => b.dos.localeCompare(a.dos) || String(b.number || b.claimId || '').localeCompare(String(a.number || a.claimId || '')))
       const latestClaim = sortedClaims[0]
-      const deniedCount = claims.filter((claim) => claim.status === 'Denied').length
+      const deniedCount = claims.filter((claim) => isDeniedClaimStatus(claim.status)).length
 
       return {
         memberId,
@@ -496,12 +513,13 @@ function buildMemberStats(member, money, payerCohortSavings) {
   const totalPaid = member.totalPaid ?? member.claims.reduce((acc, c) => acc + (c.paid || 0), 0)
   const totalPatientResp = member.totalPatientResp ?? member.claims.reduce((acc, c) => acc + (c.patientResp || 0), 0)
   const totalCharge = member.totalCharge ?? member.claims.reduce((acc, c) => acc + (c.totalCharge || 0), 0)
-  const insuranceSavings = Math.max(0, totalCharge - totalAllowed)
+  const totalAdjustment = member.totalAdjustment ?? member.claims.reduce((acc, c) => acc + (c.adjustment || 0), 0)
+  const insuranceSavings = totalAdjustment > 0 ? totalAdjustment : Math.max(0, totalCharge - totalAllowed)
   
   // Calculate Avoidable from cohort savings or supported money summary
-  const avoidableCosts = payerCohortSavings?.member_predicted_payer_avoidable_spend ?? money?.potentially_avoidable_spend_supported ?? 0
-  const openClaimsCount = member.claims.filter(c => c.status !== 'Paid').length
-  const deniedClaimsCount = member.claims.filter(c => c.status === 'Denied').length
+  const avoidableCosts = money?.potentially_avoidable_spend_supported ?? payerCohortSavings?.member_predicted_payer_avoidable_spend ?? 0
+  const openClaimsCount = member.claims.filter(c => isOpenClaimStatus(c.status)).length
+  const deniedClaimsCount = member.claims.filter(c => isDeniedClaimStatus(c.status)).length
 
   return [
     { label: 'Total Allowed', value: formatCurrency(totalAllowed), note: `Across ${claimCount.toLocaleString()} claims`, iconTone: 'green', Icon: CircleDollarSign },
@@ -4051,8 +4069,8 @@ function MemberFinancialPredictionSidebar({ member, latestClaim, payerCohortSavi
         bold: formatCurrency(savingsOpportunity),
       })
     }
-    const denied = member.claims.filter(c => c.status === 'Denied').length
-    const openClaims = member.claims.filter(c => c.status !== 'Paid').length
+    const denied = member.claims.filter(c => isDeniedClaimStatus(c.status)).length
+    const openClaims = member.claims.filter(c => isOpenClaimStatus(c.status)).length
     list.push({
       icon: 'file-text',
       tone: denied > 0 ? 'orange' : 'blue',

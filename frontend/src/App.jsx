@@ -3349,7 +3349,6 @@ function PredictionScenarioMap({ scenario, initialMemberId, initialDiagnosisCode
   const facts = scenario.actual_claim_facts
   const summary = scenario.supported_money_summary
   const snapshot = scenario.financial_prediction_snapshot
-  const payerSavings = scenario.payer_savings_prediction
   const historicalPeerCount = snapshot.peer_sample_size ?? scenario.historical_comparison?.sample_size ?? 0
   const suggestedReviewLabel = summary.best_action?.type === 'patient_balance'
     ? 'Patient balance and payment plan'
@@ -3401,18 +3400,6 @@ function PredictionScenarioMap({ scenario, initialMemberId, initialDiagnosisCode
       />
 
       <ClaimOutcomeEvidencePanel facts={facts} />
-
-      {payerSavings?.available === false && !payerSavings?.procedure_comparison?.available ? (
-        <aside className="payer-savings-availability" role="status">
-          <ShieldAlert size={22} />
-          <div>
-            <span>Comparing this bill with another person’s bill</span>
-            <h2>We could not find a fair bill to compare</h2>
-            <p>{payerSavings.reason}</p>
-            <small>This does not mean there is no saving. It means we do not have a fair comparison yet.</small>
-          </div>
-        </aside>
-      ) : null}
 
       <section aria-label="Claim-anchored billed comparison">
         <SamePatientBilledSavings

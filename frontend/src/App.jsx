@@ -4223,10 +4223,20 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
   const [selectedCondition, setSelectedCondition] = useState(null)
   const memberEncountersPageSize = 10
 
-  const memberConditions = useMemo(
-    () => buildMemberConditions(displayMember.claims),
-    [displayMember.claims],
-  )
+  const memberConditions = useMemo(() => {
+    const conditions = buildMemberConditions(displayMember.claims)
+    const referenceCodes = new Set(
+      displayMember.claims
+        .filter(isReferenceClaim)
+        .map((claim) => claim.diagnosisCode)
+        .filter(Boolean),
+    )
+    return conditions.sort((left, right) => {
+      const leftPriority = referenceCodes.has(left.code) ? 1 : 0
+      const rightPriority = referenceCodes.has(right.code) ? 1 : 0
+      return rightPriority - leftPriority
+    })
+  }, [displayMember.claims])
 
   const filteredMemberClaims = useMemo(() => {
     if (!selectedCondition) return displayMember.claims

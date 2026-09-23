@@ -11,6 +11,11 @@ from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 import re
 
+try:
+    from .bounded_cache import BoundedCache, DEFAULT_MAX_SIZE
+except ImportError:  # pragma: no cover - script execution
+    from bounded_cache import BoundedCache, DEFAULT_MAX_SIZE
+
 
 # ── ICD-10 chapter → organ system mapping ────────────────────────────────
 # Each entry maps an ICD-10 family prefix letter+digits range to a human-
@@ -288,9 +293,20 @@ def build_reference_intervention_counterfactual(database, member_id, diagnosis_f
     exactly one distinct intervention claim line.
     """
     family = _text(diagnosis_family).upper()
+    cache_key = (
+        getattr(database, "workbook_hash", id(database)),
+        _text(member_id),
+        family,
+        _normalize_claim_identifier(anchor_claim_id),
+    )
+    cached = _REFERENCE_COUNTERFACTUAL_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     claims = list(getattr(database, "claims", ())) or list(getattr(database, "selectable_claims", ()))
     if not claims or not member_id or not family:
-        return _counterfactual_unavailable("Claims, member_id, and diagnosis_family are required.")
+        result = _counterfactual_unavailable("Claims, member_id, and diagnosis_family are required.")
+        _REFERENCE_COUNTERFACTUAL_CACHE[cache_key] = result
+        return result
 
     normalized_anchor = _normalize_claim_identifier(anchor_claim_id)
     prediction_candidates = [
@@ -316,7 +332,9 @@ def build_reference_intervention_counterfactual(database, member_id, diagnosis_f
             ),
         )
     if not prediction_candidates:
-        return _counterfactual_unavailable("No prediction EP1 claim with a historical Reference_Claim_ID was found.", member_id=member_id, diagnosis_family=family)
+        result = _counterfactual_unavailable("No prediction EP1 claim with a historical Reference_Claim_ID was found.", member_id=member_id, diagnosis_family=family)
+        _REFERENCE_COUNTERFACTUAL_CACHE[cache_key] = result
+        return result
 
     anchored_later_claim = None
     if normalized_anchor:
@@ -346,11 +364,13 @@ def build_reference_intervention_counterfactual(database, member_id, diagnosis_f
                 and _day(_field(claim, "Service_Date_From", "dos")) < anchor_date
             ]
             if not earlier_candidates:
-                return _counterfactual_unavailable(
+                result = _counterfactual_unavailable(
                     "The selected later claim is linked to a reference pathway, but no earlier EP1 claim was found before it.",
                     reference_claim_id=reference_claim_id,
                     episode_2_claim_id=_claim_id(anchored_later_claim),
                 )
+                _REFERENCE_COUNTERFACTUAL_CACHE[cache_key] = result
+                return result
             episode_1_claim = sorted(
                 earlier_candidates,
                 key=lambda claim: (_day(_field(claim, "Service_Date_From", "dos")) or date.min, _claim_id(claim)),
@@ -363,9 +383,13 @@ def build_reference_intervention_counterfactual(database, member_id, diagnosis_f
     reference_claim_id = _text(_field(episode_1_claim, "Reference_Claim_ID"))
     reference_claim = next((claim for claim in claims if _claim_id(claim) == reference_claim_id), None)
     if not reference_claim:
-        return _counterfactual_unavailable("The prediction claim points to a reference claim that is not present in the workbook.", reference_claim_id=reference_claim_id)
+        result = _counterfactual_unavailable("The prediction claim points to a reference claim that is not present in the workbook.", reference_claim_id=reference_claim_id)
+        _REFERENCE_COUNTERFACTUAL_CACHE[cache_key] = result
+        return result
     if _family(reference_claim).upper() != family or not _is_positive_reference_outcome(reference_claim):
-        return _counterfactual_unavailable("The referenced claim does not record a supported positive outcome for the same diagnosis family.", reference_claim_id=reference_claim_id)
+        result = _counterfactual_unavailable("The referenced claim does not record a supported positive outcome for the same diagnosis family.", reference_claim_id=reference_claim_id)
+        _REFERENCE_COUNTERFACTUAL_CACHE[cache_key] = result
+        return result
 
     baseline_cpts = {_text(_field(episode_1_claim, "CPT_Code", "cptCode"))}
     reference_rows = [
@@ -389,16 +413,20 @@ def build_reference_intervention_counterfactual(database, member_id, diagnosis_f
         and not _is_office_or_preventive_visit(claim)
     ]
     if not intervention_candidates:
-        return _counterfactual_unavailable(
+        result = _counterfactual_unavailable(
             "No distinct intervention claim line was found inside the historical reference pathway.",
             reference_claim_id=reference_claim_id,
         )
+        _REFERENCE_COUNTERFACTUAL_CACHE[cache_key] = result
+        return result
     if len(intervention_candidates) > 1:
-        return _counterfactual_unavailable(
+        result = _counterfactual_unavailable(
             "More than one distinct intervention claim line matched the historical reference pathway, so the engine did not guess.",
             reference_claim_id=reference_claim_id,
             candidate_intervention_claim_ids=[_claim_id(claim) for claim in intervention_candidates],
         )
+        _REFERENCE_COUNTERFACTUAL_CACHE[cache_key] = result
+        return result
     intervention_claim = intervention_candidates[0]
 
     episode_1_date = _day(_field(episode_1_claim, "Service_Date_From", "dos"))
@@ -436,21 +464,29 @@ def build_reference_intervention_counterfactual(database, member_id, diagnosis_f
         ]
     if not episode_2_candidates:
         if invalid_earlier_ep2:
-            return _counterfactual_unavailable("EP2 is linked but occurs before EP1, so the sequence is invalid.", reference_claim_id=reference_claim_id, episode_1_claim_id=_claim_id(episode_1_claim))
-        return _counterfactual_unavailable("No later related EP2 worsening or hospital episode was found.", reference_claim_id=reference_claim_id, episode_1_claim_id=_claim_id(episode_1_claim))
+            result = _counterfactual_unavailable("EP2 is linked but occurs before EP1, so the sequence is invalid.", reference_claim_id=reference_claim_id, episode_1_claim_id=_claim_id(episode_1_claim))
+            _REFERENCE_COUNTERFACTUAL_CACHE[cache_key] = result
+            return result
+        result = _counterfactual_unavailable("No later related EP2 worsening or hospital episode was found.", reference_claim_id=reference_claim_id, episode_1_claim_id=_claim_id(episode_1_claim))
+        _REFERENCE_COUNTERFACTUAL_CACHE[cache_key] = result
+        return result
     episode_2_claim = sorted(
         episode_2_candidates,
         key=lambda claim: (_day(_field(claim, "Service_Date_From", "dos")) or date.max, _claim_id(claim)),
     )[0]
     episode_2_date = _day(_field(episode_2_claim, "Service_Date_From", "dos"))
     if not episode_1_date or not episode_2_date or episode_2_date <= episode_1_date:
-        return _counterfactual_unavailable("EP2 must occur after EP1 for this counterfactual calculation.")
+        result = _counterfactual_unavailable("EP2 must occur after EP1 for this counterfactual calculation.")
+        _REFERENCE_COUNTERFACTUAL_CACHE[cache_key] = result
+        return result
 
     episode_1_cost, episode_1_error = _cost_for_claims([episode_1_claim])
     episode_2_cost, episode_2_error = _cost_for_claims([episode_2_claim])
     intervention_cost, intervention_error = _cost_for_claims([intervention_claim])
     if episode_1_error or episode_2_error or intervention_error:
-        return _counterfactual_unavailable(episode_1_error or episode_2_error or intervention_error)
+        result = _counterfactual_unavailable(episode_1_error or episode_2_error or intervention_error)
+        _REFERENCE_COUNTERFACTUAL_CACHE[cache_key] = result
+        return result
 
     actual_cost = (episode_1_cost + episode_2_cost).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     proposed_cost = (episode_1_cost + intervention_cost).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -460,7 +496,7 @@ def build_reference_intervention_counterfactual(database, member_id, diagnosis_f
     ep1_summary = _claim_summary(episode_1_claim)
     ep2_summary = _claim_summary(episode_2_claim)
     reference_summary = _claim_summary(reference_claim)
-    return {
+    result = {
         "available": True,
         "calculation_type": "reference_intervention_counterfactual",
         "calculation_basis": "billed_charge_amount",
@@ -516,11 +552,15 @@ def build_reference_intervention_counterfactual(database, member_id, diagnosis_f
         "disclaimer": "This is a claims-based billed-charge counterfactual. It does not prove that the intervention would have prevented the later episode or represent verified payer savings.",
         "source": database.source_banner() if hasattr(database, "source_banner") else None,
     }
+    _REFERENCE_COUNTERFACTUAL_CACHE[cache_key] = result
+    return result
 
 
 # ── Episode builder ──────────────────────────────────────────────────────
 
 EPISODE_WINDOW_DAYS = 90
+_REFERENCE_COUNTERFACTUAL_CACHE = BoundedCache(128)
+_SAME_PATIENT_BILLED_CACHE = BoundedCache(DEFAULT_MAX_SIZE)
 
 
 def _build_episodes(claims, window_days=EPISODE_WINDOW_DAYS):
@@ -816,8 +856,19 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
     amounts in the later episode. It deliberately does not claim clinical causation.
     """
     family = _text(diagnosis_family).upper()
+    cache_key = (
+        getattr(database, "workbook_hash", id(database)),
+        _text(member_id),
+        family,
+        _normalize_claim_identifier(anchor_claim_id),
+    )
+    cached = _SAME_PATIENT_BILLED_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     if not family:
-        return {"available": False, "member_id": member_id, "diagnosis_family": family, "reason": "No diagnosis family was supplied."}
+        result = {"available": False, "member_id": member_id, "diagnosis_family": family, "reason": "No diagnosis family was supplied."}
+        _SAME_PATIENT_BILLED_CACHE[cache_key] = result
+        return result
 
     reference_counterfactual = build_reference_intervention_counterfactual(
         database,
@@ -826,6 +877,7 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
         anchor_claim_id,
     )
     if reference_counterfactual.get("available"):
+        _SAME_PATIENT_BILLED_CACHE[cache_key] = reference_counterfactual
         return reference_counterfactual
 
     source_claims = getattr(database, "claims", database.selectable_claims)
@@ -924,13 +976,15 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
             break
 
     if not selected_pair:
-        return {
+        result = {
             "available": False,
             "member_id": member_id,
             "diagnosis_family": family,
             "anchor_claim_id": anchor_claim_id or None,
             "reason": "No earlier related episode without an intervention followed by a later related episode with a separately identifiable billed intervention line was found in this member's data.",
         }
+        _SAME_PATIENT_BILLED_CACHE[cache_key] = result
+        return result
 
     earlier, later, add_on_lines, later_index = selected_pair
     if explicit_intervening_episodes is not None:
@@ -1024,7 +1078,7 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
     if excluded_detail:
         intervention_reason += f" {excluded_detail} was not added because the same billed service was already present in the earlier visit."
 
-    return {
+    result = {
         "available": True,
         "member_id": member_id,
         "diagnosis_family": family,
@@ -1083,6 +1137,8 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
         "clinical_review_required": True,
         "disclaimer": "This is a billed-charge counterfactual for review. It does not establish that the later episode would have been prevented or that the billed difference is confirmed savings.",
     }
+    _SAME_PATIENT_BILLED_CACHE[cache_key] = result
+    return result
 
 
 def _find_patient_name(claims, member_id):

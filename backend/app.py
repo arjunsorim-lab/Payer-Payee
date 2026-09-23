@@ -205,10 +205,9 @@ def prediction_anchor_claim_id(database, claim_number):
     return claim_number
 
 
-# Render free instances need to answer their first request quickly. Keep
-# workbook loading lazy by default; deployments that prefer startup warming can
-# still opt in with PRELOAD_WORKBOOK=true.
-if os.getenv("PRELOAD_WORKBOOK", "false").strip().lower() in {"1", "true", "yes", "on"}:
+# Warm the workbook once at process startup so the first prediction calculation
+# does not pay the workbook parsing cost. Set PRELOAD_WORKBOOK=false to opt out.
+if os.getenv("PRELOAD_WORKBOOK", "true").strip().lower() in {"1", "true", "yes", "on"}:
     configured_workbook_database()
 
 

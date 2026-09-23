@@ -1094,6 +1094,10 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
   const normalizedQuery = searchQuery.trim().toLowerCase()
 
   useEffect(() => {
+    if (selectedClaim) {
+      setScenarioLoading(false)
+      return undefined
+    }
     let cancelled = false
     setScenarioLoading(true)
     const initialScenarioCount = 3
@@ -1148,7 +1152,7 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
     }
     loadScenarios()
     return () => { cancelled = true }
-  }, [claimsData.length])
+  }, [claimsData.length, selectedClaim])
 
   const filteredScenarios = useMemo(() => scenarios
     .filter((scenario) => {
@@ -1447,7 +1451,7 @@ function PredictionDetailPage({ claim, onBackToPredictions }) {
     setValueBasedCase(null)
     setCaseError('')
     const claimNumber = claim.claimId || claim.number
-    fetchJson(`/api/predictions/provider-case/${encodeURIComponent(claimNumber)}`)
+    fetchJson(`/api/predictions/provider-case/${encodeURIComponent(claimNumber)}?compact=true`)
       .then((payload) => {
         if (!cancelled) setScenario(payload || null)
       })
@@ -3716,7 +3720,16 @@ function DiseaseOverviewTable({ conditions, totalClaimsCount, onOpenPrediction, 
   const prediabetesDemoClaim = memberClaims.find(isPrediabetesDemoClaim);
   const featuredDemoClaim = prediabetesDemoClaim || memberClaims.find(isReferenceClaim);
   const featuredPredictionClaim = prediabetesDemoClaim
-    ? { ...prediabetesDemoClaim, claimId: 'CLM00001843', number: 'CLM-001843', memberId: 'MBR00016' }
+    ? {
+        ...prediabetesDemoClaim,
+        claimId: 'CLM00001843',
+        number: 'CLM-001843',
+        memberId: 'MBR00016',
+        diagnosisCode: 'R73.03',
+        diagnosisDescription: 'Prediabetes',
+        isHistoricalReference: false,
+        workbookFields: {},
+      }
     : featuredDemoClaim;
 
   // Helper for sparklines based on real claim allowed amounts

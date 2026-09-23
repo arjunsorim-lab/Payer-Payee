@@ -198,9 +198,19 @@ if os.getenv("PRELOAD_WORKBOOK", "false").strip().lower() in {"1", "true", "yes"
     configured_workbook_database()
 
 
-def workbook_prediction_with_rag(database, claim_number):
+def workbook_prediction_with_rag(database, claim_number, compact=False):
     claim_number = prediction_anchor_claim_id(database, claim_number)
     result = build_financial_result(database, claim_number)
+    if compact:
+        return {
+            **result,
+            "payer_savings_prediction": {"available": False, "reason": "Detailed payer comparison loads separately."},
+            "value_based_case": {"available": False, "reason": "Detailed review case loads separately."},
+            "rag": {"ready": False, "retrieved_documents": [], "retrieved_chunks": [], "deferred": True},
+            "rag_evidence": [],
+            "prediction_available": True,
+            "explanation_available": False,
+        }
     try:
         payer_savings_prediction = build_payer_prediction_for_claim(
             database,
@@ -1144,7 +1154,7 @@ def get_provider_case_prediction(claim_number):
     if database:
         try:
             return json_response(
-                workbook_prediction_with_rag(database, claim_number)
+                workbook_prediction_with_rag(database, claim_number, compact=query_flag(request.args, "compact", default=False))
             )
         except KeyError as error:
             return json_response({"message": str(error)}, 404)

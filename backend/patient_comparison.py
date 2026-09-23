@@ -298,7 +298,48 @@ def build_reference_intervention_counterfactual(database, member_id, diagnosis_f
     if not prediction_candidates:
         return _counterfactual_unavailable("No prediction EP1 claim with a historical Reference_Claim_ID was found.", member_id=member_id, diagnosis_family=family)
 
-    episode_1_claim = prediction_candidates[0]
+    anchored_later_claim = None
+    if normalized_anchor:
+        anchored_claim = prediction_candidates[0]
+        reason_code = _text(_field(anchored_claim, "Reason_Code")).upper()
+        treatment_outcome = _text(_field(anchored_claim, "Treatment_Outcome")).upper()
+        is_later_anchor = (
+            "READMISSION" in reason_code
+            or "HOSPITAL" in _text(_field(anchored_claim, "CPT_Description", "cptDescription")).upper()
+            or "HOSPITAL" in _text(_field(anchored_claim, "Place_of_Service", "placeOfService")).upper()
+            or "WORSEN" in treatment_outcome
+        )
+        if is_later_anchor:
+            anchored_later_claim = anchored_claim
+            reference_claim_id = _text(_field(anchored_later_claim, "Reference_Claim_ID"))
+            anchor_date = _day(_field(anchored_later_claim, "Service_Date_From", "dos"))
+            earlier_candidates = [
+                claim for claim in claims
+                if _member_id(claim) == member_id
+                and _claim_id(claim) != _claim_id(anchored_later_claim)
+                and _family(claim).upper() == family
+                and _text(_field(claim, "Reference_Claim_ID")) == reference_claim_id
+                and _boolean(_field(claim, "Intervention_Performed")) is not True
+                and not _is_excluded_financial_line(claim)
+                and _day(_field(claim, "Service_Date_From", "dos"))
+                and anchor_date
+                and _day(_field(claim, "Service_Date_From", "dos")) < anchor_date
+            ]
+            if not earlier_candidates:
+                return _counterfactual_unavailable(
+                    "The selected later claim is linked to a reference pathway, but no earlier EP1 claim was found before it.",
+                    reference_claim_id=reference_claim_id,
+                    episode_2_claim_id=_claim_id(anchored_later_claim),
+                )
+            episode_1_claim = sorted(
+                earlier_candidates,
+                key=lambda claim: (_day(_field(claim, "Service_Date_From", "dos")) or date.min, _claim_id(claim)),
+                reverse=True,
+            )[0]
+        else:
+            episode_1_claim = anchored_claim
+    else:
+        episode_1_claim = prediction_candidates[0]
     reference_claim_id = _text(_field(episode_1_claim, "Reference_Claim_ID"))
     reference_claim = next((claim for claim in claims if _claim_id(claim) == reference_claim_id), None)
     if not reference_claim:
@@ -361,15 +402,18 @@ def build_reference_intervention_counterfactual(database, member_id, diagnosis_f
         if _day(_field(claim, "Service_Date_From", "dos")) and episode_1_date
         and _day(_field(claim, "Service_Date_From", "dos")) > episode_1_date
     ]
-    episode_2_candidates = [
-        claim for claim in episode_2_candidates
-        if (
-            "READMISSION" in _text(_field(claim, "Reason_Code")).upper()
-            or "HOSPITAL" in _text(_field(claim, "CPT_Description", "cptDescription")).upper()
-            or "HOSPITAL" in _text(_field(claim, "Place_of_Service", "placeOfService")).upper()
-            or "WORSEN" in _text(_field(claim, "Treatment_Outcome")).upper()
-        )
-    ]
+    if anchored_later_claim is not None:
+        episode_2_candidates = [anchored_later_claim]
+    else:
+        episode_2_candidates = [
+            claim for claim in episode_2_candidates
+            if (
+                "READMISSION" in _text(_field(claim, "Reason_Code")).upper()
+                or "HOSPITAL" in _text(_field(claim, "CPT_Description", "cptDescription")).upper()
+                or "HOSPITAL" in _text(_field(claim, "Place_of_Service", "placeOfService")).upper()
+                or "WORSEN" in _text(_field(claim, "Treatment_Outcome")).upper()
+            )
+        ]
     if not episode_2_candidates:
         if invalid_earlier_ep2:
             return _counterfactual_unavailable("EP2 is linked but occurs before EP1, so the sequence is invalid.", reference_claim_id=reference_claim_id, episode_1_claim_id=_claim_id(episode_1_claim))

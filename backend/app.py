@@ -728,6 +728,9 @@ def get_member(member_id):
                 **member,
                 "claims": [workbook_claim_for_api(database, claim, include_summary=False, compact=compact) for claim in member_claims],
                 "latestClaim": workbook_claim_for_api(database, latest_claim, include_summary=False, compact=compact) if latest_claim else None,
+                # This summary is derived from this member's claims and is safe for
+                # the fast member view; the cohort comparison remains deferred.
+                **({"supportedMoneySummary": member_supported_summary(database, member_id)} if compact else {}),
                 **({} if compact else {
                     "supportedMoneySummary": member_supported_summary(database, member_id),
                     "payerCohortSavingsSummary": build_member_payer_cohort_summary(database, member_id),

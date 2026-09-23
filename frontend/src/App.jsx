@@ -2012,15 +2012,14 @@ function PlainLanguageClaimNarrative({ scenario, facts, summary, snapshot, histo
       <header>
         <span>A simple story about this visit</span>
         <h2 id="plain-claim-narrative-title">What this claim prediction is saying</h2>
-        <p>This section explains claim <strong>{facts.claim_id}</strong> in plain language: what happened, what the app is estimating, and which recorded claims support the recommendation. The outcome box below shows the claim evidence, including any no-readmission follow-up period. Model estimates are separate from recorded facts, so they should not be added together.</p>
+        <p>This section explains claim <strong>{facts.claim_id}</strong> in plain language: what happened, what the app is estimating, and which recorded claims support the recommendation. Model estimates are separate from recorded facts, so they should not be added together.</p>
       </header>
 
       {historicalEvidence?.reference_outcome_supported === true ? (
         <aside className="start-here-strongest-claim" role="note">
           <strong>This claim is one of the strongest demo claims.</strong> The historical reference patient
           received {historicalEvidence.reference_intervention} (claim {historicalEvidence.reference_intervention_claim_id || historicalEvidence.reference_claim_id})
-          and the historical reference pathway records about {historicalEvidence.historical_no_readmission_days} days of follow-up.
-          This prediction patient has the same diagnosis pattern but has not received that intervention
+          . This prediction patient has the same diagnosis pattern but has not received that intervention
           {historicalEvidence.prediction_readmission_billed_amount != null
             ? <> and later had a related hospitalization (claim {historicalEvidence.prediction_readmission_claim_id}) billed at {formatOptionalCurrency(historicalEvidence.prediction_readmission_billed_amount)}</>
             : null}
@@ -3188,7 +3187,6 @@ function ClaimOutcomeEvidencePanel({ facts }) {
     ['Matched diagnosis', evidence.reference_diagnosis],
     ['Intervention that improved the historical outcome', evidence.reference_intervention_claim_id ? `${evidence.reference_intervention} (${evidence.reference_intervention_claim_id})` : evidence.reference_intervention],
     ['Recorded historical outcome', evidence.reference_treatment_outcome],
-    ['Historical reference follow-up window', evidence.historical_no_readmission_days == null ? 'Not recorded' : `${evidence.historical_no_readmission_days} days after the historical intervention`],
     ['Prediction claim', evidence.prediction_claim_id],
     ['Intervention already performed', evidence.prediction_intervention_performed === 'N' ? 'No — the preventive intervention was not performed for this patient' : evidence.prediction_intervention_performed],
     ['Later hospitalization', evidence.claim_is_later_hospitalization ? `This claim (${evidence.prediction_readmission_claim_id}) is the later hospitalization` : (evidence.prediction_readmission_claim_id || 'Not recorded')],

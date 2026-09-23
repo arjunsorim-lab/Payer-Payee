@@ -305,7 +305,8 @@ class TestOutcomeEvidence(unittest.TestCase):
         self.assertEqual(evidence["reference_intervention_claim_id"], "REFERENCE-TRAINING")
         self.assertEqual(evidence["reference_intervention"], "Diabetes Self-Management Training, Individual, per 30 min")
         self.assertEqual(evidence["recommended_intervention"], "Diabetes Self-Management Training, Individual, per 30 min")
-        self.assertIn("historical reference patient", evidence["conclusion"])
+        self.assertIn("historical outcome belongs to the reference patient", evidence["conclusion"])
+        self.assertNotIn("200-day follow-up", evidence["conclusion"])
 
     def test_opening_the_readmission_claim_itself_stays_consistent(self):
         reference = claim(

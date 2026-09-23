@@ -265,12 +265,10 @@ def build_outcome_evidence(database, claim):
         f"Follow-up completed = {follow_up or 'Not recorded'}."
     )
     if historical_match:
-        no_readmission_days = historical_fields.get("Episode_Duration_Days")
         conclusion = (
             f"Historical claim {historical_reference.get('claimId')} records "
             f"{intervention_reference.get('cptDescription')} and an improved outcome. "
-            f"The historical reference pathway records a {no_readmission_days}-day follow-up period; "
-            "that window belongs to the historical reference patient, not to this prediction patient. "
+            "This historical outcome belongs to the reference patient, not to this prediction patient. "
             "This is comparison evidence for review; it does not establish that earlier care would prevent admission. "
         )
         if claim_is_later_hospitalization:

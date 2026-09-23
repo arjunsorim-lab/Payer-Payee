@@ -307,6 +307,8 @@ class TestOutcomeEvidence(unittest.TestCase):
         self.assertEqual(evidence["reference_intervention_claim_id"], "REFERENCE-TRAINING")
         self.assertEqual(evidence["reference_intervention"], "Diabetes Self-Management Training, Individual, per 30 min")
         self.assertEqual(evidence["recommended_intervention"], "Diabetes Self-Management Training, Individual, per 30 min")
+        self.assertIn("observed day(s) without a related readmission", evidence["reference_treatment_outcome"])
+        self.assertNotIn("200 days", evidence["reference_treatment_outcome"])
         self.assertIn("historical outcome belongs to the reference patient", evidence["conclusion"])
         self.assertNotIn("200-day follow-up", evidence["conclusion"])
 

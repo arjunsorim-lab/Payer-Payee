@@ -1,5 +1,6 @@
 """Data-driven linking of preventive visits to later outcomes."""
 from datetime import date
+import re
 
 from .evidence import (
     entry,
@@ -71,6 +72,11 @@ def _integer(value):
         return int(float(_text(value)))
     except (TypeError, ValueError):
         return None
+
+
+def _without_fixed_day_claim(value):
+    text = _text(value)
+    return re.sub(r"\s*(?:for|during)\s+\d+\s*(?:-day|day|days)\s*(?:follow-up)?", "", text, flags=re.IGNORECASE).strip(" ;")
 
 
 def _observed_no_readmission_days(intervention_claim, recorded_days, today=None):
@@ -338,7 +344,14 @@ def build_outcome_evidence(database, claim):
         "reference_intervention": intervention_reference.get("cptDescription") if intervention_reference else None,
         "reference_intervention_claim_id": intervention_reference.get("claimId") if intervention_reference else None,
         "reference_intervention_service_date": intervention_reference.get("dos") if intervention_reference else None,
-        "reference_treatment_outcome": _text(historical_fields.get("Treatment_Outcome")) or None,
+        "reference_treatment_outcome": (
+            (
+                f"{_without_fixed_day_claim(historical_fields.get('Treatment_Outcome'))}; "
+                f"{observed_no_readmission_days} observed day(s) without a related readmission"
+            )
+            if historical_match and observed_no_readmission_days is not None
+            else _text(historical_fields.get("Treatment_Outcome")) or None
+        ),
         "historical_no_readmission_days": observed_no_readmission_days if (historical_match or (positive and not later_related)) else None,
         "recorded_follow_up_days": _integer(historical_fields.get("Episode_Duration_Days") if historical_match else fields.get("Episode_Duration_Days")),
         "recommended_intervention": intervention_reference.get("cptDescription") if historical_match else None,

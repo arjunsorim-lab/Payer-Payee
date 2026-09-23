@@ -14,6 +14,57 @@ import {
   X,
 } from 'lucide-react'
 
+function ReferenceInterventionCounterfactualView({ result, family, compact = false }) {
+  const calculation = result?.calculation || {}
+  const intervention = result?.intervention || {}
+  const reference = result?.reference_patient || {}
+  const episode1 = result?.episode_1 || {}
+  const episode2 = result?.episode_2 || {}
+  const fmt = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value || 0)
+  const rowLabel = (rows = []) => rows.map((row) => `${row.claim_id} (${row.cpt || 'code n/a'})`).join(', ') || 'No claim ID'
+
+  return (
+    <section className="same-patient-billed-card" aria-labelledby="reference-counterfactual-heading">
+      <header>
+        <span className="same-patient-billed-kicker">Reference-intervention counterfactual · {family || reference.diagnosis_family}</span>
+        <h2 id="reference-counterfactual-heading">Potential billed savings from the specific reference intervention</h2>
+        <p>
+          This calculation uses the historical reference pathway for member <strong>{reference.member_id}</strong>, but only counts the specific intervention claim line <strong>{intervention.claim_id}</strong>. It compares that intervention with the later related episode for member <strong>{result.prediction_patient?.member_id}</strong>.
+        </p>
+      </header>
+
+      <div className="same-patient-billed-grid">
+        <div><span>EP1 initial episode</span><strong>{fmt(calculation.episode_1_cost)}</strong><small>{rowLabel(episode1.source_rows)}.</small></div>
+        <div><span>EP2 later related episode</span><strong>{fmt(calculation.episode_2_cost)}</strong><small>{rowLabel(episode2.source_rows)} · {result.days_between_episodes} days after EP1.</small></div>
+        <div><span>Specific intervention line</span><strong>{fmt(calculation.intervention_cost)}</strong><small>{intervention.claim_id} · {intervention.cpt} · {intervention.description}.</small></div>
+        <div><span>Actual cost</span><strong>{fmt(calculation.actual_cost)}</strong><small>EP1 + EP2.</small></div>
+        <div><span>Proposed cost</span><strong>{fmt(calculation.proposed_cost)}</strong><small>EP1 + the specific intervention line.</small></div>
+        <div className="difference"><span>Potential billed savings</span><strong>{fmt(calculation.potential_savings)}</strong><small>Actual cost − proposed cost.</small></div>
+      </div>
+
+      <div className="same-patient-billed-equation" role="note">
+        <strong>{calculation.formula}</strong>
+        <span>{fmt(calculation.actual_cost)} actual − {fmt(calculation.proposed_cost)} proposed = <b>{fmt(calculation.potential_savings)}</b></span>
+      </div>
+
+      {!compact ? (
+        <div className="calculation-explanation">
+          <h3>Source claim IDs</h3>
+          <ol>
+            <li><strong>Reference episode:</strong> {(result.reference_source_claim_ids || []).join(', ')}.</li>
+            <li><strong>Intervention cost:</strong> {(result.intervention_source_claim_ids || []).join(', ')} only. The reference office/preventive visit is not counted as the intervention.</li>
+            <li><strong>EP1 cost:</strong> {(result.episode_1_source_claim_ids || []).join(', ')}.</li>
+            <li><strong>EP2 cost:</strong> {(result.episode_2_source_claim_ids || []).join(', ')}.</li>
+          </ol>
+          <p><strong>Selection reason:</strong> {intervention.selection_reason}</p>
+        </div>
+      ) : null}
+
+      <p className="same-patient-billed-warning">{result.disclaimer}</p>
+    </section>
+  )
+}
+
 export function SamePatientBilledSavings({ memberId, diagnosisCode, claimId = '', claimAnchored = false }) {
   const family = String(diagnosisCode || '').slice(0, 3).toUpperCase()
   const [result, setResult] = useState(null)
@@ -53,6 +104,10 @@ export function SamePatientBilledSavings({ memberId, diagnosisCode, claimId = ''
     </div>
     <p className="same-patient-billed-warning">No amount is displayed because missing evidence must not be replaced with another member’s values.</p>
   </section>
+
+  if (result.calculation_type === 'reference_intervention_counterfactual') {
+    return <ReferenceInterventionCounterfactualView result={result} family={family} />
+  }
 
   const calculation = result.calculation
   const selectionAudit = result.selection_audit
@@ -692,6 +747,10 @@ export function CrossPatientComparatorContent({
 
       {comparisonResult && (
         <div className="comparator-results-section">
+          {comparisonResult.calculation_type === 'reference_intervention_counterfactual' ? (
+            <ReferenceInterventionCounterfactualView result={comparisonResult} family={selectedFamily} />
+          ) : (
+          <>
           {(comparisonResult.higher_cost_patient.episode.synthetic_demo || comparisonResult.lower_cost_patient.episode.synthetic_demo) ? <div className="synthetic-demo-notice" role="note"><ShieldAlert size={18} /><span><strong>Synthetic presentation data is included.</strong> Use this comparison to demonstrate the billed-amount workflow, not as evidence about a real patient.</span></div> : null}
           {/* Executive Savings Banner */}
           <div className="comparator-savings-banner">
@@ -1033,6 +1092,8 @@ export function CrossPatientComparatorContent({
               <p>{comparisonResult.disclaimer}</p>
             </div>
           </div>
+          </>
+          )}
         </div>
       )}
     </div>

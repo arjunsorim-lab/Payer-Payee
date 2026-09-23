@@ -2010,7 +2010,7 @@ function PlainLanguageClaimNarrative({ scenario, facts, summary, snapshot, histo
   return (
     <section className="plain-claim-narrative" aria-labelledby="plain-claim-narrative-title">
       <header>
-        <span>Quick explanation</span>
+        <span>A simple story about this visit</span>
         <h2 id="plain-claim-narrative-title">What this claim prediction is saying</h2>
         <p>This section explains claim <strong>{facts.claim_id}</strong> in plain language: what happened, what the app is estimating, and which recorded claims support the recommendation. The outcome box below shows the claim evidence, including any no-readmission follow-up period. Model estimates are separate from recorded facts, so they should not be added together.</p>
       </header>

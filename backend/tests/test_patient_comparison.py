@@ -2,6 +2,7 @@
 import unittest
 from backend.workbook_enrichment import load_workbook_database
 from backend.patient_comparison import (
+    build_reference_intervention_counterfactual,
     build_same_patient_billed_intervention_savings,
     compare_patients,
     discover_comparable_pairs,
@@ -11,7 +12,11 @@ from backend.patient_comparison import (
 
 class SyntheticDatabase:
     def __init__(self, claims):
+        self.claims = tuple(claims)
         self.selectable_claims = tuple(claims)
+
+    def source_banner(self):
+        return {"workbook_name": "synthetic-test-workbook.xlsx"}
 
 
 def billed_claim(claim_id, service_date, charge, cpt, description):
@@ -28,6 +33,62 @@ def billed_claim(claim_id, service_date, charge, cpt, description):
         "Paid_Amount": 0,
         "Is_Historical_Reference_Record": "N",
     }}
+
+
+def reference_claim(claim_id, member, service_date, charge, cpt, description, **overrides):
+    claim = billed_claim(claim_id, service_date, charge, cpt, description)
+    fields = claim["workbookFields"]
+    fields.update({
+        "Member_ID": member,
+        "ICD10_Family": "R73",
+        "ICD10_Diagnosis_Code": "R73.03",
+        "ICD10_Diagnosis_Description": "Prediabetes",
+        "Reference_Claim_Flag": "Y",
+        "Intervention_Performed": "Y",
+        "Condition_Resolved": "Y",
+        "Treatment_Outcome": "Improved; no related readmission",
+        "Follow_Up_Completed": "Y",
+        "Episode_Duration_Days": 200,
+        **overrides,
+    })
+    return claim
+
+
+def prediction_claim(claim_id, member, service_date, charge, cpt, description, reference_id, **overrides):
+    claim = billed_claim(claim_id, service_date, charge, cpt, description)
+    fields = claim["workbookFields"]
+    fields.update({
+        "Member_ID": member,
+        "ICD10_Family": "R73",
+        "ICD10_Diagnosis_Code": "R73.03",
+        "ICD10_Diagnosis_Description": "Prediabetes",
+        "Reference_Claim_ID": reference_id,
+        "Reference_Claim_Flag": "N",
+        "Intervention_Performed": "N",
+        "Related_Claim_Flag": "N",
+        "Reason_Code": "PREDICTION_TARGET_PREVENTIVE_INTERVENTION",
+        **overrides,
+    })
+    return claim
+
+
+def readmission_claim(claim_id, member, service_date, charge, reference_id, **overrides):
+    fields = {
+        "Related_Claim_Flag": "Y",
+        "Reason_Code": "PREDICTED_AVOIDABLE_READMISSION",
+        **overrides,
+    }
+    claim = prediction_claim(
+        claim_id,
+        member,
+        service_date,
+        charge,
+        "99223",
+        "Initial Hospital Care - Prediabetes Progression",
+        reference_id,
+        **fields,
+    )
+    return claim
 
 
 class TestOrganMapping(unittest.TestCase):
@@ -137,6 +198,157 @@ class TestComparePatients(unittest.TestCase):
             self.assertIn(item["category"], {"additional", "excess", "price_variation"})
 
 
+class TestReferenceInterventionCounterfactual(unittest.TestCase):
+    def test_supplied_prediabetes_workbook_fixture_uses_specific_intervention_line(self):
+        database = load_workbook_database("data/claims-demo.xlsx")
+
+        result = build_reference_intervention_counterfactual(
+            database, "MBR00016", "R73", "CLM00001842"
+        )
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["calculation_type"], "reference_intervention_counterfactual")
+        self.assertEqual(result["calculation_basis"], "billed_charge_amount")
+        self.assertEqual(result["reference_patient"]["member_id"], "MBR00015")
+        self.assertEqual(result["reference_patient"]["reference_claim_id"], "CLM00001084")
+        self.assertEqual(result["intervention"]["claim_id"], "CLM00001084B")
+        self.assertEqual(result["intervention"]["cpt"], "G0108")
+        self.assertEqual(result["intervention"]["billed_amount"], 288.37)
+        self.assertNotIn("CLM00001084", result["intervention_source_claim_ids"])
+        self.assertIn("CLM00001084", result["reference_source_claim_ids"])
+        self.assertEqual(result["episode_1"]["claim_ids"], ["CLM00001842"])
+        self.assertEqual(result["episode_2"]["claim_ids"], ["CLM00001843"])
+        self.assertEqual(result["days_between_episodes"], 45)
+        self.assertEqual(result["calculation"]["episode_1_cost"], 800.00)
+        self.assertEqual(result["calculation"]["episode_2_cost"], 4800.00)
+        self.assertEqual(result["calculation"]["intervention_cost"], 288.37)
+        self.assertEqual(result["calculation"]["actual_cost"], 5600.00)
+        self.assertEqual(result["calculation"]["proposed_cost"], 1088.37)
+        self.assertEqual(result["calculation"]["potential_savings"], 4511.63)
+
+    def test_reference_intervention_counterfactual_is_not_hardcoded(self):
+        db = SyntheticDatabase([
+            reference_claim("REF-OFFICE-X", "REFERENCE-X", "2025-02-01", 700, "99395", "Preventive Visit"),
+            reference_claim("REF-INTERVENTION-X", "REFERENCE-X", "2025-02-01", 400, "99402", "Condition-specific coaching"),
+            prediction_claim("START-X", "TARGET-X", "2026-04-10", 1000, "99214", "Risk evaluation", "REF-OFFICE-X"),
+            readmission_claim("LATER-X", "TARGET-X", "2026-05-20", 6000, "REF-OFFICE-X"),
+        ])
+
+        result = build_reference_intervention_counterfactual(db, "TARGET-X", "R73", "START-X")
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["intervention"]["claim_id"], "REF-INTERVENTION-X")
+        self.assertEqual(result["calculation"]["actual_cost"], 7000.00)
+        self.assertEqual(result["calculation"]["proposed_cost"], 1400.00)
+        self.assertEqual(result["calculation"]["potential_savings"], 5600.00)
+
+    def test_unavailable_when_no_intervention_claim_line_found(self):
+        db = SyntheticDatabase([
+            reference_claim("REF-OFFICE", "REFERENCE", "2025-02-01", 700, "99395", "Preventive Visit"),
+            prediction_claim("START", "TARGET", "2026-04-10", 1000, "99214", "Risk evaluation", "REF-OFFICE"),
+            readmission_claim("LATER", "TARGET", "2026-05-20", 6000, "REF-OFFICE"),
+        ])
+
+        result = build_reference_intervention_counterfactual(db, "TARGET", "R73", "START")
+
+        self.assertFalse(result["available"])
+        self.assertIn("No distinct intervention claim line", result["reason"])
+
+    def test_unavailable_when_intervention_line_is_ambiguous(self):
+        db = SyntheticDatabase([
+            reference_claim("REF-OFFICE", "REFERENCE", "2025-02-01", 700, "99395", "Preventive Visit"),
+            reference_claim("REF-INT-A", "REFERENCE", "2025-02-01", 300, "99402", "Coaching"),
+            reference_claim("REF-INT-B", "REFERENCE", "2025-02-01", 200, "83036", "A1c test"),
+            prediction_claim("START", "TARGET", "2026-04-10", 1000, "99214", "Risk evaluation", "REF-OFFICE"),
+            readmission_claim("LATER", "TARGET", "2026-05-20", 6000, "REF-OFFICE"),
+        ])
+
+        result = build_reference_intervention_counterfactual(db, "TARGET", "R73", "START")
+
+        self.assertFalse(result["available"])
+        self.assertIn("More than one distinct intervention", result["reason"])
+
+    def test_unavailable_without_ep2(self):
+        db = SyntheticDatabase([
+            reference_claim("REF-OFFICE", "REFERENCE", "2025-02-01", 700, "99395", "Preventive Visit"),
+            reference_claim("REF-INT", "REFERENCE", "2025-02-01", 400, "99402", "Coaching"),
+            prediction_claim("START", "TARGET", "2026-04-10", 1000, "99214", "Risk evaluation", "REF-OFFICE"),
+        ])
+
+        result = build_reference_intervention_counterfactual(db, "TARGET", "R73", "START")
+
+        self.assertFalse(result["available"])
+        self.assertIn("No later related EP2", result["reason"])
+
+    def test_unrelated_ep2_is_excluded(self):
+        db = SyntheticDatabase([
+            reference_claim("REF-OFFICE", "REFERENCE", "2025-02-01", 700, "99395", "Preventive Visit"),
+            reference_claim("REF-INT", "REFERENCE", "2025-02-01", 400, "99402", "Coaching"),
+            prediction_claim("START", "TARGET", "2026-04-10", 1000, "99214", "Risk evaluation", "REF-OFFICE"),
+            readmission_claim("LATER", "TARGET", "2026-05-20", 6000, "OTHER-REFERENCE"),
+        ])
+
+        result = build_reference_intervention_counterfactual(db, "TARGET", "R73", "START")
+
+        self.assertFalse(result["available"])
+        self.assertIn("No later related EP2", result["reason"])
+
+    def test_ep2_before_ep1_is_invalid(self):
+        db = SyntheticDatabase([
+            reference_claim("REF-OFFICE", "REFERENCE", "2025-02-01", 700, "99395", "Preventive Visit"),
+            reference_claim("REF-INT", "REFERENCE", "2025-02-01", 400, "99402", "Coaching"),
+            prediction_claim("START", "TARGET", "2026-04-10", 1000, "99214", "Risk evaluation", "REF-OFFICE"),
+            readmission_claim("LATER", "TARGET", "2026-03-20", 6000, "REF-OFFICE"),
+        ])
+
+        result = build_reference_intervention_counterfactual(db, "TARGET", "R73", "START")
+
+        self.assertFalse(result["available"])
+        self.assertIn("sequence is invalid", result["reason"])
+
+    def test_reference_office_visit_itself_is_not_counted_as_intervention(self):
+        db = SyntheticDatabase([
+            reference_claim("REF-OFFICE", "REFERENCE", "2025-02-01", 700, "99395", "Preventive Visit", Intervention_Performed="N"),
+            prediction_claim("START", "TARGET", "2026-04-10", 1000, "99214", "Risk evaluation", "REF-OFFICE"),
+            readmission_claim("LATER", "TARGET", "2026-05-20", 6000, "REF-OFFICE"),
+        ])
+
+        result = build_reference_intervention_counterfactual(db, "TARGET", "R73", "START")
+
+        self.assertFalse(result["available"])
+        self.assertIn("No distinct intervention claim line", result["reason"])
+
+    def test_duplicate_corrected_claim_is_not_double_counted(self):
+        db = SyntheticDatabase([
+            reference_claim("REF-OFFICE", "REFERENCE", "2025-02-01", 700, "99395", "Preventive Visit"),
+            reference_claim("REF-INT", "REFERENCE", "2025-02-01", 400, "99402", "Coaching"),
+            prediction_claim("START", "TARGET", "2026-04-10", 1000, "99214", "Risk evaluation", "REF-OFFICE"),
+            readmission_claim("LATER", "TARGET", "2026-05-20", 6000, "REF-OFFICE"),
+            readmission_claim("LATER-DUP", "TARGET", "2026-05-21", 6000, "REF-OFFICE", Reason_Code="DUPLICATE"),
+        ])
+
+        result = build_reference_intervention_counterfactual(db, "TARGET", "R73", "START")
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["episode_2"]["claim_ids"], ["LATER"])
+        self.assertEqual(result["calculation"]["actual_cost"], 7000.00)
+
+    def test_missing_charge_amount_makes_calculation_unavailable(self):
+        intervention = reference_claim("REF-INT", "REFERENCE", "2025-02-01", 400, "99402", "Coaching")
+        intervention["workbookFields"]["Charge_Amount"] = None
+        db = SyntheticDatabase([
+            reference_claim("REF-OFFICE", "REFERENCE", "2025-02-01", 700, "99395", "Preventive Visit"),
+            intervention,
+            prediction_claim("START", "TARGET", "2026-04-10", 1000, "99214", "Risk evaluation", "REF-OFFICE"),
+            readmission_claim("LATER", "TARGET", "2026-05-20", 6000, "REF-OFFICE"),
+        ])
+
+        result = build_reference_intervention_counterfactual(db, "TARGET", "R73", "START")
+
+        self.assertFalse(result["available"])
+        self.assertIn("missing Charge_Amount", result["reason"])
+
+
 class TestSamePatientBilledInterventionSavings(unittest.TestCase):
     def setUp(self):
         self.db = SyntheticDatabase([
@@ -216,7 +428,7 @@ class TestSamePatientBilledInterventionSavings(unittest.TestCase):
         self.assertTrue(result["synthetic_demo"])
         self.assertEqual(result["calculation_basis"], "billed_amount")
         self.assertEqual(result["days_to_first_intervening_episode"], 25)
-        self.assertEqual(result["days_between_episodes"], 32)
+        self.assertEqual(result["days_between_episodes"], 27)
         self.assertGreater(calculation["potential_billed_difference"], 0)
 
     def test_gynecological_journey_starts_at_first_symptomatic_visit(self):
@@ -230,7 +442,7 @@ class TestSamePatientBilledInterventionSavings(unittest.TestCase):
         self.assertEqual(result["earlier_episode"]["claims"][0]["claim_id"], "CLM09921096")
         self.assertEqual(result["intervening_episodes"][0]["claims"][0]["claim_id"], "SEQW-CLM09921096")
         self.assertEqual(result["later_episode"]["claims"][0]["claim_id"], "SEQP-CLM09921096")
-        self.assertEqual(result["days_between_episodes"], 32)
+        self.assertEqual(result["days_between_episodes"], 46)
         self.assertEqual(result["days_to_first_intervening_episode"], 25)
         self.assertGreater(calculation["potential_billed_difference"], 0)
 
@@ -279,7 +491,14 @@ class TestSamePatientBilledInterventionSavings(unittest.TestCase):
                 continue
             linked_rows.setdefault(str(fields["Reference_Claim_ID"]), []).append(fields)
 
-        self.assertEqual(set(linked_rows), {claim["claimId"] for claim in database.selectable_claims})
+        selectable_with_sequences = {
+            claim["claimId"] for claim in database.selectable_claims
+            if claim["workbookFields"].get("Reason_Code") not in {
+                "PREDICTION_TARGET_PREVENTIVE_INTERVENTION",
+                "PREDICTED_AVOIDABLE_READMISSION",
+            }
+        }
+        self.assertEqual(set(linked_rows), selectable_with_sequences)
         for claim_id, rows in linked_rows.items():
             self.assertEqual({row["Reason_Code"] for row in rows}, {
                 "SYNTHETIC_SEQUENCE_WORSENING",

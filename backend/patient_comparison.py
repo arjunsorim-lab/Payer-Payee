@@ -120,6 +120,15 @@ def _money(value):
     return float(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
+def _money_decimal(value):
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except Exception:
+        return None
+
+
 def _field(claim, name, canonical=None, default=""):
     value = claim.get("workbookFields", {}).get(name)
     if value not in (None, ""):
@@ -186,6 +195,262 @@ def _claim_summary(claim):
         "reason_code": _text(_field(claim, "Reason_Code")),
         "episode_duration_days": _number(_field(claim, "Episode_Duration_Days")),
         "synthetic_demo": _text(_field(claim, "Reason_Code")).upper() == "SYNTHETIC_PRESENTATION_CASE",
+    }
+
+
+def _is_positive_reference_outcome(claim):
+    fields = claim.get("workbookFields", {})
+    values = " | ".join(
+        _text(fields.get(key))
+        for key in ("Condition_Resolved", "Treatment_Outcome", "Follow_Up_Completed")
+    ).lower()
+    return (
+        _text(fields.get("Condition_Resolved")).upper() == "Y"
+        or _text(fields.get("Follow_Up_Completed")).upper() == "Y"
+        or any(term in values for term in ("resolved", "improved", "no related readmission", "no prediabetes-related readmission"))
+    )
+
+
+def _is_excluded_financial_line(claim):
+    fields = claim.get("workbookFields", {})
+    reason = _text(fields.get("Reason_Code")).upper()
+    status = _text(fields.get("Claim_Status") or fields.get("Status")).upper()
+    text = f"{reason} {status}"
+    tokens = set(re.split(r"[^A-Z0-9]+", text))
+    return bool(tokens & {"REVERSAL", "REVERSED", "CORRECTED", "DUPLICATE", "VOID", "VOIDED"})
+
+
+def _is_office_or_preventive_visit(claim):
+    cpt = _text(_field(claim, "CPT_Code", "cptCode"))
+    description = _text(_field(claim, "CPT_Description", "cptDescription")).lower()
+    return (
+        cpt in {str(code) for code in range(99381, 99398)}
+        or cpt in {"99213", "99214", "99215"}
+        or "office visit" in description
+        or "preventive visit" in description
+    )
+
+
+def _cost_for_claims(claims):
+    total = Decimal("0.00")
+    source_ids = []
+    for claim in claims:
+        if _is_excluded_financial_line(claim):
+            continue
+        amount = _money_decimal(_field(claim, "Charge_Amount", "totalCharge"))
+        if amount is None:
+            return None, f"Claim {_claim_id(claim)} is missing Charge_Amount; billed-charge calculation was not substituted with another amount."
+        total += amount
+        source_ids.append(_claim_id(claim))
+    return total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), None
+
+
+def _same_service_date(left, right):
+    return _day(_field(left, "Service_Date_From", "dos")) == _day(_field(right, "Service_Date_From", "dos"))
+
+
+def _counterfactual_unavailable(reason, **extra):
+    return {
+        "available": False,
+        "calculation_type": "reference_intervention_counterfactual",
+        "calculation_basis": "billed_charge_amount",
+        "reason": reason,
+        **extra,
+    }
+
+
+def build_reference_intervention_counterfactual(database, member_id, diagnosis_family, anchor_claim_id=""):
+    """Build Actual = EP1 + EP2; Proposed = EP1 + one reference intervention line.
+
+    This pathway is used when a prediction patient points to a historical
+    positive-outcome reference episode. The reference episode may contain an
+    office visit and other service lines, but the intervention cost comes from
+    exactly one distinct intervention claim line.
+    """
+    family = _text(diagnosis_family).upper()
+    claims = list(getattr(database, "claims", ())) or list(getattr(database, "selectable_claims", ()))
+    if not claims or not member_id or not family:
+        return _counterfactual_unavailable("Claims, member_id, and diagnosis_family are required.")
+
+    normalized_anchor = _text(anchor_claim_id).replace("-", "").upper()
+    prediction_candidates = [
+        claim for claim in claims
+        if _member_id(claim) == member_id
+        and _family(claim).upper() == family
+        and _text(_field(claim, "Reference_Claim_ID"))
+        and _boolean(_field(claim, "Intervention_Performed")) is not True
+        and not _is_excluded_financial_line(claim)
+    ]
+    if normalized_anchor:
+        prediction_candidates = [
+            claim for claim in prediction_candidates
+            if _claim_id(claim).replace("-", "").upper() == normalized_anchor
+        ]
+    else:
+        prediction_candidates = sorted(
+            prediction_candidates,
+            key=lambda claim: (
+                0 if "PREDICTION" in _text(_field(claim, "Reason_Code")).upper() else 1,
+                _day(_field(claim, "Service_Date_From", "dos")) or date.max,
+                _claim_id(claim),
+            ),
+        )
+    if not prediction_candidates:
+        return _counterfactual_unavailable("No prediction EP1 claim with a historical Reference_Claim_ID was found.", member_id=member_id, diagnosis_family=family)
+
+    episode_1_claim = prediction_candidates[0]
+    reference_claim_id = _text(_field(episode_1_claim, "Reference_Claim_ID"))
+    reference_claim = next((claim for claim in claims if _claim_id(claim) == reference_claim_id), None)
+    if not reference_claim:
+        return _counterfactual_unavailable("The prediction claim points to a reference claim that is not present in the workbook.", reference_claim_id=reference_claim_id)
+    if _family(reference_claim).upper() != family or not _is_positive_reference_outcome(reference_claim):
+        return _counterfactual_unavailable("The referenced claim does not record a supported positive outcome for the same diagnosis family.", reference_claim_id=reference_claim_id)
+
+    baseline_cpts = {_text(_field(episode_1_claim, "CPT_Code", "cptCode"))}
+    reference_rows = [
+        claim for claim in claims
+        if _member_id(claim) == _member_id(reference_claim)
+        and _family(claim).upper() == family
+        and (
+            _claim_id(claim) == reference_claim_id
+            or _text(_field(claim, "Reference_Claim_ID")) == reference_claim_id
+            or _same_service_date(claim, reference_claim)
+        )
+        and _is_positive_reference_outcome(claim)
+        and _text(_field(claim, "Reference_Claim_Flag")).upper() == "Y"
+        and not _is_excluded_financial_line(claim)
+    ]
+    intervention_candidates = [
+        claim for claim in reference_rows
+        if _claim_id(claim) != reference_claim_id
+        and _boolean(_field(claim, "Intervention_Performed")) is True
+        and _text(_field(claim, "CPT_Code", "cptCode")) not in baseline_cpts
+        and not _is_office_or_preventive_visit(claim)
+    ]
+    if not intervention_candidates:
+        return _counterfactual_unavailable(
+            "No distinct intervention claim line was found inside the historical reference pathway.",
+            reference_claim_id=reference_claim_id,
+        )
+    if len(intervention_candidates) > 1:
+        return _counterfactual_unavailable(
+            "More than one distinct intervention claim line matched the historical reference pathway, so the engine did not guess.",
+            reference_claim_id=reference_claim_id,
+            candidate_intervention_claim_ids=[_claim_id(claim) for claim in intervention_candidates],
+        )
+    intervention_claim = intervention_candidates[0]
+
+    episode_1_date = _day(_field(episode_1_claim, "Service_Date_From", "dos"))
+    episode_2_candidates = [
+        claim for claim in claims
+        if _member_id(claim) == member_id
+        and _claim_id(claim) != _claim_id(episode_1_claim)
+        and _family(claim).upper() == family
+        and _text(_field(claim, "Reference_Claim_ID")) == reference_claim_id
+        and _text(_field(claim, "Related_Claim_Flag")).upper() == "Y"
+        and _boolean(_field(claim, "Intervention_Performed")) is not True
+        and not _is_excluded_financial_line(claim)
+    ]
+    invalid_earlier_ep2 = [
+        claim for claim in episode_2_candidates
+        if _day(_field(claim, "Service_Date_From", "dos")) and episode_1_date
+        and _day(_field(claim, "Service_Date_From", "dos")) <= episode_1_date
+    ]
+    episode_2_candidates = [
+        claim for claim in episode_2_candidates
+        if _day(_field(claim, "Service_Date_From", "dos")) and episode_1_date
+        and _day(_field(claim, "Service_Date_From", "dos")) > episode_1_date
+    ]
+    episode_2_candidates = [
+        claim for claim in episode_2_candidates
+        if (
+            "READMISSION" in _text(_field(claim, "Reason_Code")).upper()
+            or "HOSPITAL" in _text(_field(claim, "CPT_Description", "cptDescription")).upper()
+            or "HOSPITAL" in _text(_field(claim, "Place_of_Service", "placeOfService")).upper()
+            or "WORSEN" in _text(_field(claim, "Treatment_Outcome")).upper()
+        )
+    ]
+    if not episode_2_candidates:
+        if invalid_earlier_ep2:
+            return _counterfactual_unavailable("EP2 is linked but occurs before EP1, so the sequence is invalid.", reference_claim_id=reference_claim_id, episode_1_claim_id=_claim_id(episode_1_claim))
+        return _counterfactual_unavailable("No later related EP2 worsening or hospital episode was found.", reference_claim_id=reference_claim_id, episode_1_claim_id=_claim_id(episode_1_claim))
+    episode_2_claim = sorted(
+        episode_2_candidates,
+        key=lambda claim: (_day(_field(claim, "Service_Date_From", "dos")) or date.max, _claim_id(claim)),
+    )[0]
+    episode_2_date = _day(_field(episode_2_claim, "Service_Date_From", "dos"))
+    if not episode_1_date or not episode_2_date or episode_2_date <= episode_1_date:
+        return _counterfactual_unavailable("EP2 must occur after EP1 for this counterfactual calculation.")
+
+    episode_1_cost, episode_1_error = _cost_for_claims([episode_1_claim])
+    episode_2_cost, episode_2_error = _cost_for_claims([episode_2_claim])
+    intervention_cost, intervention_error = _cost_for_claims([intervention_claim])
+    if episode_1_error or episode_2_error or intervention_error:
+        return _counterfactual_unavailable(episode_1_error or episode_2_error or intervention_error)
+
+    actual_cost = (episode_1_cost + episode_2_cost).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    proposed_cost = (episode_1_cost + intervention_cost).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    potential_savings = (actual_cost - proposed_cost).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    intervention_summary = _claim_summary(intervention_claim)
+    ep1_summary = _claim_summary(episode_1_claim)
+    ep2_summary = _claim_summary(episode_2_claim)
+    reference_summary = _claim_summary(reference_claim)
+    return {
+        "available": True,
+        "calculation_type": "reference_intervention_counterfactual",
+        "calculation_basis": "billed_charge_amount",
+        "reference_patient": {
+            "member_id": _member_id(reference_claim),
+            "diagnosis_family": family,
+            "reference_claim_id": reference_claim_id,
+            "recorded_outcome": _text(_field(reference_claim, "Treatment_Outcome")),
+        },
+        "reference_episode": {
+            "claim_ids": [_claim_id(claim) for claim in reference_rows],
+            "service_date": reference_summary["service_date"],
+            "source_rows": [_claim_summary(claim) for claim in reference_rows],
+        },
+        "intervention": {
+            "claim_id": intervention_summary["claim_id"],
+            "cpt": intervention_summary["cpt"],
+            "description": intervention_summary["procedure_description"],
+            "billed_amount": _money(intervention_cost),
+            "selection_reason": "Selected as the one distinct intervention line in the positive-outcome reference pathway. The reference office/preventive visit itself is excluded.",
+            "source_rows": [intervention_summary],
+        },
+        "prediction_patient": {
+            "member_id": member_id,
+        },
+        "episode_1": {
+            "claim_ids": [ep1_summary["claim_id"]],
+            "service_date": ep1_summary["service_date"],
+            "billed_cost": _money(episode_1_cost),
+            "source_rows": [ep1_summary],
+        },
+        "episode_2": {
+            "claim_ids": [ep2_summary["claim_id"]],
+            "service_date": ep2_summary["service_date"],
+            "billed_cost": _money(episode_2_cost),
+            "source_rows": [ep2_summary],
+        },
+        "days_between_episodes": (episode_2_date - episode_1_date).days,
+        "calculation": {
+            "episode_1_cost": _money(episode_1_cost),
+            "episode_2_cost": _money(episode_2_cost),
+            "intervention_cost": _money(intervention_cost),
+            "actual_cost": _money(actual_cost),
+            "proposed_cost": _money(proposed_cost),
+            "potential_savings": _money(potential_savings),
+            "formula": "Actual = EP1 + EP2; Proposed = EP1 + Intervention; Savings = Actual - Proposed",
+        },
+        "episode_1_source_claim_ids": [ep1_summary["claim_id"]],
+        "episode_2_source_claim_ids": [ep2_summary["claim_id"]],
+        "intervention_source_claim_ids": [intervention_summary["claim_id"]],
+        "reference_source_claim_ids": [_claim_id(claim) for claim in reference_rows],
+        "clinical_review_required": True,
+        "disclaimer": "This is a claims-based billed-charge counterfactual. It does not prove that the intervention would have prevented the later episode or represent verified payer savings.",
+        "source": database.source_banner() if hasattr(database, "source_banner") else None,
     }
 
 
@@ -353,6 +618,15 @@ def compare_patients(database, member_id_1, member_id_2, diagnosis_family):
     if member_id_1 == member_id_2:
         raise ValueError("The two patients must be different members.")
 
+    for prediction_member in (member_id_1, member_id_2):
+        counterfactual = build_reference_intervention_counterfactual(
+            database,
+            prediction_member,
+            diagnosis_family,
+        )
+        if counterfactual.get("available"):
+            return counterfactual
+
     # Comparable-pair evidence must exclude synthetic peer rows so it doesn't
     # contaminate unrelated comparisons.
     claims = [
@@ -480,6 +754,15 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
     family = _text(diagnosis_family).upper()
     if not family:
         return {"available": False, "member_id": member_id, "diagnosis_family": family, "reason": "No diagnosis family was supplied."}
+
+    reference_counterfactual = build_reference_intervention_counterfactual(
+        database,
+        member_id,
+        family,
+        anchor_claim_id,
+    )
+    if reference_counterfactual.get("available"):
+        return reference_counterfactual
 
     source_claims = getattr(database, "claims", database.selectable_claims)
     normalized_anchor = _text(anchor_claim_id).replace("-", "")

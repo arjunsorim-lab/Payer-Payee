@@ -4408,8 +4408,8 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
 
           <DiseaseOverviewTable
             conditions={memberConditions}
-            totalClaimsCount={member.claims.length}
-            memberClaims={member.claims}
+            totalClaimsCount={displayMember.claims.length}
+            memberClaims={displayMember.claims}
             onOpenPrediction={onOpenPrediction}
           />
         </div>

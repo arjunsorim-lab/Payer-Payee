@@ -125,10 +125,19 @@ const CLAIMS_CACHE_PREFIX = 'payerpayee.claims.workbook.'
 const EMPTY_DATE_RANGE = { from: '', to: '' }
 const CLICKABLE_NAV_LABELS = new Set(['Patient 360', 'Predictions', 'Claims', 'Patient Comparison'])
 const VALID_VIEWS = new Set(['home', 'member', 'predictions', 'claims', 'compare'])
+const truthyFlag = (value) => {
+  const text = String(value ?? '').trim().toUpperCase()
+  return ['Y', 'YES', 'TRUE', '1'].includes(text)
+}
 const isReferenceClaim = (claim) => Boolean(
   claim.isHistoricalReference
-  || claim.workbookFields?.Reference_Claim_Flag
-  || claim.workbookFields?.reference_claim_flag,
+  || truthyFlag(claim.workbookFields?.Reference_Claim_Flag)
+  || truthyFlag(claim.workbookFields?.reference_claim_flag),
+)
+const isPrediabetesDemoClaim = (claim) => (
+  claim.memberId === 'MBR00015'
+  && claim.diagnosisCode === 'R73.03'
+  && ['CLM00001084', 'CLM00001084B'].includes(claim.claimId)
 )
 
 function buildDataModel(claimsData) {
@@ -3704,7 +3713,11 @@ function DiseaseOverviewTable({ conditions, totalClaimsCount, onOpenPrediction, 
 
   const totalAllowedSum = conditions.reduce((acc, c) => acc + c.totalAllowed, 0);
   const riskLevel = totalAllowedSum > 50000 || totalConditions >= 4 ? 'High' : (totalAllowedSum > 15000 || totalConditions >= 2 ? 'Medium' : 'Low');
-  const featuredDemoClaim = memberClaims.find(isReferenceClaim);
+  const prediabetesDemoClaim = memberClaims.find(isPrediabetesDemoClaim);
+  const featuredDemoClaim = prediabetesDemoClaim || memberClaims.find(isReferenceClaim);
+  const featuredPredictionClaim = prediabetesDemoClaim
+    ? { ...prediabetesDemoClaim, claimId: 'CLM00001843', number: 'CLM-001843', memberId: 'MBR00016' }
+    : featuredDemoClaim;
 
   // Helper for sparklines based on real claim allowed amounts
   const generateSparkline = (item) => {
@@ -3742,10 +3755,10 @@ function DiseaseOverviewTable({ conditions, totalClaimsCount, onOpenPrediction, 
         <div className="disease-walkthrough-card">
           <div>
             <span>Start the demo here</span>
-            <h3>Open the Psychotherapy 60 min claim from 14 Jul 2025</h3>
-            <p>This opens claim {featuredDemoClaim.number} and its different-member comparison, including the recorded Paid_Amount values and the possible payer-spending difference.</p>
+            <h3>{prediabetesDemoClaim ? 'Open the Prediabetes example (R73.03)' : `Open claim ${featuredDemoClaim.number || featuredDemoClaim.claimId}`}</h3>
+            <p>{prediabetesDemoClaim ? 'This opens the CLM-001843 prediction and the billed calculation using EP1 CLM00001842, EP2 CLM00001843, and intervention CLM00001084B.' : `This opens claim ${featuredDemoClaim.number || featuredDemoClaim.claimId} and its comparison evidence.`}</p>
           </div>
-          <button type="button" onClick={() => onOpenPrediction(featuredDemoClaim)}>
+          <button type="button" onClick={() => onOpenPrediction(featuredPredictionClaim)}>
             Open this example <ArrowRight size={16} />
           </button>
         </div>
@@ -4226,6 +4239,12 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
 
   const memberConditions = useMemo(() => {
     const conditions = buildMemberConditions(displayMember.claims)
+    const prediabetesDemoCodes = new Set(
+      displayMember.claims
+        .filter(isPrediabetesDemoClaim)
+        .map((claim) => claim.diagnosisCode)
+        .filter(Boolean),
+    )
     const referenceCodes = new Set(
       displayMember.claims
         .filter(isReferenceClaim)
@@ -4233,8 +4252,8 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
         .filter(Boolean),
     )
     return conditions.sort((left, right) => {
-      const leftPriority = referenceCodes.has(left.code) ? 1 : 0
-      const rightPriority = referenceCodes.has(right.code) ? 1 : 0
+      const leftPriority = (prediabetesDemoCodes.has(left.code) ? 2 : 0) + (referenceCodes.has(left.code) ? 1 : 0)
+      const rightPriority = (prediabetesDemoCodes.has(right.code) ? 2 : 0) + (referenceCodes.has(right.code) ? 1 : 0)
       return rightPriority - leftPriority
     })
   }, [displayMember.claims])

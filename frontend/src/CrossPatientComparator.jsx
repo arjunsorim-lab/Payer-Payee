@@ -22,42 +22,82 @@ function ReferenceInterventionCounterfactualView({ result, family, compact = fal
   const episode2 = result?.episode_2 || {}
   const fmt = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value || 0)
   const rowLabel = (rows = []) => rows.map((row) => `${row.claim_id} (${row.cpt || 'code n/a'})`).join(', ') || 'No claim ID'
+  const interventionLabel = `${intervention.claim_id || 'intervention claim'}${intervention.cpt ? ` (${intervention.cpt})` : ''}`
+  const episode1Claim = (episode1.source_rows || [])[0] || {}
+  const episode2Claim = (episode2.source_rows || [])[0] || {}
+  const referenceRows = result.reference_episode?.source_rows || []
 
   return (
     <section className="same-patient-billed-card" aria-labelledby="reference-counterfactual-heading">
       <header>
-        <span className="same-patient-billed-kicker">Reference-intervention counterfactual · {family || reference.diagnosis_family}</span>
-        <h2 id="reference-counterfactual-heading">Potential billed savings from the specific reference intervention</h2>
+        <span className="same-patient-billed-kicker">Claim-anchored billed comparison · {family || reference.diagnosis_family}</span>
+        <h2 id="reference-counterfactual-heading">Estimated billed impact of moving the specific intervention earlier</h2>
         <p>
-          This calculation uses the historical reference pathway for member <strong>{reference.member_id}</strong>, but only counts the specific intervention claim line <strong>{intervention.claim_id}</strong>. It compares that intervention with the later related episode for member <strong>{result.prediction_patient?.member_id}</strong>.
+          This compares the recorded two-visit journey for member <strong>{result.prediction_patient?.member_id}</strong> with a scenario that applies <strong>{intervention.description}</strong> at EP1. The intervention amount comes from the historical reference pathway for member <strong>{reference.member_id}</strong>, and only the specific line <strong>{interventionLabel}</strong> is counted.
         </p>
       </header>
 
       <div className="same-patient-billed-grid">
-        <div><span>EP1 initial episode</span><strong>{fmt(calculation.episode_1_cost)}</strong><small>{rowLabel(episode1.source_rows)}.</small></div>
-        <div><span>EP2 later related episode</span><strong>{fmt(calculation.episode_2_cost)}</strong><small>{rowLabel(episode2.source_rows)} · {result.days_between_episodes} days after EP1.</small></div>
-        <div><span>Specific intervention line</span><strong>{fmt(calculation.intervention_cost)}</strong><small>{intervention.claim_id} · {intervention.cpt} · {intervention.description}.</small></div>
-        <div><span>Actual cost</span><strong>{fmt(calculation.actual_cost)}</strong><small>EP1 + EP2.</small></div>
-        <div><span>Proposed cost</span><strong>{fmt(calculation.proposed_cost)}</strong><small>EP1 + the specific intervention line.</small></div>
-        <div className="difference"><span>Potential billed savings</span><strong>{fmt(calculation.potential_savings)}</strong><small>Actual cost − proposed cost.</small></div>
+        <div><span>EP1 initial episode actually billed</span><strong>{fmt(calculation.episode_1_cost)}</strong><small>{rowLabel(episode1.source_rows)}.</small></div>
+        <div><span>EP2 later hospitalization actually billed</span><strong>{fmt(calculation.episode_2_cost)}</strong><small>{rowLabel(episode2.source_rows)} · {result.days_between_episodes} days after EP1.</small></div>
+        <div><span>Cost of the service proposed earlier</span><strong>{fmt(calculation.intervention_cost)}</strong><small>{interventionLabel} · {intervention.description}.</small></div>
+        <div><span>What was billed across both visits</span><strong>{fmt(calculation.actual_cost)}</strong><small>{fmt(calculation.episode_1_cost)} EP1 + {fmt(calculation.episode_2_cost)} EP2.</small></div>
+        <div><span>Estimated EP1 with that intervention</span><strong>{fmt(calculation.proposed_cost)}</strong><small>{fmt(calculation.episode_1_cost)} EP1 + {fmt(calculation.intervention_cost)} intervention.</small></div>
+        <div className="difference"><span>Predicted billed amount that may be avoided</span><strong>{fmt(calculation.potential_savings)}</strong><small>{fmt(calculation.actual_cost)} actual total − {fmt(calculation.proposed_cost)} estimated earlier scenario.</small></div>
       </div>
 
       <div className="same-patient-billed-equation" role="note">
-        <strong>{calculation.formula}</strong>
+        <strong>Predicted billed difference</strong>
         <span>{fmt(calculation.actual_cost)} actual − {fmt(calculation.proposed_cost)} proposed = <b>{fmt(calculation.potential_savings)}</b></span>
       </div>
 
       {!compact ? (
+        <>
         <div className="calculation-explanation">
-          <h3>Source claim IDs</h3>
+          <h3>Where every number comes from</h3>
           <ol>
-            <li><strong>Reference episode:</strong> {(result.reference_source_claim_ids || []).join(', ')}.</li>
-            <li><strong>Intervention cost:</strong> {(result.intervention_source_claim_ids || []).join(', ')} only. The reference office/preventive visit is not counted as the intervention.</li>
-            <li><strong>EP1 cost:</strong> {(result.episode_1_source_claim_ids || []).join(', ')}.</li>
-            <li><strong>EP2 cost:</strong> {(result.episode_2_source_claim_ids || []).join(', ')}.</li>
+            <li><strong>EP1 source:</strong> {(result.episode_1_source_claim_ids || []).join(', ')} contributes {fmt(calculation.episode_1_cost)}.</li>
+            <li><strong>EP2 source:</strong> {(result.episode_2_source_claim_ids || []).join(', ')} contributes {fmt(calculation.episode_2_cost)}.</li>
+            <li><strong>Intervention source:</strong> {(result.intervention_source_claim_ids || []).join(', ')} contributes {fmt(calculation.intervention_cost)}. The reference preventive visit itself is not counted as the intervention.</li>
+            <li><strong>Actual total:</strong> {fmt(calculation.episode_1_cost)} + {fmt(calculation.episode_2_cost)} = <strong>{fmt(calculation.actual_cost)}</strong>.</li>
+            <li><strong>Estimated earlier scenario:</strong> {fmt(calculation.episode_1_cost)} + {fmt(calculation.intervention_cost)} = <strong>{fmt(calculation.proposed_cost)}</strong>.</li>
+            <li><strong>Predicted billed difference:</strong> {fmt(calculation.actual_cost)} − {fmt(calculation.proposed_cost)} = <strong>{fmt(calculation.potential_savings)}</strong>.</li>
           </ol>
-          <p><strong>Selection reason:</strong> {intervention.selection_reason}</p>
+          <p><strong>Why propose the service earlier?</strong> The selected intervention is the distinct self-management training line from the positive-outcome reference pathway. The calculation asks what the billed total would look like if that line were applied at EP1 and the later hospitalization were avoided.</p>
+          <p><strong>Why the difference is {fmt(calculation.potential_savings)}:</strong> EP1 appears in both totals. The difference is EP2 {fmt(calculation.episode_2_cost)} minus the intervention {fmt(calculation.intervention_cost)}.</p>
         </div>
+        <section className="intervention-selection-reason" aria-labelledby="reference-selection-heading">
+          <span>Selection reasoning</span>
+          <h3 id="reference-selection-heading">Why this claim and intervention were chosen</h3>
+          <div className="intervention-reason-grid">
+            <div><strong>Why this claim?</strong><p>{episode2Claim.claim_id || 'The selected claim'} is the later related episode for member {result.prediction_patient?.member_id}.</p></div>
+            <div><strong>Why this earlier visit?</strong><p>{episode1Claim.claim_id || 'EP1'} is the earlier claim in the same member and diagnosis family before the later hospitalization.</p></div>
+            <div><strong>Why this diagnosis?</strong><p>Both prediction claims are in ICD-10 family {family || reference.diagnosis_family}. {episode1Claim.icd10 && episode2Claim.icd10 ? `The recorded codes are ${episode1Claim.icd10} and ${episode2Claim.icd10}.` : ''}</p></div>
+            <div><strong>Why this intervention?</strong><p>{intervention.selection_reason}</p></div>
+          </div>
+          <p className="intervention-selection-rule"><strong>Selection rule:</strong> Use the selected later claim as EP2, find the closest earlier same-member claim for the same diagnosis family as EP1, then add only the distinct intervention line from the positive-outcome reference pathway.</p>
+        </section>
+        <details className="scenario-technical-details">
+          <summary>
+            <span className="technical-details-toggle-label"><FileText size={16} /><span>Show hard words, codes, and detailed math</span></span>
+            <span className="technical-details-toggle-help">Full glossary + source rows</span>
+            <ChevronRight size={16} />
+          </summary>
+          <div className="scenario-technical-content">
+            <p className="technical-details-context">Prediction member {result.prediction_patient?.member_id} · reference member {reference.member_id} · diagnosis family {family || reference.diagnosis_family}.</p>
+            <div className="episode-evidence-grid">
+              <div><h4>EP1 · {episode1.service_date || 'date unavailable'}</h4><p>Actual billed total: <strong>{fmt(calculation.episode_1_cost)}</strong></p><ul>{(episode1.source_rows || []).map((row) => <li key={row.claim_id}><strong>{row.claim_id}</strong> · {row.procedure_description || row.cpt} · ICD-10 {row.icd10 || 'not recorded'} · CPT {row.cpt || 'not recorded'} · billed {fmt(row.billed_amount)}</li>)}</ul></div>
+              <div><h4>EP2 · {episode2.service_date || 'date unavailable'}</h4><p>Actual billed total: <strong>{fmt(calculation.episode_2_cost)}</strong></p><ul>{(episode2.source_rows || []).map((row) => <li key={row.claim_id}><strong>{row.claim_id}</strong> · {row.procedure_description || row.cpt} · ICD-10 {row.icd10 || 'not recorded'} · CPT {row.cpt || 'not recorded'} · billed {fmt(row.billed_amount)}</li>)}</ul></div>
+            </div>
+            <div className="technical-details-section">
+              <h4>Reference pathway used for the intervention</h4>
+              <ul>
+                {referenceRows.map((row) => <li key={row.claim_id}><strong>{row.claim_id}</strong> · {row.procedure_description || row.cpt} · billed {fmt(row.billed_amount)}</li>)}
+              </ul>
+            </div>
+          </div>
+        </details>
+        </>
       ) : null}
 
       <p className="same-patient-billed-warning">{result.disclaimer}</p>

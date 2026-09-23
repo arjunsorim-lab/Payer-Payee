@@ -188,6 +188,20 @@ def prediction_anchor_claim_id(database, claim_number):
         anchor = database.find_claim(reference, selectable_only=True)
         if anchor:
             return anchor.get("claimId") or reference
+    reference_flag = str(fields.get("Reference_Claim_Flag") or "").strip().upper()
+    if reference_flag in {"Y", "YES", "TRUE", "1"}:
+        claim_id = claim.get("claimId") or claim_number
+        linked = [
+            row for row in database.selectable_claims
+            if str(row.get("workbookFields", {}).get("Reference_Claim_ID") or "").strip() == claim_id
+        ]
+        if linked:
+            linked.sort(key=lambda row: (
+                0 if "READMISSION" in str(row.get("workbookFields", {}).get("Reason_Code") or "").upper() else 1,
+                str(row.get("dos") or ""),
+                str(row.get("claimId") or ""),
+            ))
+            return linked[0].get("claimId") or claim_number
     return claim_number
 
 
@@ -700,6 +714,7 @@ def update_intervention_review(member_id, review_id):
 def get_member(member_id):
     database = configured_workbook_database()
     if database:
+        compact = query_flag(request.args, "compact", default=False)
         member = next(
             (item for item in database.members if item.get("memberId") == member_id),
             None,
@@ -711,10 +726,12 @@ def get_member(member_id):
         return json_response({
             "item": {
                 **member,
-                "claims": [workbook_claim_for_api(database, claim, include_summary=False) for claim in member_claims],
-                "latestClaim": workbook_claim_for_api(database, latest_claim, include_summary=False) if latest_claim else None,
-                "supportedMoneySummary": member_supported_summary(database, member_id),
-                "payerCohortSavingsSummary": build_member_payer_cohort_summary(database, member_id),
+                "claims": [workbook_claim_for_api(database, claim, include_summary=False, compact=compact) for claim in member_claims],
+                "latestClaim": workbook_claim_for_api(database, latest_claim, include_summary=False, compact=compact) if latest_claim else None,
+                **({} if compact else {
+                    "supportedMoneySummary": member_supported_summary(database, member_id),
+                    "payerCohortSavingsSummary": build_member_payer_cohort_summary(database, member_id),
+                }),
             },
             "source": database.source_banner(),
         })

@@ -2018,8 +2018,8 @@ function PlainLanguageClaimNarrative({ scenario, facts, summary, snapshot, histo
       {historicalEvidence?.reference_outcome_supported === true ? (
         <aside className="start-here-strongest-claim" role="note">
           <strong>This claim is one of the strongest demo claims.</strong> The historical reference patient
-          received preventive care ({historicalEvidence.reference_intervention}, claim {historicalEvidence.reference_claim_id})
-          and then had no related readmission for about {historicalEvidence.historical_no_readmission_days} days.
+          received {historicalEvidence.reference_intervention} (claim {historicalEvidence.reference_intervention_claim_id || historicalEvidence.reference_claim_id})
+          and the historical reference pathway records about {historicalEvidence.historical_no_readmission_days} days of follow-up.
           This prediction patient has the same diagnosis pattern but has not received that intervention
           {historicalEvidence.prediction_readmission_billed_amount != null
             ? <> and later had a related hospitalization (claim {historicalEvidence.prediction_readmission_claim_id}) billed at {formatOptionalCurrency(historicalEvidence.prediction_readmission_billed_amount)}</>
@@ -3186,14 +3186,14 @@ function ClaimOutcomeEvidencePanel({ facts }) {
     ['Matched episode', evidence.episode_id],
     ['Historical reference claim', evidence.reference_claim_id],
     ['Matched diagnosis', evidence.reference_diagnosis],
-    ['Intervention that improved the historical outcome', evidence.reference_intervention],
+    ['Intervention that improved the historical outcome', evidence.reference_intervention_claim_id ? `${evidence.reference_intervention} (${evidence.reference_intervention_claim_id})` : evidence.reference_intervention],
     ['Recorded historical outcome', evidence.reference_treatment_outcome],
-    ['No related readmission recorded for', evidence.historical_no_readmission_days == null ? 'Not recorded' : `${evidence.historical_no_readmission_days} days`],
+    ['Historical reference follow-up window', evidence.historical_no_readmission_days == null ? 'Not recorded' : `${evidence.historical_no_readmission_days} days after the historical intervention`],
     ['Prediction claim', evidence.prediction_claim_id],
     ['Intervention already performed', evidence.prediction_intervention_performed === 'N' ? 'No — the preventive intervention was not performed for this patient' : evidence.prediction_intervention_performed],
     ['Later hospitalization', evidence.claim_is_later_hospitalization ? `This claim (${evidence.prediction_readmission_claim_id}) is the later hospitalization` : (evidence.prediction_readmission_claim_id || 'Not recorded')],
     ['Time to later hospitalization', evidence.prediction_readmission_gap_days == null ? 'Not recorded' : `${evidence.prediction_readmission_gap_days} days`],
-    ['Recommended earlier intervention', evidence.recommended_intervention],
+    ['Recommended earlier intervention', evidence.reference_intervention_claim_id ? `${evidence.recommended_intervention} (${evidence.reference_intervention_claim_id})` : evidence.recommended_intervention],
   ] : [
     ['Preventive claim', evidence.preventive_claim_id || 'Not recorded'],
     ['Preventive service date', evidence.preventive_service_date || 'Not recorded'],

@@ -71,6 +71,39 @@ def _claim_by_id(database, claim_id):
     )
 
 
+def _same_service_day(left, right):
+    return _text(left.get("dos"))[:10] == _text(right.get("dos"))[:10]
+
+
+def _office_or_preventive_visit(claim):
+    description = f"{claim.get('cptDescription', '')} {claim.get('workbookFields', {}).get('Procedure_Description', '')}".lower()
+    cpt = _text(claim.get("cptCode"))
+    return (
+        cpt in {str(code) for code in range(99381, 99398)}
+        or cpt in {"99213", "99214", "99215"}
+        or "office visit" in description
+        or "preventive visit" in description
+    )
+
+
+def _historical_intervention_line(database, historical_reference, family):
+    if not historical_reference:
+        return None
+    candidates = [
+        candidate
+        for candidate in database.claims
+        if candidate.get("claimId") != historical_reference.get("claimId")
+        and candidate.get("memberId") == historical_reference.get("memberId")
+        and _diagnosis_family(candidate) == family
+        and _same_service_day(candidate, historical_reference)
+        and _text(candidate.get("workbookFields", {}).get("Reference_Claim_Flag")).upper() == "Y"
+        and _text(candidate.get("workbookFields", {}).get("Intervention_Performed")).upper() == "Y"
+        and _positive_outcome(candidate)
+        and not _office_or_preventive_visit(candidate)
+    ]
+    return sorted(candidates, key=lambda candidate: _text(candidate.get("claimId")))[0] if len(candidates) == 1 else None
+
+
 def build_outcome_evidence(database, claim):
     """Return linked outcome evidence using only workbook fields and claim relationships."""
     source = claim
@@ -103,6 +136,8 @@ def build_outcome_evidence(database, claim):
         and _text(historical_fields.get("Reference_Claim_Flag")).upper() == "Y"
         and _text(historical_fields.get("Intervention_Performed")).upper() == "Y"
     )
+    historical_intervention = _historical_intervention_line(database, historical_reference, family) if historical_match else None
+    intervention_reference = historical_intervention or historical_reference
     if linked_sequence_reference and historical_match:
         source = linked_sequence_reference
 
@@ -233,8 +268,9 @@ def build_outcome_evidence(database, claim):
         no_readmission_days = historical_fields.get("Episode_Duration_Days")
         conclusion = (
             f"Historical claim {historical_reference.get('claimId')} records "
-            f"{historical_reference.get('cptDescription')} and an improved outcome. "
-            f"Its source records a {no_readmission_days}-day follow-up period. "
+            f"{intervention_reference.get('cptDescription')} and an improved outcome. "
+            f"The historical reference pathway records a {no_readmission_days}-day follow-up period; "
+            "that window belongs to the historical reference patient, not to this prediction patient. "
             "This is comparison evidence for review; it does not establish that earlier care would prevent admission. "
         )
         if claim_is_later_hospitalization:
@@ -274,14 +310,16 @@ def build_outcome_evidence(database, claim):
         "reference_claim_id": explicit_reference_id or (historical_reference.get("claimId") if linked_sequence_reference else None),
         "reference_outcome_supported": historical_match,
         "reference_diagnosis": historical_reference.get("diagnosisDescription") if historical_reference else None,
-        "reference_intervention": historical_reference.get("cptDescription") if historical_reference else None,
+        "reference_intervention": intervention_reference.get("cptDescription") if intervention_reference else None,
+        "reference_intervention_claim_id": intervention_reference.get("claimId") if intervention_reference else None,
+        "reference_intervention_service_date": intervention_reference.get("dos") if intervention_reference else None,
         "reference_treatment_outcome": _text(historical_fields.get("Treatment_Outcome")) or None,
         "historical_no_readmission_days": (
             historical_fields.get("Episode_Duration_Days")
             if historical_match
             else fields.get("Episode_Duration_Days") if positive and not later_related else None
         ),
-        "recommended_intervention": historical_reference.get("cptDescription") if historical_match else None,
+        "recommended_intervention": intervention_reference.get("cptDescription") if historical_match else None,
         "prediction_claim_id": claim.get("claimId") if historical_match else None,
         "prediction_intervention_performed": _text(claim_fields.get("Intervention_Performed")) or None,
         "prediction_readmission_claim_id": predicted_readmission.get("claimId") if predicted_readmission else None,

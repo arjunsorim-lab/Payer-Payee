@@ -256,6 +256,57 @@ class TestOutcomeEvidence(unittest.TestCase):
         self.assertEqual(evidence["reference_source_row"]["billed_amount"], 823.9)
         self.assertIn("Reference_Claim_ID", evidence["reference_source_row"]["why_included"])
 
+    def test_historical_reference_reports_specific_intervention_line_when_present(self):
+        reference_visit = claim(
+            "REFERENCE-VISIT",
+            "2025-06-14",
+            member="REFERENCE-MEMBER",
+            episode="REFERENCE-EPISODE",
+            diagnosis="R73.03",
+            CPT_Code="99395",
+            CPT_Description="Preventive Visit",
+            Intervention_Performed="Y",
+            Outcome_Claim_Flag="Y",
+            Reference_Claim_Flag="Y",
+            Condition_Resolved="Y",
+            Treatment_Outcome="Improved; no prediabetes-related readmission for 200 days",
+            Follow_Up_Completed="Y",
+            Episode_Duration_Days=200,
+        )
+        training = claim(
+            "REFERENCE-TRAINING",
+            "2025-06-14",
+            member="REFERENCE-MEMBER",
+            episode="REFERENCE-EPISODE",
+            diagnosis="R73.03",
+            CPT_Code="G0108",
+            CPT_Description="Diabetes Self-Management Training, Individual, per 30 min",
+            Intervention_Performed="Y",
+            Outcome_Claim_Flag="Y",
+            Reference_Claim_Flag="Y",
+            Condition_Resolved="Y",
+            Treatment_Outcome="Improved; no prediabetes-related readmission for 200 days",
+            Follow_Up_Completed="Y",
+            Episode_Duration_Days=200,
+        )
+        prediction = claim(
+            "PREDICTION-TWO",
+            "2026-01-15",
+            member="PREDICTION-MEMBER",
+            episode="PREDICTION-EPISODE",
+            diagnosis="R73.03",
+            Reference_Claim_ID="REFERENCE-VISIT",
+            Intervention_Performed="N",
+        )
+
+        evidence = build_outcome_evidence(Database([reference_visit, training, prediction]), prediction)
+
+        self.assertEqual(evidence["reference_claim_id"], "REFERENCE-VISIT")
+        self.assertEqual(evidence["reference_intervention_claim_id"], "REFERENCE-TRAINING")
+        self.assertEqual(evidence["reference_intervention"], "Diabetes Self-Management Training, Individual, per 30 min")
+        self.assertEqual(evidence["recommended_intervention"], "Diabetes Self-Management Training, Individual, per 30 min")
+        self.assertIn("historical reference patient", evidence["conclusion"])
+
     def test_opening_the_readmission_claim_itself_stays_consistent(self):
         reference = claim(
             "REFERENCE-ONE",

@@ -2,7 +2,9 @@
 
 import unittest
 
-from backend.outcome_evidence import build_outcome_evidence
+from datetime import date
+
+from backend.outcome_evidence import build_outcome_evidence, _observed_no_readmission_days
 
 
 class Database:
@@ -307,6 +309,24 @@ class TestOutcomeEvidence(unittest.TestCase):
         self.assertEqual(evidence["recommended_intervention"], "Diabetes Self-Management Training, Individual, per 30 min")
         self.assertIn("historical outcome belongs to the reference patient", evidence["conclusion"])
         self.assertNotIn("200-day follow-up", evidence["conclusion"])
+
+    def test_observed_no_readmission_days_are_capped_by_elapsed_time(self):
+        intervention = claim(
+            "REFERENCE-TRAINING",
+            "2026-06-14",
+            member="REFERENCE-MEMBER",
+            episode="REFERENCE-EPISODE",
+            diagnosis="R73.03",
+            CPT_Code="G0108",
+            CPT_Description="Diabetes Self-Management Training, Individual, per 30 min",
+            Intervention_Performed="Y",
+            Episode_Duration_Days=200,
+        )
+
+        self.assertEqual(
+            _observed_no_readmission_days(intervention, 200, today=date(2026, 9, 23)),
+            101,
+        )
 
     def test_opening_the_readmission_claim_itself_stays_consistent(self):
         reference = claim(

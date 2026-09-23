@@ -57,10 +57,33 @@ def _preventive_visit(claim):
 
 
 def _date(value):
+    text = _text(value)
+    if len(text) == 8 and text.isdigit():
+        text = f"{text[:4]}-{text[4:6]}-{text[6:]}"
     try:
-        return date.fromisoformat(_text(value)[:10])
+        return date.fromisoformat(text[:10])
     except (TypeError, ValueError):
         return None
+
+
+def _integer(value):
+    try:
+        return int(float(_text(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _observed_no_readmission_days(intervention_claim, recorded_days, today=None):
+    service_date = _date(
+        intervention_claim.get("dos")
+        or intervention_claim.get("workbookFields", {}).get("Service_Date_From")
+    ) if intervention_claim else None
+    if not service_date:
+        return _integer(recorded_days)
+    today = today or date.today()
+    elapsed_days = max(0, (today - service_date).days)
+    recorded = _integer(recorded_days)
+    return min(recorded, elapsed_days) if recorded is not None else elapsed_days
 
 
 def _claim_by_id(database, claim_id):
@@ -220,6 +243,10 @@ def build_outcome_evidence(database, claim):
             source = min(candidates, key=lambda candidate: (_text(candidate.get("dos")), candidate.get("claimId", "")))
 
     fields = source.get("workbookFields", {})
+    observed_no_readmission_days = _observed_no_readmission_days(
+        intervention_reference,
+        historical_fields.get("Episode_Duration_Days") if historical_match else fields.get("Episode_Duration_Days"),
+    )
     condition = _text(fields.get("Condition_Resolved"))
     treatment = _text(fields.get("Treatment_Outcome"))
     follow_up = _text(fields.get("Follow_Up_Completed"))
@@ -312,11 +339,8 @@ def build_outcome_evidence(database, claim):
         "reference_intervention_claim_id": intervention_reference.get("claimId") if intervention_reference else None,
         "reference_intervention_service_date": intervention_reference.get("dos") if intervention_reference else None,
         "reference_treatment_outcome": _text(historical_fields.get("Treatment_Outcome")) or None,
-        "historical_no_readmission_days": (
-            historical_fields.get("Episode_Duration_Days")
-            if historical_match
-            else fields.get("Episode_Duration_Days") if positive and not later_related else None
-        ),
+        "historical_no_readmission_days": observed_no_readmission_days if (historical_match or (positive and not later_related)) else None,
+        "recorded_follow_up_days": _integer(historical_fields.get("Episode_Duration_Days") if historical_match else fields.get("Episode_Duration_Days")),
         "recommended_intervention": intervention_reference.get("cptDescription") if historical_match else None,
         "prediction_claim_id": claim.get("claimId") if historical_match else None,
         "prediction_intervention_performed": _text(claim_fields.get("Intervention_Performed")) or None,

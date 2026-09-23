@@ -6592,19 +6592,22 @@ function RecentClaims({
 }
 
 function statusClass(status) {
-  if (status === 'Denied') return 'denied'
-  if (status.includes('Reversal')) return 'reversal'
-  if (status.includes('Forwarded')) return 'forwarded'
-  if (status.includes('Secondary')) return 'secondary'
+  const value = String(status || '')
+  if (value === 'Denied') return 'denied'
+  if (value.includes('Reversal')) return 'reversal'
+  if (value.includes('Forwarded')) return 'forwarded'
+  if (value.includes('Secondary')) return 'secondary'
   return 'primary'
 }
 
 function statusLabel(status) {
-  if (status === 'Denied') return 'Denied'
-  if (status.includes('Reversal')) return 'Reversal'
-  if (status.includes('Primary') && status.includes('Forwarded')) return 'Primary + Forwarded'
-  if (status.includes('Secondary') && status.includes('Forwarded')) return 'Secondary + Forwarded'
-  if (status.includes('Secondary')) return 'Processed Secondary'
+  const value = String(status || '')
+  if (!value) return 'Not recorded'
+  if (value === 'Denied') return 'Denied'
+  if (value.includes('Reversal')) return 'Reversal'
+  if (value.includes('Primary') && value.includes('Forwarded')) return 'Primary + Forwarded'
+  if (value.includes('Secondary') && value.includes('Forwarded')) return 'Secondary + Forwarded'
+  if (value.includes('Secondary')) return 'Processed Secondary'
   return 'Processed Primary'
 }
 

@@ -516,8 +516,17 @@ function buildMemberStats(member, money, payerCohortSavings) {
   const totalAdjustment = member.totalAdjustment ?? member.claims.reduce((acc, c) => acc + (c.adjustment || 0), 0)
   const insuranceSavings = totalAdjustment > 0 ? totalAdjustment : Math.max(0, totalCharge - totalAllowed)
   
-  // Calculate Avoidable from cohort savings or supported money summary
-  const avoidableCosts = money?.potentially_avoidable_spend_supported ?? payerCohortSavings?.member_predicted_payer_avoidable_spend ?? 0
+  const supportedAvoidableCosts = money?.potentially_avoidable_spend_supported
+  const predictedAvoidableCosts = money?.predicted_avoidable_spend_90d ?? money?.predicted_avoidable_spend ?? payerCohortSavings?.member_predicted_payer_avoidable_spend
+  const avoidableCosts = supportedAvoidableCosts > 0 ? supportedAvoidableCosts : predictedAvoidableCosts
+  const avoidableCostsPending = avoidableCosts == null
+  const avoidableCostsNote = supportedAvoidableCosts > 0
+    ? 'Supported opportunity'
+    : predictedAvoidableCosts > 0
+      ? 'Predicted 90-day opportunity'
+      : avoidableCostsPending
+        ? 'Calculating opportunity'
+        : 'No supported opportunity'
   const openClaimsCount = member.claims.filter(c => isOpenClaimStatus(c.status)).length
   const deniedClaimsCount = member.claims.filter(c => isDeniedClaimStatus(c.status)).length
 
@@ -526,7 +535,7 @@ function buildMemberStats(member, money, payerCohortSavings) {
     { label: 'Total Paid', value: formatCurrency(totalPaid), note: 'Payer payments recorded', iconTone: 'blue', Icon: Banknote },
     { label: 'Patient Responsibility', value: formatCurrency(totalPatientResp), note: 'Out of pocket + copay + coins', iconTone: 'orange', Icon: UserRound },
     { label: 'Primary Insurance Savings', value: formatCurrency(insuranceSavings), note: 'Contracted plan discounts', iconTone: 'green', Icon: ShieldCheck },
-    { label: 'Potentially Avoidable Costs', value: formatCurrency(avoidableCosts), note: 'Identified opportunity', iconTone: 'purple', Icon: Target },
+    { label: 'Potentially Avoidable Costs', value: avoidableCostsPending ? 'Calculating…' : formatCurrency(avoidableCosts), note: avoidableCostsNote, iconTone: 'purple', Icon: Target },
     { label: 'Open Claims', value: openClaimsCount.toString(), note: `${deniedClaimsCount} denied claims`, iconTone: openClaimsCount > 0 ? 'red' : 'green', Icon: FileText },
     { label: 'Last Encounter', value: formatDate(member.latestClaim.dos), note: member.latestClaim.placeOfService, iconTone: 'blue', Icon: CalendarDays },
   ]
@@ -4448,7 +4457,6 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
           if (payload.item?.claims?.length) {
             setHydratedMember({ ...member, ...payload.item })
           }
-          setMemberMoney(payload.item?.supportedMoneySummary || null)
           setPayerCohortSavings(payload.item?.payerCohortSavingsSummary || null)
         }
       })
@@ -4457,6 +4465,13 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
           setMemberMoney(member.supportedMoneySummary || null)
           setPayerCohortSavings(null)
         }
+      })
+    fetchJson(`/api/members/${encodeURIComponent(member.memberId)}/money-summary`)
+      .then((payload) => {
+        if (active) setMemberMoney(payload.supportedMoneySummary || null)
+      })
+      .catch(() => {
+        if (active) setMemberMoney(member.supportedMoneySummary || null)
       })
     return () => { active = false }
   }, [member, member.memberId, member.supportedMoneySummary])

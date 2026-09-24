@@ -776,6 +776,23 @@ def get_member(member_id):
     return json_response(member)
 
 
+@app.get("/api/members/<member_id>/money-summary")
+def get_member_money_summary(member_id):
+    database = configured_workbook_database()
+    if database:
+        member = next(
+            (item for item in database.members if item.get("memberId") == member_id),
+            None,
+        )
+        if not member:
+            return json_response({"message": "Member not found in selectable workbook claims"}, 404)
+        return json_response({
+            "member_id": member_id,
+            "supportedMoneySummary": member_supported_summary(database, member_id),
+        })
+    return json_response({"message": "Claims source unavailable."}, 503)
+
+
 @app.get("/api/members/<member_id>/claims")
 def get_member_claims(member_id):
     database = configured_workbook_database()

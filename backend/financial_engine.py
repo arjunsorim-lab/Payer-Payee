@@ -62,6 +62,7 @@ except ImportError:
 
 # Bounded so a large workbook or many claims cannot grow memory without limit.
 _RESULT_CACHE = BoundedCache(int(os.getenv("FINANCIAL_CACHE_MAX_ENTRIES", str(DEFAULT_MAX_SIZE))))
+_MEMBER_SUMMARY_CACHE = BoundedCache(int(os.getenv("FINANCIAL_CACHE_MAX_ENTRIES", str(DEFAULT_MAX_SIZE))))
 _LOCK = RLock()
 MIN_COMPARATOR_EPISODES = 5
 PATIENT_BALANCE_DAYS_THRESHOLD = 30
@@ -77,6 +78,7 @@ ACTIONABLE_RESUBMISSION = {"not submitted", "resubmitted - pending", "pending", 
 def clear_financial_cache():
     with _LOCK:
         _RESULT_CACHE.clear()
+        _MEMBER_SUMMARY_CACHE.clear()
 
 
 def _money(value):
@@ -1412,6 +1414,16 @@ def build_financial_result(database, claim_id):
 
 
 def member_supported_summary(database, member_id):
+    cache_key = (
+        getattr(database, "workbook_hash", ""),
+        CALCULATION_VERSION,
+        str(member_id),
+        "member_supported_summary",
+    )
+    with _LOCK:
+        cached = _MEMBER_SUMMARY_CACHE.get(cache_key)
+        if cached:
+            return cached
     claims = [
         claim
         for claim in database.member_claims(member_id)
@@ -1466,7 +1478,7 @@ def member_supported_summary(database, member_id):
         )
     )
     validated_total = _money(sum(episode_values.values()))
-    return {
+    result = {
         "member_id": member_id,
         "active_episode_count": len(latest_episode_predictions),
         "predicted_avoidable_spend_90d": member_predicted_avoidable,
@@ -1495,3 +1507,6 @@ def member_supported_summary(database, member_id):
         "workbook_hash": database.workbook_hash,
         "calculation_version": CALCULATION_VERSION,
     }
+    with _LOCK:
+        _MEMBER_SUMMARY_CACHE[cache_key] = result
+    return result

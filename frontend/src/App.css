@@ -2488,6 +2488,18 @@ button {
   gap: 16px;
 }
 
+.financial-impact-summary {
+  padding: 14px 16px;
+  border: 1px solid #86efac;
+  border-left: 4px solid #16a34a;
+  border-radius: 10px;
+  background: #f0fdf4;
+  color: #14532d;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.55;
+}
+
 .start-here-strongest-claim {
   padding: 12px 14px;
   border: 1px solid #a7f3d0;

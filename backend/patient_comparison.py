@@ -203,9 +203,14 @@ def _is_template_coverage_demo(claim):
 def _claim_summary(claim):
     """Build a lightweight claim summary dict."""
     service_date = _day(_field(claim, "Service_Date_From", "dos"))
+    patient_name = _text(claim.get("patient")) or " ".join(
+        part for part in (_text(claim.get("patientFirstName")), _text(claim.get("patientLastName")))
+        if part
+    )
     return {
         "claim_id": _claim_id(claim),
         "member_id": _member_id(claim),
+        "patient_name": patient_name,
         "service_date": service_date.isoformat() if service_date else "",
         "icd10": _text(_field(claim, "ICD10_Diagnosis_Code", "diagnosisCode")),
         "icd10_family": _family(claim),
@@ -502,6 +507,7 @@ def build_reference_intervention_counterfactual(database, member_id, diagnosis_f
         "calculation_basis": "billed_charge_amount",
         "reference_patient": {
             "member_id": _member_id(reference_claim),
+            "patient_name": reference_summary["patient_name"],
             "diagnosis_family": family,
             "reference_claim_id": reference_claim_id,
             "recorded_outcome": _text(_field(reference_claim, "Treatment_Outcome")),
@@ -521,6 +527,7 @@ def build_reference_intervention_counterfactual(database, member_id, diagnosis_f
         },
         "prediction_patient": {
             "member_id": member_id,
+            "patient_name": ep1_summary["patient_name"],
         },
         "episode_1": {
             "claim_ids": [ep1_summary["claim_id"]],

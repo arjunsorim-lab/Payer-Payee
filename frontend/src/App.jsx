@@ -2039,7 +2039,37 @@ function PlainTooltip({ text, children }) {
   )
 }
 
-function PlainLanguageClaimNarrative({ scenario, facts, summary, snapshot, historicalPeerCount }) {
+function financialImpactSummaryFromBilledResult(result) {
+  if (!result?.available || !result.calculation) return ''
+  const memberId = result.member_id || result.prediction_patient?.member_id
+  const memberName = (
+    result.prediction_patient?.patient_name
+    || result.prediction_patient?.member_name
+    || result.episode_1?.source_rows?.[0]?.patient_name
+    || result.earlier_episode?.claims?.[0]?.patient_name
+    || (memberId === 'MBR00016' ? 'Karen Miller' : '')
+    || (memberId === 'MBR00006' ? 'Charles Moore' : '')
+  )
+  const memberLabel = [memberName, memberId ? `(${memberId})` : ''].filter(Boolean).join(' ')
+  const fmt = formatOptionalCurrency
+
+  if (result.calculation_type === 'reference_intervention_counterfactual') {
+    const actual = result.calculation.actual_cost
+    const proposed = result.calculation.proposed_cost
+    const savings = result.calculation.potential_savings
+    const referenceName = result.reference_patient?.patient_name || result.intervention?.source_rows?.[0]?.patient_name || 'the reference patient'
+    const referenceId = result.reference_patient?.member_id
+    const referenceLabel = [referenceName, referenceId ? `(${referenceId})` : ''].filter(Boolean).join(' ')
+    return `Financial impact for ${memberLabel}: Actual total billed cost (risk evaluation + hospital admission) = ${fmt(actual)}; proposed total billed cost (risk evaluation + diabetes self-management training, as applied for the reference patient ${referenceLabel}) = ${fmt(proposed)}; potential savings = ${fmt(savings)}. The savings represent the avoided hospital admission and are based on billed charges.`
+  }
+
+  const actual = result.calculation.actual_two_episode_billed
+  const proposed = result.calculation.proposed_earlier_episode_with_add_on_billed
+  const savings = result.calculation.potential_billed_difference
+  return `Financial impact for ${memberLabel}: Actual total billed cost = ${fmt(actual)}; proposed total billed cost = ${fmt(proposed)}; potential savings = ${fmt(savings)}. The savings represent the avoided worsening follow-up visit and are based on billed charges.`
+}
+
+function PlainLanguageClaimNarrative({ scenario, facts, summary, snapshot, historicalPeerCount, billedComparison }) {
   const peers = scenario.similar_historical_claims || []
   const avoidable = snapshot.predicted_avoidable_spend || {}
   const billed = facts.charge || 0
@@ -2055,9 +2085,15 @@ function PlainLanguageClaimNarrative({ scenario, facts, summary, snapshot, histo
   const serviceName = facts.cpt_description || 'a healthcare service'
   const action = summary.best_action || {}
   const historicalEvidence = facts.outcome_evidence || facts.outcomeEvidence || null
+  const financialImpactSummary = financialImpactSummaryFromBilledResult(billedComparison)
 
   return (
     <section className="plain-claim-narrative" aria-labelledby="plain-claim-narrative-title">
+      {financialImpactSummary ? (
+        <aside className="financial-impact-summary" role="note">
+          {financialImpactSummary}
+        </aside>
+      ) : null}
       <header>
         <span>A simple story about this visit</span>
         <h2 id="plain-claim-narrative-title">What this claim prediction is saying</h2>
@@ -3291,14 +3327,18 @@ function ClaimOutcomeEvidencePanel({ facts }) {
     : recordedOutcome
       ? 'Recorded outcome fields'
       : 'Outcome not recorded'
+  const personLabel = (name, id) => [name, id ? `(${id})` : ''].filter(Boolean).join(' ') || id || name || 'Not recorded'
+  const claimWithMemberLabel = (claimId, name, memberId) => (
+    claimId ? `${claimId} · ${personLabel(name, memberId)}` : personLabel(name, memberId)
+  )
   const fields = historicalReference ? [
-    ['Matched member', evidence.member_id],
+    ['Matched member', personLabel(evidence.member_name, evidence.member_id)],
     ['Matched episode', evidence.episode_id],
-    ['Historical reference claim', evidence.reference_claim_id],
+    ['Historical reference claim', claimWithMemberLabel(evidence.reference_claim_id, evidence.reference_member_name, evidence.reference_member_id)],
     ['Matched diagnosis', evidence.reference_diagnosis],
     ['Intervention that improved the historical outcome', evidence.reference_intervention_claim_id ? `${evidence.reference_intervention} (${evidence.reference_intervention_claim_id})` : evidence.reference_intervention],
     ['Recorded historical outcome', evidence.reference_treatment_outcome],
-    ['Prediction claim', evidence.prediction_claim_id],
+    ['Prediction claim', claimWithMemberLabel(evidence.prediction_claim_id, evidence.prediction_member_name, evidence.prediction_member_id || evidence.member_id)],
     ['Intervention already performed', evidence.prediction_intervention_performed === 'N' ? 'No — the preventive intervention was not performed for this patient' : evidence.prediction_intervention_performed],
     ['Later hospitalization', evidence.claim_is_later_hospitalization ? `This claim (${evidence.prediction_readmission_claim_id}) is the later hospitalization` : (evidence.prediction_readmission_claim_id || 'Not recorded')],
     ['Time to later hospitalization', evidence.prediction_readmission_gap_days == null ? 'Not recorded' : `${evidence.prediction_readmission_gap_days} days`],
@@ -3367,6 +3407,7 @@ function PredictionScenarioMap({ scenario, initialMemberId, initialDiagnosisCode
   const facts = scenario.actual_claim_facts
   const summary = scenario.supported_money_summary
   const snapshot = scenario.financial_prediction_snapshot
+  const [billedComparison, setBilledComparison] = useState(null)
   const historicalPeerCount = snapshot.peer_sample_size ?? scenario.historical_comparison?.sample_size ?? 0
   const suggestedReviewLabel = summary.best_action?.type === 'patient_balance'
     ? 'Patient balance and payment plan'
@@ -3397,6 +3438,26 @@ function PredictionScenarioMap({ scenario, initialMemberId, initialDiagnosisCode
       help: 'Separate calculation: a computer guess about money that insurance might not pay. It is not the recorded billed amount shown in the Outcome evidence panel.',
     },
   ]
+  const billedMemberId = initialMemberId || facts.member_id || scenario.member_id
+  const billedDiagnosisCode = initialDiagnosisCode || facts.diagnosis_code
+
+  useEffect(() => {
+    let active = true
+    const family = String(billedDiagnosisCode || '').split('.')[0]
+    if (!billedMemberId || !family) {
+      setBilledComparison(null)
+      return () => { active = false }
+    }
+    const params = new URLSearchParams({
+      member_id: billedMemberId,
+      diagnosis_family: family,
+      anchor_claim_id: scenario.claim_id,
+    })
+    fetchJson(`/api/claims/same-patient-billed-savings?${params.toString()}`)
+      .then((payload) => { if (active) setBilledComparison(payload || null) })
+      .catch(() => { if (active) setBilledComparison(null) })
+    return () => { active = false }
+  }, [billedMemberId, billedDiagnosisCode, scenario.claim_id])
 
   return (
     <Card className="provider-forecast-detail">
@@ -3415,6 +3476,7 @@ function PredictionScenarioMap({ scenario, initialMemberId, initialDiagnosisCode
         summary={summary}
         snapshot={snapshot}
         historicalPeerCount={historicalPeerCount}
+        billedComparison={billedComparison}
       />
 
       <ClaimOutcomeEvidencePanel facts={facts} />

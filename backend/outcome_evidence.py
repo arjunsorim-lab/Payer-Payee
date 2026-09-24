@@ -100,6 +100,22 @@ def _claim_by_id(database, claim_id):
     )
 
 
+def _patient_name(claim):
+    if not claim:
+        return None
+    return (
+        _text(claim.get("patient"))
+        or " ".join(
+            part for part in (
+                _text(claim.get("patientFirstName")),
+                _text(claim.get("patientLastName")),
+            )
+            if part
+        )
+        or None
+    )
+
+
 def _same_service_day(left, right):
     return _text(left.get("dos"))[:10] == _text(right.get("dos"))[:10]
 
@@ -341,9 +357,13 @@ def build_outcome_evidence(database, claim):
         "reference_claim_flag": _text(fields.get("Reference_Claim_Flag")) or "N",
         "reference_claim_id": explicit_reference_id or (historical_reference.get("claimId") if linked_sequence_reference else None),
         "reference_outcome_supported": historical_match,
+        "reference_member_id": historical_reference.get("memberId") if historical_reference else None,
+        "reference_member_name": _patient_name(historical_reference),
         "reference_diagnosis": historical_reference.get("diagnosisDescription") if historical_reference else None,
         "reference_intervention": intervention_reference.get("cptDescription") if intervention_reference else None,
         "reference_intervention_claim_id": intervention_reference.get("claimId") if intervention_reference else None,
+        "reference_intervention_member_id": intervention_reference.get("memberId") if intervention_reference else None,
+        "reference_intervention_member_name": _patient_name(intervention_reference),
         "reference_intervention_service_date": intervention_reference.get("dos") if intervention_reference else None,
         "reference_treatment_outcome": (
             (
@@ -357,13 +377,17 @@ def build_outcome_evidence(database, claim):
         "recorded_follow_up_days": _integer(historical_fields.get("Episode_Duration_Days") if historical_match else fields.get("Episode_Duration_Days")),
         "recommended_intervention": intervention_reference.get("cptDescription") if historical_match else None,
         "prediction_claim_id": claim.get("claimId") if historical_match else None,
+        "prediction_member_id": claim.get("memberId") if historical_match else None,
+        "prediction_member_name": _patient_name(claim) if historical_match else None,
         "prediction_intervention_performed": _text(claim_fields.get("Intervention_Performed")) or None,
         "prediction_readmission_claim_id": predicted_readmission.get("claimId") if predicted_readmission else None,
+        "prediction_readmission_member_name": _patient_name(predicted_readmission) if predicted_readmission else None,
         "prediction_readmission_gap_days": predicted_gap_days,
         "prediction_readmission_billed_amount": float(predicted_readmission.get("totalCharge") or 0) if predicted_readmission else None,
         "claim_is_later_hospitalization": claim_is_later_hospitalization,
         "linked_prediction_claim_id": linked_prediction_claim_id,
         "member_id": claim.get("memberId"),
+        "member_name": _patient_name(claim),
         "episode_id": episode_id,
         "calculation_basis": "billed_charge_amount" if historical_match else None,
         "reference_source_row": {

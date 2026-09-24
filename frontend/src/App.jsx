@@ -2063,16 +2063,17 @@ function PlainLanguageClaimNarrative({ scenario, facts, summary, snapshot, histo
 
   return (
     <section className="plain-claim-narrative" aria-labelledby="plain-claim-narrative-title">
-      {financialImpactSummary ? (
-        <aside className="financial-impact-summary" role="note">
-          {financialImpactSummary}
-        </aside>
-      ) : null}
       <header>
         <span>A simple story about this visit</span>
         <h2 id="plain-claim-narrative-title">What this claim prediction is saying</h2>
         <p>This section explains claim <strong>{facts.claim_id}</strong> in plain language: what happened, what the app is estimating, and which recorded claims support the recommendation. Model estimates are separate from recorded facts, so they should not be added together.</p>
       </header>
+
+      {financialImpactSummary ? (
+        <aside className="financial-impact-summary" role="note">
+          {financialImpactSummary}
+        </aside>
+      ) : null}
 
       {historicalEvidence?.reference_outcome_supported === true ? (
         <aside className="start-here-strongest-claim" role="note">

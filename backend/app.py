@@ -317,24 +317,55 @@ def workbook_claims_for_request(database, args):
 
 
 def workbook_claim_for_api(database, claim, include_summary=True, compact=False):
-    payload = {key: value for key, value in claim.items() if key != "raw"}
-    fields = claim.get("workbookFields", {})
+    if compact:
+        compact_keys = {
+            "claimId",
+            "number",
+            "memberId",
+            "subscriberId",
+            "patient",
+            "patientFirstName",
+            "patientLastName",
+            "dob",
+            "gender",
+            "dos",
+            "serviceEnd",
+            "submissionDate",
+            "status",
+            "statusCode",
+            "payer",
+            "payerId",
+            "filingIndicator",
+            "groupId",
+            "groupName",
+            "accountNumber",
+            "billingProvider",
+            "billingProviderNpi",
+            "renderingProvider",
+            "renderingProviderNpi",
+            "placeOfService",
+            "placeOfServiceCode",
+            "diagnosisCode",
+            "diagnosisDescription",
+            "cptCode",
+            "cptDescription",
+            "units",
+            "totalCharge",
+            "allowed",
+            "paid",
+            "patientResp",
+            "adjustment",
+            "denialReason",
+            "isHistoricalReference",
+        }
+        payload = {key: claim.get(key) for key in compact_keys if key in claim}
+    else:
+        payload = {key: value for key, value in claim.items() if key != "raw"}
     payload["evidence_source"] = claim_source(claim, bool(getattr(database, "report", {}).get("synthetic")))
     # Collection pages do not render outcome evidence. Avoid an O(n²) scan
     # across the workbook for thousands of compact rows; detail endpoints add it.
     if not compact:
         payload["outcomeEvidence"] = build_outcome_evidence(database, claim)
-    if compact:
-        for key in (
-            "workbookFields",
-            "sourceRowHash",
-            "sourceWorkbookHash",
-            "workbookSourceRow",
-            "calculationVersion",
-            "predictionVersion",
-            "ragIndexVersion",
-        ):
-            payload.pop(key, None)
     if include_summary:
         payload["supportedMoneySummary"] = build_financial_result(
             database, claim["claimId"]
@@ -714,6 +745,7 @@ def get_member(member_id):
     database = configured_workbook_database()
     if database:
         compact = query_flag(request.args, "compact", default=False)
+        include_summary = query_flag(request.args, "includeSummary", default=not compact)
         member = next(
             (item for item in database.members if item.get("memberId") == member_id),
             None,
@@ -729,7 +761,7 @@ def get_member(member_id):
                 "latestClaim": workbook_claim_for_api(database, latest_claim, include_summary=False, compact=compact) if latest_claim else None,
                 # This summary is derived from this member's claims and is safe for
                 # the fast member view; the cohort comparison remains deferred.
-                **({"supportedMoneySummary": member_supported_summary(database, member_id)} if compact else {}),
+                **({"supportedMoneySummary": member_supported_summary(database, member_id)} if compact and include_summary else {}),
                 **({} if compact else {
                     "supportedMoneySummary": member_supported_summary(database, member_id),
                     "payerCohortSavingsSummary": build_member_payer_cohort_summary(database, member_id),

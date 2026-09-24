@@ -1135,49 +1135,16 @@ function PredictionsWorkspace({ selectedClaim, searchQuery, onOpenPrediction, on
     }
     let cancelled = false
     setScenarioLoading(true)
-    const initialScenarioCount = 3
     const scenarioPageSize = 10
     const loadScenarios = async () => {
       try {
-        // Load a small payload first, then progressively page-in cards.
-        // This keeps first paint fast and avoids computing a large scenario set
-        // before the user can interact.
-        const payload = await fetchJson(`/api/predictions/scenarios?limit=${initialScenarioCount}&compact=true`)
+        const payload = await fetchJson(`/api/predictions/scenarios?limit=${scenarioPageSize}&compact=true`)
         if (cancelled) return
         setScenarios(Array.isArray(payload.items) ? payload.items : [])
         setScenarioMeta({ ...payload.model, totalClaims: payload.totalClaims })
         setScenarioSummary(payload.summary || null)
         setScenarioError('')
         setScenarioLoading(false)
-
-        // Progressive card loading: fetch one additional directory page at a time,
-        // without over-fetching a large fixed window.
-        const appendPage = async (page) => {
-          const nextPayload = await fetchJson(`/api/predictions/scenarios?page=${page}&limit=${scenarioPageSize}&compact=true`)
-          if (cancelled) return
-          setScenarios((current) => {
-            const items = Array.isArray(nextPayload.items) ? nextPayload.items : []
-            // De-dupe by scenario id to avoid repeated fetch races.
-            const seen = new Set(current.map((s) => s.claim_id || s.id))
-            const merged = [...current]
-            for (const item of items) {
-              const key = item.claim_id || item.id
-              if (!seen.has(key)) {
-                merged.push(item)
-                seen.add(key)
-              }
-            }
-            return merged
-          })
-        }
-
-        // Page 1 (replace) then page 2 (append). Total: 2 sequential requests.
-        const completeFirstPage = await fetchJson(`/api/predictions/scenarios?limit=${scenarioPageSize}&compact=true`)
-        if (cancelled) return
-        setScenarios(Array.isArray(completeFirstPage.items) ? completeFirstPage.items : [])
-
-        // Fire-and-forget page 2 to avoid blocking first render.
-        appendPage(2).catch(() => {})
       } catch {
         if (cancelled) return
         setScenarios([])
@@ -1499,14 +1466,21 @@ function PredictionDetailPage({ claim, onBackToPredictions }) {
   useEffect(() => {
     let cancelled = false
     const claimNumber = claim.claimId || claim.number
-    fetchJson(`/api/predictions/value-based-case/${encodeURIComponent(claimNumber)}`)
-      .then((payload) => {
-        if (!cancelled) setValueBasedCase(payload || null)
-      })
-      .catch(() => {
-        if (!cancelled) setValueBasedCase(null)
-      })
-    return () => { cancelled = true }
+    const loadValueBasedCase = () => {
+      fetchJson(`/api/predictions/value-based-case/${encodeURIComponent(claimNumber)}`)
+        .then((payload) => {
+          if (!cancelled) setValueBasedCase(payload || null)
+        })
+        .catch(() => {
+          if (!cancelled) setValueBasedCase(null)
+        })
+    }
+    const idleId = window.requestIdleCallback ? window.requestIdleCallback(loadValueBasedCase, { timeout: 2500 }) : window.setTimeout(loadValueBasedCase, 1200)
+    return () => {
+      cancelled = true
+      if (window.cancelIdleCallback) window.cancelIdleCallback(idleId)
+      else window.clearTimeout(idleId)
+    }
   }, [claim.number, claim.claimId])
 
   if (caseError) {
@@ -3487,6 +3461,7 @@ function PredictionScenarioMap({ scenario, initialMemberId, initialDiagnosisCode
           diagnosisCode={initialDiagnosisCode || facts.diagnosis_code}
           claimId={scenario.claim_id}
           claimAnchored
+          preloadedResult={billedComparison}
         />
       </section>
       <div className="provider-forecast-metrics">
@@ -4455,10 +4430,6 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
   }, [member.memberId])
 
   useEffect(() => {
-    setHydratedMember(member)
-  }, [member])
-
-  useEffect(() => {
     setMemberEncountersPage(1)
   }, [selectedCondition])
 
@@ -4466,7 +4437,7 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
     let active = true
     setMemberMoney(null)
     setPayerCohortSavings(null)
-    fetchJson(`/api/members/${encodeURIComponent(member.memberId)}?compact=true`)
+    fetchJson(`/api/members/${encodeURIComponent(member.memberId)}?compact=true&includeSummary=false`)
       .then((payload) => {
         if (active) {
           if (payload.item?.claims?.length) {

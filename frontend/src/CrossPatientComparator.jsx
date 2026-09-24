@@ -105,13 +105,19 @@ function ReferenceInterventionCounterfactualView({ result, family, compact = fal
   )
 }
 
-export function SamePatientBilledSavings({ memberId, diagnosisCode, claimId = '', claimAnchored = false }) {
+export function SamePatientBilledSavings({ memberId, diagnosisCode, claimId = '', claimAnchored = false, preloadedResult = null }) {
   const family = String(diagnosisCode || '').slice(0, 3).toUpperCase()
-  const [result, setResult] = useState(null)
+  const [result, setResult] = useState(preloadedResult)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
+    if (preloadedResult) {
+      setResult(preloadedResult)
+      setLoading(false)
+      setError('')
+      return undefined
+    }
     if (!memberId || !family) return undefined
     let active = true
     setLoading(true)
@@ -126,7 +132,7 @@ export function SamePatientBilledSavings({ memberId, diagnosisCode, claimId = ''
       .catch((requestError) => { if (active) setError(requestError.message || 'Could not calculate the billed scenario.') })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [claimId, family, memberId])
+  }, [claimId, family, memberId, preloadedResult])
 
   if (!memberId || !family) return null
   if (loading) return <div className="same-patient-billed-state"><RefreshCw className="spin" size={18} /> Calculating the same-patient billed scenario…</div>

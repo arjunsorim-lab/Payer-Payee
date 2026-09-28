@@ -149,43 +149,11 @@ def _historical_intervention_line(database, historical_reference, family):
     return sorted(candidates, key=lambda candidate: _text(candidate.get("claimId")))[0] if len(candidates) == 1 else None
 
 
-def build_outcome_evidence(database, claim):
-    """Return linked outcome evidence using only workbook fields and claim relationships."""
-    source = claim
+def _readmission_linkage(database, claim, family, historical_match, linked_sequence_reference, explicit_reference_id):
+    """Find later related claims or the initial claim behind a later admission."""
     claim_date = _text(claim.get("dos"))
     episode_id = claim.get("episodeId")
-    family = _diagnosis_family(claim)
     claim_fields = claim.get("workbookFields", {})
-    explicit_reference_id = _text(
-        claim_fields.get("Reference_Claim_ID") or claim_fields.get("Reference claim")
-    )
-    linked_sequence_reference = next(
-        (
-            candidate for candidate in database.claims
-            if candidate.get("memberId") == claim.get("memberId")
-            and _diagnosis_family(candidate) == family
-            and _text(candidate.get("workbookFields", {}).get("Reference_Claim_ID")) == claim.get("claimId")
-            and _text(candidate.get("workbookFields", {}).get("Reason_Code")).upper() == "SYNTHETIC_SEQUENCE_PREVENTIVE"
-        ),
-        None,
-    )
-    historical_reference = linked_sequence_reference or (
-        _claim_by_id(database, explicit_reference_id) if explicit_reference_id else None
-    )
-    historical_fields = historical_reference.get("workbookFields", {}) if historical_reference else {}
-    historical_match = bool(
-        historical_reference
-        and _diagnosis_family(historical_reference) == family
-        and _positive_outcome(historical_reference)
-        and _preventive_visit(historical_reference)
-        and _text(historical_fields.get("Reference_Claim_Flag")).upper() == "Y"
-        and _text(historical_fields.get("Intervention_Performed")).upper() == "Y"
-    )
-    historical_intervention = _historical_intervention_line(database, historical_reference, family) if historical_match else None
-    intervention_reference = historical_intervention or historical_reference
-    if linked_sequence_reference and historical_match:
-        source = linked_sequence_reference
-
     readmission_candidates = [
         candidate
         for candidate in database.claims
@@ -251,6 +219,49 @@ def build_outcome_evidence(database, claim):
         (readmission_date - prediction_date).days
         if prediction_date and readmission_date and not claim_is_later_hospitalization
         else None
+    )
+    return predicted_readmission, claim_is_later_hospitalization, linked_prediction_claim_id, predicted_gap_days
+
+
+def build_outcome_evidence(database, claim):
+    """Return linked outcome evidence using only workbook fields and claim relationships."""
+    source = claim
+    claim_date = _text(claim.get("dos"))
+    episode_id = claim.get("episodeId")
+    family = _diagnosis_family(claim)
+    claim_fields = claim.get("workbookFields", {})
+    explicit_reference_id = _text(
+        claim_fields.get("Reference_Claim_ID") or claim_fields.get("Reference claim")
+    )
+    linked_sequence_reference = next(
+        (
+            candidate for candidate in database.claims
+            if candidate.get("memberId") == claim.get("memberId")
+            and _diagnosis_family(candidate) == family
+            and _text(candidate.get("workbookFields", {}).get("Reference_Claim_ID")) == claim.get("claimId")
+            and _text(candidate.get("workbookFields", {}).get("Reason_Code")).upper() == "SYNTHETIC_SEQUENCE_PREVENTIVE"
+        ),
+        None,
+    )
+    historical_reference = linked_sequence_reference or (
+        _claim_by_id(database, explicit_reference_id) if explicit_reference_id else None
+    )
+    historical_fields = historical_reference.get("workbookFields", {}) if historical_reference else {}
+    historical_match = bool(
+        historical_reference
+        and _diagnosis_family(historical_reference) == family
+        and _positive_outcome(historical_reference)
+        and _preventive_visit(historical_reference)
+        and _text(historical_fields.get("Reference_Claim_Flag")).upper() == "Y"
+        and _text(historical_fields.get("Intervention_Performed")).upper() == "Y"
+    )
+    historical_intervention = _historical_intervention_line(database, historical_reference, family) if historical_match else None
+    intervention_reference = historical_intervention or historical_reference
+    if linked_sequence_reference and historical_match:
+        source = linked_sequence_reference
+
+    predicted_readmission, claim_is_later_hospitalization, linked_prediction_claim_id, predicted_gap_days = _readmission_linkage(
+        database, claim, family, historical_match, linked_sequence_reference, explicit_reference_id,
     )
     if not linked_sequence_reference and not _positive_outcome(claim) and episode_id and _preventive_visit(claim):
         candidates = [

@@ -802,3 +802,38 @@ in [DEPLOYMENT.md](DEPLOYMENT.md). See [VERIFICATION.md](VERIFICATION.md) for
 measured results and remaining external verification requirements. Synthetic
 examples, reviewer observations, and modeled opportunities do not establish
 verified savings or causal effectiveness.
+
+
+### Local review improvements
+
+Member financial summaries support `?async=true`: HTTP 202 indicates bounded
+background calculation; the UI polls until HTTP 200 and cancels polling when
+leaving the member. Jobs deduplicate by workbook and member and retain at most
+128 entries per worker process. This keeps requests responsive; it does not
+guarantee a one-second calculation or eliminate Render cold starts.
+
+Prediction summary amounts explicitly cover the visible page. Browser API calls
+share cookie/CSRF handling; writes are never replayed against fallback servers.
+Production CORS origins must be explicit HTTPS origins. Read auditing defaults
+to review/audit routes; set `AUDIT_READ_REQUESTS=true` to audit every API read.
+Authentication writes and review decisions remain audited.
+
+Production sign-in requires `LOGIN_RATE_LIMIT_REDIS_URL`, pointing to a shared
+Redis/Render Key Value instance accessible to every web worker. Set the internal
+connection URL in the Render environment; use `rediss://` for TLS connections.
+The deployment template prompts for this secret. Login fails safely with HTTP
+503 when shared protection is missing or unavailable; authenticated read access
+is unaffected. No credentials or connection URLs are included in error responses.
+
+Redis atomically allows five login attempts per source IP in a 15-minute window.
+The key is hashed and expires automatically. Successful and failed attempts both
+count, preventing concurrent requests or worker restarts from bypassing limits.
+Local development keeps the existing SQLite failed-attempt limiter. In-memory
+calculation jobs and financial caches remain bounded and per process.
+
+Install `backend/requirements-dev.txt` before running the tests. Shared-limiter
+tests execute the Lua script against an in-memory Redis emulator and cover
+concurrent clients, expiry, independent IPs, HTTP 429 and safe outage handling.
+The refactored frontend separates routing, API access, claim formatting, financial
+summaries and outcome/story presentation. Backend helpers separate peer ranking,
+peer performance, category evaluation and chronological outcome linkage.

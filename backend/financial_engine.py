@@ -1217,6 +1217,22 @@ def _scenario_map(claim, snapshot, categories, supported, summary, comparison, d
     }
 
 
+def _financial_categories(database, claim, prediction):
+    """Evaluate independent current-claim and future-exposure categories."""
+    categories = {
+        "underpayment": _underpayment(claim),
+        "correctable_denial": _correctable_denial(claim),
+        "excessive_adjustment": _excessive_adjustment(claim),
+        "patient_balance": _patient_balance(claim),
+        "authorization": _authorization(claim),
+        "referral": _referral(claim),
+        "duplicate_or_correction": _duplicate_or_correction(claim),
+        "potentially_avoidable_episode_spend": _avoidable_spend(database, claim),
+    }
+    categories["future_exposure"] = _future_exposure(claim, prediction)
+    return categories
+
+
 def build_financial_result(database, claim_id):
     claim = database.find_claim(claim_id, selectable_only=True)
     if not claim:
@@ -1235,17 +1251,7 @@ def build_financial_result(database, claim_id):
             return cached
     prediction = _prediction(database, claim)
     prediction_snapshot = _financial_prediction_snapshot(prediction)
-    categories = {
-        "underpayment": _underpayment(claim),
-        "correctable_denial": _correctable_denial(claim),
-        "excessive_adjustment": _excessive_adjustment(claim),
-        "patient_balance": _patient_balance(claim),
-        "authorization": _authorization(claim),
-        "referral": _referral(claim),
-        "duplicate_or_correction": _duplicate_or_correction(claim),
-        "potentially_avoidable_episode_spend": _avoidable_spend(database, claim),
-    }
-    categories["future_exposure"] = _future_exposure(claim, prediction)
+    categories = _financial_categories(database, claim, prediction)
     best_action = _best_action(categories)
     summary = _summary(categories, best_action, prediction_snapshot)
     supported_opportunities, non_actionable_evidence = _supported_and_non_actionable(

@@ -778,6 +778,292 @@ def _claim_rank_lower_reason(selected_details, candidate_details):
     return "it ranked lower after the deterministic claim-ID tie-breaker"
 
 
+def _select_fallback_procedure_peer(database, target, selected_claim, peers, scenario_number, target_context):
+    """Find the broad fallback and disclose mismatches."""
+    fallback_match_type = ""
+    fallback_reason = ""
+    selection_audit = None
+    candidate_pool = [
+        c for c in (getattr(database, "selectable_claims", None) or getattr(database, "claims", []))
+        if _member_id(c) != target["member_id"]
+    ]
+    if not candidate_pool:
+        return {
+            "available": False,
+            "history_window_days": PAYER_COHORT_EPISODE_DAYS,
+            "reason": "No different-member peer visit was available.",
+            "target": target_context,
+        }
+    target_family = target["diagnosis_family"]
+    same_fam = [c for c in candidate_pool if _family(c) == target_family]
+    try:
+        from backend.patient_comparison import organ_for_family as _get_organ
+        target_organ, _ = _get_organ(target_family)
+        same_organ = [c for c in candidate_pool if _get_organ(_family(c))[0] == target_organ]
+    except Exception:
+        target_organ = target_family[:1]
+        same_organ = [c for c in candidate_pool if _family(c).startswith(target_organ)]
+
+    target_cpt = _text(_field(selected_claim, "CPT_Code", "cptCode"))
+    same_cpt = [c for c in candidate_pool if _text(_field(c, "CPT_Code", "cptCode")) == target_cpt]
+
+    if same_fam:
+        chosen_claims = same_fam
+        fallback_match_type = "same medical-code family"
+        fallback_reason = f"This different-member peer visit was selected using the same diagnosis family ({target_family}) benchmark."
+    elif same_organ:
+        chosen_claims = same_organ
+        fallback_match_type = f"same organ system ({target_organ})"
+        fallback_reason = f"This different-member peer visit was selected using the same organ system ({target_organ}) benchmark."
+    elif same_cpt:
+        chosen_claims = same_cpt
+        fallback_match_type = "same clinical procedure"
+        fallback_reason = "This different-member peer visit was selected using the same procedure benchmark."
+    else:
+        chosen_claims = candidate_pool
+        fallback_match_type = "clinical peer comparison"
+        fallback_reason = "This different-member peer visit was selected using clinical peer comparison."
+
+    def _score(c):
+        s = 0
+        if _text(_field(c, "CPT_Code", "cptCode")) == target_cpt:
+            s += 10
+        if _text(_field(c, "Payer_ID", "payerId")) == target.get("selected_identity", {}).get("payer_id"):
+            s += 5
+        return s
+
+    best_peer_claim = max(
+        chosen_claims,
+        key=lambda c: (_score(c), _day(_field(c, "Service_Date_From", "dos")) or date.min, _claim_id(c)),
+    )
+    peer_mid = _member_id(best_peer_claim)
+    peer_fam = _family(best_peer_claim)
+    peer_member_rows = [c for c in candidate_pool if _member_id(c) == peer_mid and _family(c) == peer_fam]
+    if not peer_member_rows:
+        peer_member_rows = [best_peer_claim]
+    peer_episode = _episode(peer_member_rows)
+    peer_episode["episode_id"] = f"PEER-{peer_mid}-{peer_fam}"
+    peer_claim = best_peer_claim
+    ranked_fallback_claims = sorted(
+        chosen_claims,
+        key=lambda row: (_score(row), _day(_field(row, "Service_Date_From", "dos")) or date.min, _claim_id(row)),
+        reverse=True,
+    )
+    selected_details = _peer_claim_rank_details(target, peer_claim)
+    fallback_claim_candidates = []
+    for rank, row in enumerate(ranked_fallback_claims[:10], 1):
+        candidate = _procedure_comparison_claim(row)
+        details = _peer_claim_rank_details(target, row)
+        selected = candidate["claim_id"] == _claim_id(peer_claim)
+        fallback_claim_candidates.append({
+            "rank": rank,
+            "selected": selected,
+            "claim_id": candidate["claim_id"],
+            "member_id": candidate["member_id"],
+            "service_date": candidate["service_date"],
+            "diagnosis_code": candidate["icd10"],
+            "procedure_code": candidate["cpt"],
+            "units": candidate["units"],
+            "billed_amount": candidate["billed_amount"],
+            "checks": details["checks"],
+            "decision": "Selected by the broad fallback rule." if selected else f"Ranked lower because {_claim_rank_lower_reason(selected_details, details)}.",
+        })
+    selection_audit = {
+        "scenario_number": 0,
+        "scenario_name": f"Broad fallback: {fallback_match_type}",
+        "scenario_reason": "No strict eligible peer was available. This broader comparison is shown for transparency only and is not an accurate comparison.",
+        "eligible_episode_count": len({(_member_id(row), _family(row)) for row in chosen_claims}),
+        "eligible_claim_count": len(chosen_claims),
+        "exact_procedure_episode_count": sum(_text(_field(row, "CPT_Code", "cptCode")) == target_cpt for row in chosen_claims),
+        "procedure_filter_reason": f"The broad fallback considered {len(chosen_claims)} claim(s) with {fallback_match_type} evidence; it did not require every comparison field to match.",
+        "amounts_used_for_selection": False,
+        "plain_language_steps": [
+            {"title": "Check strict matching", "text": "No different-member claim matched every required diagnosis, procedure, units, payer, provider, and place-of-service field."},
+            {"title": "Choose the broadest relevant pool", "text": fallback_reason},
+            {"title": "Rank the available claims", "text": "Claims were ranked by matching procedure and payer identifiers, then recency and claim ID. Billed and paid amounts were excluded."},
+            {"title": "Show the limitation", "text": f"{_claim_id(peer_claim)} is the closest broad candidate, but the mismatch table below determines why this is not an accurate comparison."},
+        ],
+        "selection_guardrail": "Neither billed amount nor paid amount is used to choose the peer. Amounts are read only after selection to calculate the displayed difference.",
+        "episode_ranking_priority": "Broad clinical relevance, matching procedure and payer identifiers, recency, then claim ID. Dollar amounts are excluded.",
+        "claim_ranking_priority": "Matching procedure and payer identifiers, recency, then claim ID. Dollar amounts are excluded.",
+        "selected_episode_id": peer_episode["episode_id"],
+        "selected_claim_id": _claim_id(peer_claim),
+        "episode_candidates": [{
+            "rank": 1,
+            "selected": True,
+            "episode_id": peer_episode["episode_id"],
+            "representative_claim_id": _claim_id(peer_claim),
+            "member_id": peer_episode["member_id"],
+            "episode_start": peer_episode["start_date"],
+            "episode_end": peer_episode["end_date"],
+            "similarity_score": 0,
+            "claim_count": peer_episode["claim_count"],
+            "exact_diagnosis_match": False,
+            "exact_or_family_procedure_match": _text(_field(peer_claim, "CPT_Code", "cptCode")) == target_cpt,
+            "similar_units_present": False,
+            "payer_match": _text(_field(peer_claim, "Payer_ID", "payerId")) == target["selected_identity"].get("payer_id"),
+            "provider_match": False,
+            "place_of_service_match": False,
+        }],
+        "claim_candidates": fallback_claim_candidates,
+    }
+    return {
+        "available": True, "peer_claim": peer_claim, "peer_episode": peer_episode,
+        "fallback_match_type": fallback_match_type, "fallback_reason": fallback_reason,
+        "selection_audit": selection_audit,
+    }
+
+
+def _select_matched_procedure_peer(database, target, selected_claim, peers, scenario_number, target_context):
+    """Rank eligible episodes and claims without using prices."""
+    fallback_match_type = ""
+    fallback_reason = ""
+    selection_audit = None
+    target_cpt = _text(_field(selected_claim, "CPT_Code", "cptCode"))
+    exact_procedure_peers = [
+        episode for episode in peers
+        if any(_text(_field(row, "CPT_Code", "cptCode")) == target_cpt for row in episode["rows"])
+    ]
+    comparison_peers = exact_procedure_peers or peers
+    def episode_rank_key(episode):
+        return (
+            _claim_similarity(target, episode, scenario_number),
+            _episode_match_metrics(target, episode)["exact_icd_match"],
+            _episode_match_metrics(target, episode)["cpt_match"],
+            episode["end_date"],
+            episode["episode_id"],
+        )
+
+    ranked_episodes = sorted(comparison_peers, key=episode_rank_key, reverse=True)
+    peer_episode = ranked_episodes[0]
+    peer_claim = _representative_peer_claim(target, peer_episode)
+    selected_claim_details = _peer_claim_rank_details(target, peer_claim)
+    ranked_claims = sorted(
+        peer_episode["rows"],
+        key=lambda row: _peer_claim_rank_details(target, row)["key"],
+        reverse=True,
+    )
+    episode_candidates = []
+    for rank, episode in enumerate(ranked_episodes, 1):
+        representative = _procedure_comparison_claim(_representative_peer_claim(target, episode))
+        metrics = _episode_match_metrics(target, episode)
+        episode_candidates.append({
+            "rank": rank,
+            "selected": episode["episode_id"] == peer_episode["episode_id"],
+            "episode_id": episode["episode_id"],
+            "representative_claim_id": representative["claim_id"],
+            "member_id": episode["member_id"],
+            "episode_start": episode["start_date"],
+            "episode_end": episode["end_date"],
+            "similarity_score": _claim_similarity(target, episode, scenario_number),
+            "claim_count": episode["claim_count"],
+            "exact_diagnosis_match": metrics["exact_icd_match"],
+            "exact_or_family_procedure_match": metrics["cpt_match"],
+            "similar_units_present": metrics["units_match"],
+            "payer_match": metrics["payer_match"],
+            "provider_match": metrics["provider_match"],
+            "place_of_service_match": metrics["pos_match"],
+        })
+    claim_candidates = []
+    for rank, row in enumerate(ranked_claims, 1):
+        candidate = _procedure_comparison_claim(row)
+        details = _peer_claim_rank_details(target, row)
+        selected = candidate["claim_id"] == _claim_id(peer_claim)
+        claim_candidates.append({
+            "rank": rank,
+            "selected": selected,
+            "claim_id": candidate["claim_id"],
+            "member_id": candidate["member_id"],
+            "service_date": candidate["service_date"],
+            "diagnosis_code": candidate["icd10"],
+            "procedure_code": candidate["cpt"],
+            "units": candidate["units"],
+            "billed_amount": candidate["billed_amount"],
+            "checks": details["checks"],
+            "decision": (
+                "Selected as the highest-ranked claim in the winning episode."
+                if selected
+                else f"Ranked lower because {_claim_rank_lower_reason(selected_claim_details, details)}."
+            ),
+        })
+    scenario_names = {1: "Strict match", 2: "Same ICD-10 family + same payer", 3: "Same ICD-10 family"}
+    scenario_gate = {
+        1: "another member, an earlier service date, the same diagnosis family, payer, provider, procedure family, place of service, and similar units",
+        2: "another member, an earlier service date, the same diagnosis family, and the same payer",
+        3: "another member, an earlier service date, and the same diagnosis family",
+    }.get(scenario_number, "another member and an earlier service date")
+    selected_episode_candidate = episode_candidates[0]
+    next_episode_candidate = episode_candidates[1] if len(episode_candidates) > 1 else None
+    lower_claim_reasons = " ".join(
+        f"{candidate['claim_id']} was not selected: {candidate['decision'].removeprefix('Ranked lower because ').rstrip('.')} ."
+        for candidate in claim_candidates[1:3]
+    ).replace(" .", ".")
+    selection_audit = {
+        "scenario_number": scenario_number,
+        "scenario_name": scenario_names.get(scenario_number, "Fallback comparison"),
+        "scenario_reason": (
+            f"Scenario {scenario_number} was the most specific available comparison rule. "
+            + (f"Scenario{'s' if scenario_number > 2 else ''} {', '.join(str(n) for n in range(1, scenario_number))} had no qualifying peer. " if scenario_number > 1 else "")
+            + "Broader available scenarios were not used."
+        ),
+        "eligible_episode_count": len(peers),
+        "eligible_claim_count": sum(episode["claim_count"] for episode in peers),
+        "exact_procedure_episode_count": len(exact_procedure_peers),
+        "procedure_filter_reason": (
+            f"{len(exact_procedure_peers)} eligible episode(s) contained exact CPT {target_cpt}, so only those episodes were ranked."
+            if exact_procedure_peers
+            else f"No eligible episode contained exact CPT {target_cpt}, so all {len(peers)} eligible episode(s) were ranked and the limitation is disclosed."
+        ),
+        "amounts_used_for_selection": False,
+        "plain_language_steps": [
+            {
+                "title": "Create the eligible pool",
+                "text": f"The rule required {scenario_gate}. That left {len(peers)} eligible episode(s) containing {sum(episode['claim_count'] for episode in peers)} claim(s).",
+            },
+            {
+                "title": "Check for the same procedure",
+                "text": (
+                    f"{len(exact_procedure_peers)} episode(s) contained exact CPT {target_cpt}; only those were considered further."
+                    if exact_procedure_peers
+                    else f"None of the eligible claims used CPT {target_cpt}. The model therefore continued with the closest available candidates, but marks the result as limited rather than an exact procedure comparison."
+                ),
+            },
+            {
+                "title": "Choose the closest episode",
+                "text": (
+                    f"Episode {selected_episode_candidate['episode_id']} ranked first with {selected_episode_candidate['similarity_score']}% field agreement"
+                    + (f", ahead of the next episode at {next_episode_candidate['similarity_score']}%." if next_episode_candidate else ".")
+                    + " Episode matching can use evidence from more than one claim; it does not mean the final claim matches every field."
+                ),
+            },
+            {
+                "title": "Choose one claim from that episode",
+                "text": (
+                    f"{_claim_id(peer_claim)} ranked first inside the selected episode using clinical and billing identifiers. "
+                    + lower_claim_reasons
+                ).strip(),
+            },
+        ],
+        "selection_guardrail": "Neither billed amount nor paid amount is used to choose the peer. Amounts are read only after selection to calculate the displayed difference.",
+        "episode_ranking_priority": "Similarity score, exact diagnosis, procedure code or family, recency, then episode ID. Dollar amounts are excluded.",
+        "claim_ranking_priority": "Exact CPT, procedure family, exact diagnosis, payer, provider, place of service, similar units, recency, then claim ID.",
+        "selected_episode_id": peer_episode["episode_id"],
+        "selected_claim_id": _claim_id(peer_claim),
+        "episode_candidates": episode_candidates[:10],
+        "claim_candidates": claim_candidates[:10],
+    }
+    return {
+        "available": True, "peer_claim": peer_claim, "peer_episode": peer_episode,
+        "fallback_match_type": fallback_match_type, "fallback_reason": fallback_reason,
+        "selection_audit": selection_audit,
+    }
+
+
+def _select_procedure_peer(database, target, selected_claim, peers, scenario_number, target_context):
+    select = _select_matched_procedure_peer if peers else _select_fallback_procedure_peer
+    return select(database, target, selected_claim, peers, scenario_number, target_context)
+
+
 def _build_procedure_comparison(database, target, selected_claim, peers, scenario_number):
     """Build an evidence-only, different-member procedure comparison for the UI."""
     target_claim = _procedure_comparison_claim(selected_claim)
@@ -792,271 +1078,14 @@ def _build_procedure_comparison(database, target, selected_claim, peers, scenari
         "prior_services": target_prior_services,
         "prior_services_total_paid": _money(sum(row["paid_amount"] for row in target_prior_services)),
     }
-    fallback_match_type = ""
-    fallback_reason = ""
-    selection_audit = None
-    if not peers:
-        # Show the closest broad peer as an explicitly limited review aid when
-        # no strict peer exists. The UI exposes every mismatch and never calls
-        # this an accurate or savings-supported comparison.
-        candidate_pool = [
-            c for c in (getattr(database, "selectable_claims", None) or getattr(database, "claims", []))
-            if _member_id(c) != target["member_id"]
-        ]
-        if not candidate_pool:
-            return {
-                "available": False,
-                "history_window_days": PAYER_COHORT_EPISODE_DAYS,
-                "reason": "No different-member peer visit was available.",
-                "target": target_context,
-            }
-        target_family = target["diagnosis_family"]
-        same_fam = [c for c in candidate_pool if _family(c) == target_family]
-        try:
-            from backend.patient_comparison import organ_for_family as _get_organ
-            target_organ, _ = _get_organ(target_family)
-            same_organ = [c for c in candidate_pool if _get_organ(_family(c))[0] == target_organ]
-        except Exception:
-            target_organ = target_family[:1]
-            same_organ = [c for c in candidate_pool if _family(c).startswith(target_organ)]
-
-        target_cpt = _text(_field(selected_claim, "CPT_Code", "cptCode"))
-        same_cpt = [c for c in candidate_pool if _text(_field(c, "CPT_Code", "cptCode")) == target_cpt]
-
-        if same_fam:
-            chosen_claims = same_fam
-            fallback_match_type = "same medical-code family"
-            fallback_reason = f"This different-member peer visit was selected using the same diagnosis family ({target_family}) benchmark."
-        elif same_organ:
-            chosen_claims = same_organ
-            fallback_match_type = f"same organ system ({target_organ})"
-            fallback_reason = f"This different-member peer visit was selected using the same organ system ({target_organ}) benchmark."
-        elif same_cpt:
-            chosen_claims = same_cpt
-            fallback_match_type = "same clinical procedure"
-            fallback_reason = "This different-member peer visit was selected using the same procedure benchmark."
-        else:
-            chosen_claims = candidate_pool
-            fallback_match_type = "clinical peer comparison"
-            fallback_reason = "This different-member peer visit was selected using clinical peer comparison."
-
-        def _score(c):
-            s = 0
-            if _text(_field(c, "CPT_Code", "cptCode")) == target_cpt:
-                s += 10
-            if _text(_field(c, "Payer_ID", "payerId")) == target.get("selected_identity", {}).get("payer_id"):
-                s += 5
-            return s
-
-        best_peer_claim = max(
-            chosen_claims,
-            key=lambda c: (_score(c), _day(_field(c, "Service_Date_From", "dos")) or date.min, _claim_id(c)),
-        )
-        peer_mid = _member_id(best_peer_claim)
-        peer_fam = _family(best_peer_claim)
-        peer_member_rows = [c for c in candidate_pool if _member_id(c) == peer_mid and _family(c) == peer_fam]
-        if not peer_member_rows:
-            peer_member_rows = [best_peer_claim]
-        peer_episode = _episode(peer_member_rows)
-        peer_episode["episode_id"] = f"PEER-{peer_mid}-{peer_fam}"
-        peer_claim = best_peer_claim
-        ranked_fallback_claims = sorted(
-            chosen_claims,
-            key=lambda row: (_score(row), _day(_field(row, "Service_Date_From", "dos")) or date.min, _claim_id(row)),
-            reverse=True,
-        )
-        selected_details = _peer_claim_rank_details(target, peer_claim)
-        fallback_claim_candidates = []
-        for rank, row in enumerate(ranked_fallback_claims[:10], 1):
-            candidate = _procedure_comparison_claim(row)
-            details = _peer_claim_rank_details(target, row)
-            selected = candidate["claim_id"] == _claim_id(peer_claim)
-            fallback_claim_candidates.append({
-                "rank": rank,
-                "selected": selected,
-                "claim_id": candidate["claim_id"],
-                "member_id": candidate["member_id"],
-                "service_date": candidate["service_date"],
-                "diagnosis_code": candidate["icd10"],
-                "procedure_code": candidate["cpt"],
-                "units": candidate["units"],
-                "billed_amount": candidate["billed_amount"],
-                "checks": details["checks"],
-                "decision": "Selected by the broad fallback rule." if selected else f"Ranked lower because {_claim_rank_lower_reason(selected_details, details)}.",
-            })
-        selection_audit = {
-            "scenario_number": 0,
-            "scenario_name": f"Broad fallback: {fallback_match_type}",
-            "scenario_reason": "No strict eligible peer was available. This broader comparison is shown for transparency only and is not an accurate comparison.",
-            "eligible_episode_count": len({(_member_id(row), _family(row)) for row in chosen_claims}),
-            "eligible_claim_count": len(chosen_claims),
-            "exact_procedure_episode_count": sum(_text(_field(row, "CPT_Code", "cptCode")) == target_cpt for row in chosen_claims),
-            "procedure_filter_reason": f"The broad fallback considered {len(chosen_claims)} claim(s) with {fallback_match_type} evidence; it did not require every comparison field to match.",
-            "amounts_used_for_selection": False,
-            "plain_language_steps": [
-                {"title": "Check strict matching", "text": "No different-member claim matched every required diagnosis, procedure, units, payer, provider, and place-of-service field."},
-                {"title": "Choose the broadest relevant pool", "text": fallback_reason},
-                {"title": "Rank the available claims", "text": "Claims were ranked by matching procedure and payer identifiers, then recency and claim ID. Billed and paid amounts were excluded."},
-                {"title": "Show the limitation", "text": f"{_claim_id(peer_claim)} is the closest broad candidate, but the mismatch table below determines why this is not an accurate comparison."},
-            ],
-            "selection_guardrail": "Neither billed amount nor paid amount is used to choose the peer. Amounts are read only after selection to calculate the displayed difference.",
-            "episode_ranking_priority": "Broad clinical relevance, matching procedure and payer identifiers, recency, then claim ID. Dollar amounts are excluded.",
-            "claim_ranking_priority": "Matching procedure and payer identifiers, recency, then claim ID. Dollar amounts are excluded.",
-            "selected_episode_id": peer_episode["episode_id"],
-            "selected_claim_id": _claim_id(peer_claim),
-            "episode_candidates": [{
-                "rank": 1,
-                "selected": True,
-                "episode_id": peer_episode["episode_id"],
-                "representative_claim_id": _claim_id(peer_claim),
-                "member_id": peer_episode["member_id"],
-                "episode_start": peer_episode["start_date"],
-                "episode_end": peer_episode["end_date"],
-                "similarity_score": 0,
-                "claim_count": peer_episode["claim_count"],
-                "exact_diagnosis_match": False,
-                "exact_or_family_procedure_match": _text(_field(peer_claim, "CPT_Code", "cptCode")) == target_cpt,
-                "similar_units_present": False,
-                "payer_match": _text(_field(peer_claim, "Payer_ID", "payerId")) == target["selected_identity"].get("payer_id"),
-                "provider_match": False,
-                "place_of_service_match": False,
-            }],
-            "claim_candidates": fallback_claim_candidates,
-        }
-    else:
-        target_cpt = _text(_field(selected_claim, "CPT_Code", "cptCode"))
-        exact_procedure_peers = [
-            episode for episode in peers
-            if any(_text(_field(row, "CPT_Code", "cptCode")) == target_cpt for row in episode["rows"])
-        ]
-        comparison_peers = exact_procedure_peers or peers
-        def episode_rank_key(episode):
-            return (
-                _claim_similarity(target, episode, scenario_number),
-                _episode_match_metrics(target, episode)["exact_icd_match"],
-                _episode_match_metrics(target, episode)["cpt_match"],
-                episode["end_date"],
-                episode["episode_id"],
-            )
-
-        ranked_episodes = sorted(comparison_peers, key=episode_rank_key, reverse=True)
-        peer_episode = ranked_episodes[0]
-        peer_claim = _representative_peer_claim(target, peer_episode)
-        selected_claim_details = _peer_claim_rank_details(target, peer_claim)
-        ranked_claims = sorted(
-            peer_episode["rows"],
-            key=lambda row: _peer_claim_rank_details(target, row)["key"],
-            reverse=True,
-        )
-        episode_candidates = []
-        for rank, episode in enumerate(ranked_episodes, 1):
-            representative = _procedure_comparison_claim(_representative_peer_claim(target, episode))
-            metrics = _episode_match_metrics(target, episode)
-            episode_candidates.append({
-                "rank": rank,
-                "selected": episode["episode_id"] == peer_episode["episode_id"],
-                "episode_id": episode["episode_id"],
-                "representative_claim_id": representative["claim_id"],
-                "member_id": episode["member_id"],
-                "episode_start": episode["start_date"],
-                "episode_end": episode["end_date"],
-                "similarity_score": _claim_similarity(target, episode, scenario_number),
-                "claim_count": episode["claim_count"],
-                "exact_diagnosis_match": metrics["exact_icd_match"],
-                "exact_or_family_procedure_match": metrics["cpt_match"],
-                "similar_units_present": metrics["units_match"],
-                "payer_match": metrics["payer_match"],
-                "provider_match": metrics["provider_match"],
-                "place_of_service_match": metrics["pos_match"],
-            })
-        claim_candidates = []
-        for rank, row in enumerate(ranked_claims, 1):
-            candidate = _procedure_comparison_claim(row)
-            details = _peer_claim_rank_details(target, row)
-            selected = candidate["claim_id"] == _claim_id(peer_claim)
-            claim_candidates.append({
-                "rank": rank,
-                "selected": selected,
-                "claim_id": candidate["claim_id"],
-                "member_id": candidate["member_id"],
-                "service_date": candidate["service_date"],
-                "diagnosis_code": candidate["icd10"],
-                "procedure_code": candidate["cpt"],
-                "units": candidate["units"],
-                "billed_amount": candidate["billed_amount"],
-                "checks": details["checks"],
-                "decision": (
-                    "Selected as the highest-ranked claim in the winning episode."
-                    if selected
-                    else f"Ranked lower because {_claim_rank_lower_reason(selected_claim_details, details)}."
-                ),
-            })
-        scenario_names = {1: "Strict match", 2: "Same ICD-10 family + same payer", 3: "Same ICD-10 family"}
-        scenario_gate = {
-            1: "another member, an earlier service date, the same diagnosis family, payer, provider, procedure family, place of service, and similar units",
-            2: "another member, an earlier service date, the same diagnosis family, and the same payer",
-            3: "another member, an earlier service date, and the same diagnosis family",
-        }.get(scenario_number, "another member and an earlier service date")
-        selected_episode_candidate = episode_candidates[0]
-        next_episode_candidate = episode_candidates[1] if len(episode_candidates) > 1 else None
-        lower_claim_reasons = " ".join(
-            f"{candidate['claim_id']} was not selected: {candidate['decision'].removeprefix('Ranked lower because ').rstrip('.')} ."
-            for candidate in claim_candidates[1:3]
-        ).replace(" .", ".")
-        selection_audit = {
-            "scenario_number": scenario_number,
-            "scenario_name": scenario_names.get(scenario_number, "Fallback comparison"),
-            "scenario_reason": (
-                f"Scenario {scenario_number} was the most specific available comparison rule. "
-                + (f"Scenario{'s' if scenario_number > 2 else ''} {', '.join(str(n) for n in range(1, scenario_number))} had no qualifying peer. " if scenario_number > 1 else "")
-                + "Broader available scenarios were not used."
-            ),
-            "eligible_episode_count": len(peers),
-            "eligible_claim_count": sum(episode["claim_count"] for episode in peers),
-            "exact_procedure_episode_count": len(exact_procedure_peers),
-            "procedure_filter_reason": (
-                f"{len(exact_procedure_peers)} eligible episode(s) contained exact CPT {target_cpt}, so only those episodes were ranked."
-                if exact_procedure_peers
-                else f"No eligible episode contained exact CPT {target_cpt}, so all {len(peers)} eligible episode(s) were ranked and the limitation is disclosed."
-            ),
-            "amounts_used_for_selection": False,
-            "plain_language_steps": [
-                {
-                    "title": "Create the eligible pool",
-                    "text": f"The rule required {scenario_gate}. That left {len(peers)} eligible episode(s) containing {sum(episode['claim_count'] for episode in peers)} claim(s).",
-                },
-                {
-                    "title": "Check for the same procedure",
-                    "text": (
-                        f"{len(exact_procedure_peers)} episode(s) contained exact CPT {target_cpt}; only those were considered further."
-                        if exact_procedure_peers
-                        else f"None of the eligible claims used CPT {target_cpt}. The model therefore continued with the closest available candidates, but marks the result as limited rather than an exact procedure comparison."
-                    ),
-                },
-                {
-                    "title": "Choose the closest episode",
-                    "text": (
-                        f"Episode {selected_episode_candidate['episode_id']} ranked first with {selected_episode_candidate['similarity_score']}% field agreement"
-                        + (f", ahead of the next episode at {next_episode_candidate['similarity_score']}%." if next_episode_candidate else ".")
-                        + " Episode matching can use evidence from more than one claim; it does not mean the final claim matches every field."
-                    ),
-                },
-                {
-                    "title": "Choose one claim from that episode",
-                    "text": (
-                        f"{_claim_id(peer_claim)} ranked first inside the selected episode using clinical and billing identifiers. "
-                        + lower_claim_reasons
-                    ).strip(),
-                },
-            ],
-            "selection_guardrail": "Neither billed amount nor paid amount is used to choose the peer. Amounts are read only after selection to calculate the displayed difference.",
-            "episode_ranking_priority": "Similarity score, exact diagnosis, procedure code or family, recency, then episode ID. Dollar amounts are excluded.",
-            "claim_ranking_priority": "Exact CPT, procedure family, exact diagnosis, payer, provider, place of service, similar units, recency, then claim ID.",
-            "selected_episode_id": peer_episode["episode_id"],
-            "selected_claim_id": _claim_id(peer_claim),
-            "episode_candidates": episode_candidates[:10],
-            "claim_candidates": claim_candidates[:10],
-        }
+    selection = _select_procedure_peer(database, target, selected_claim, peers, scenario_number, target_context)
+    if not selection["available"]:
+        return selection
+    peer_claim = selection["peer_claim"]
+    peer_episode = selection["peer_episode"]
+    fallback_match_type = selection["fallback_match_type"]
+    fallback_reason = selection["fallback_reason"]
+    selection_audit = selection["selection_audit"]
 
     peer_claim_payload = _procedure_comparison_claim(peer_claim)
     peer_prior_services = _prior_recorded_services(

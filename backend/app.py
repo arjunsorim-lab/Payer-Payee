@@ -3,6 +3,12 @@ import gzip
 import re
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
+
+try:
+    from .summary_jobs import member_summary_jobs
+except ImportError:
+    from summary_jobs import member_summary_jobs
 
 from bson import ObjectId
 from flask import Flask, jsonify, request, send_from_directory, g, Response
@@ -101,13 +107,25 @@ BUNDLED_WORKBOOK_PATH = (
 
 app = Flask(__name__, static_folder=None)
 configure_security(app)
+_configured_cors_origins = [
+    origin.strip().rstrip("/")
+    for origin in os.getenv(
+        "CORS_ORIGIN",
+        "http://127.0.0.1:5173,http://localhost:5173",
+    ).split(",")
+    if origin.strip()
+]
+if "*" in _configured_cors_origins:
+    raise RuntimeError("CORS_ORIGIN cannot use '*' when credentialed sessions are enabled.")
+if os.getenv("APP_ENV") == "production" or os.getenv("RENDER"):
+    for origin in _configured_cors_origins:
+        parsed = urlsplit(origin)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.hostname in {"localhost", "127.0.0.1", "::1"} or parsed.path or parsed.query or parsed.fragment or parsed.username:
+            raise RuntimeError("Production CORS_ORIGIN must contain explicit HTTPS browser origins.")
 CORS(
     app,
     supports_credentials=True,
-    origins=os.getenv(
-        "CORS_ORIGIN",
-        "http://127.0.0.1:5173,http://localhost:5173",
-    ).split(","),
+    origins=_configured_cors_origins,
 )
 
 
@@ -151,8 +169,17 @@ def escape_regex(value):
 
 
 def page_options(args, default_limit=25, max_limit=2000):
-    page = max(int(args.get("page", 1) or 1), 1)
-    limit = min(max(int(args.get("limit", default_limit) or default_limit), 1), max_limit)
+    def positive_integer(name, default, maximum):
+        try:
+            parsed = int(args.get(name, default))
+        except (TypeError, ValueError, OverflowError):
+            parsed = default
+        if parsed < 1:
+            parsed = default
+        return min(parsed, maximum)
+
+    page = positive_integer("page", 1, 1_000_000)
+    limit = positive_integer("limit", default_limit, max_limit)
     return page, limit, (page - 1) * limit
 
 
@@ -786,10 +813,13 @@ def get_member_money_summary(member_id):
         )
         if not member:
             return json_response({"message": "Member not found in selectable workbook claims"}, 404)
-        return json_response({
-            "member_id": member_id,
-            "supportedMoneySummary": member_supported_summary(database, member_id),
-        })
+        if query_flag(request.args, "async", default=False):
+            payload, status = member_summary_jobs.request(
+                (database.workbook_hash, member_id),
+                lambda: member_supported_summary(database, member_id),
+            )
+            return json_response({"member_id": member_id, **payload}, status)
+        return json_response({"member_id": member_id, "supportedMoneySummary": member_supported_summary(database, member_id)})
     return json_response({"message": "Claims source unavailable."}, 503)
 
 
@@ -800,7 +830,9 @@ def get_member_claims(member_id):
         claims = database.member_claims(member_id)
         return json_response({
             "total": len(claims),
-            "items": [workbook_claim_for_api(database, claim) for claim in claims],
+            # Audit history includes reference rows, which must never be sent
+            # through the selectable-only financial prediction engine.
+            "items": [workbook_claim_for_api(database, claim, include_summary=False) for claim in claims],
             "source": database.source_banner(),
         })
     db = connect_mongo()
@@ -969,6 +1001,7 @@ def get_prediction_scenarios():
             "summary": {
                 "totalClaims": len(all_rows),
                 "visibleClaims": len(results),
+                "scope": "visible_page",
                 "recoverableNow": round(sum(item["supported_money_summary"]["recoverable_now"] for item in results), 2),
                 "supportedAvoidableSpend": round(sum(episode_avoidable.values()), 2),
                 "predictedAvoidableSpend90d": round(

@@ -79,7 +79,9 @@ def test_every_workbook_member_and_claim_is_reviewed():
             assert not plan["recorded"] and not plan["included_in_savings"]
             if not plan["available"]:
                 assert plan["follow_up_days"] is None
-    assert sorted(reviewed) == sorted(claim["claimId"] for claim in database.selectable_claims)
+    # Member history includes reference and synthetic rows, not only the
+    # selectable prediction targets. Every history row must be reviewed once.
+    assert sorted(reviewed) == sorted(claim["claimId"] for claim in database.claims)
 
 
 def test_member_endpoint_avoids_financial_computation():

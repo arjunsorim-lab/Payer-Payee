@@ -1,3 +1,8 @@
+import { DetailedClaimFinancialBreakdown } from './ClaimFinancialBreakdown.jsx'
+import { PlainTooltip } from './PlainTooltip.jsx'
+import { PlainLanguageClaimNarrative, InterventionProposal, ClaimOutcomeEvidencePanel } from './ClaimEvidence.jsx'
+import { uniqueValues, getDateRange, formatCurrency, formatCompactCurrency, formatPercent, formatDate, calculateAge, sum, isDeniedClaimStatus, isOpenClaimStatus, getInitials, getDiagnosis, getService, getPayerContact } from './claimFormatting.js'
+import { VALID_VIEWS, normalizePredictionClaim, getNavForView, routeToHash, routeFromHash } from './routing.js'
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
@@ -7,6 +12,7 @@ import {
   formatProbability,
 } from './providerLlmFormat.js'
 import { CrossPatientComparatorContent, SamePatientBilledSavings } from './CrossPatientComparator.jsx'
+import { apiBaseUrl, apiFetchJson, setApiSession } from './apiClient.js'
 import {
   EVIDENCE_LABELS,
   claimsExportCsv,
@@ -114,17 +120,8 @@ const navSections = [
   },
 ]
 
-const RUNTIME_API_BASE_URL = typeof window !== 'undefined' ? window.__PAYER_PAYEE_API_URL__ : ''
-const CONFIGURED_API_BASE_URL = (
-  RUNTIME_API_BASE_URL
-  || import.meta.env.VITE_API_BASE_URL
-  || ''
-).replace(/\/$/, '')
-const LOCAL_API_BASE_URL = 'http://127.0.0.1:4000'
 const CLAIMS_CACHE_PREFIX = 'payerpayee.claims.workbook.'
-const EMPTY_DATE_RANGE = { from: '', to: '' }
 const CLICKABLE_NAV_LABELS = new Set(['Patient 360', 'Predictions', 'Claims', 'Patient Comparison'])
-const VALID_VIEWS = new Set(['home', 'member', 'predictions', 'claims', 'compare'])
 const truthyFlag = (value) => {
   const text = String(value ?? '').trim().toUpperCase()
   return ['Y', 'YES', 'TRUE', '1'].includes(text)
@@ -135,9 +132,7 @@ const isReferenceClaim = (claim) => Boolean(
   || truthyFlag(claim.workbookFields?.reference_claim_flag),
 )
 const isPrediabetesDemoClaim = (claim) => (
-  claim.memberId === 'MBR00015'
-  && claim.diagnosisCode === 'R73.03'
-  && ['CLM00001084', 'CLM00001084B'].includes(claim.claimId)
+  isReferenceClaim(claim) && claim.diagnosisCode === 'R73.03'
 )
 
 function buildDataModel(claimsData) {
@@ -171,54 +166,16 @@ let onSessionChange = () => {}
 
 function updateSession(next) {
   sessionState = { ...sessionState, ...next }
+  setApiSession({
+    csrf: sessionState.csrfToken,
+    unauthorized: () => updateSession({ authenticated: false, mode: 'secure' }),
+  })
   onSessionChange(sessionState)
   return sessionState
 }
 
 const AUTH_STATUSES = new Set([401, 403, 413, 429])
-
-async function fetchJson(path, options = {}) {
-  const candidates = [...new Set([
-    CONFIGURED_API_BASE_URL,
-    window.location.origin,
-    import.meta.env.DEV ? LOCAL_API_BASE_URL : '',
-  ].filter(Boolean))]
-  let lastError = new Error('Backend API could not be reached')
-  const method = (options.method || 'GET').toUpperCase()
-  const headers = { Accept: 'application/json', ...(options.headers || {}) }
-  if (!['GET', 'HEAD'].includes(method) && sessionState.csrfToken) {
-    headers['X-CSRF-Token'] = sessionState.csrfToken
-  }
-
-  for (const baseUrl of candidates) {
-    try {
-      const response = await fetch(`${baseUrl}${path}`, {
-        ...options,
-        credentials: 'same-origin',
-        headers,
-      })
-      if (!response.ok) {
-        const errorPayload = await response.json().catch(() => null)
-        const requestError = new Error(errorPayload?.message || `Request failed: ${response.status}`)
-        requestError.status = response.status
-        if (response.status === 401) {
-          updateSession({ authenticated: false, mode: 'secure' })
-        }
-        if (![404, 405].includes(response.status)) throw requestError
-        lastError = requestError
-        continue
-      }
-      return await response.json()
-    } catch (error) {
-      if (AUTH_STATUSES.has(error.status) || !['Failed to fetch', 'Load failed', 'NetworkError when attempting to fetch resource.'].includes(error.message)) {
-        throw error
-      }
-      lastError = error
-    }
-  }
-
-  throw lastError
-}
+const fetchJson = apiFetchJson
 
 async function bootstrapSession() {
   const payload = await fetchJson('/api/session')
@@ -254,15 +211,17 @@ async function signOut() {
   }
 }
 
-async function fetchJsonWithRetry(path, options = {}, attempts = 15, delayMs = 1500) {
+async function fetchJsonWithRetry(path, options = {}, attempts = 4, delayMs = 250) {
   let lastError
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       return await fetchJson(path, options)
     } catch (error) {
       lastError = error
-      if (AUTH_STATUSES.has(error.status) || error.status === 503 || attempt === attempts) break
-      await new Promise((resolve) => window.setTimeout(resolve, delayMs))
+      const transientResponse = [502, 504].includes(error.status)
+      const networkFailure = !error.status && ['Backend API could not be reached', 'Failed to fetch', 'Load failed', 'NetworkError when attempting to fetch resource.'].includes(error.message)
+      if ((!transientResponse && !networkFailure) || AUTH_STATUSES.has(error.status) || attempt === attempts) break
+      await new Promise((resolve) => window.setTimeout(resolve, Math.min(delayMs * (2 ** (attempt - 1)), 1000)))
     }
   }
   throw lastError
@@ -279,6 +238,8 @@ function writeClaimsCache(items, source) {
     Object.keys(window.localStorage)
       .filter((key) => key.startsWith('payerpayee.provider-chat.') && !key.includes(workbookHash))
       .forEach((key) => window.localStorage.removeItem(key))
+    const chatKeys = Object.keys(window.localStorage).filter((key) => key.startsWith('payerpayee.provider-chat.'))
+    chatKeys.slice(0, Math.max(0, chatKeys.length - 50)).forEach((key) => window.localStorage.removeItem(key))
     window.localStorage.setItem(`${CLAIMS_CACHE_PREFIX}${workbookHash}`, JSON.stringify({
       items,
       workbookHash,
@@ -289,75 +250,6 @@ function writeClaimsCache(items, source) {
   }
 }
 
-function findClaimByNumber(claimsData, claimNumber) {
-  return claimsData.find((claim) => claim.number === claimNumber || claim.claimId === claimNumber) || null
-}
-
-function normalizePredictionClaim(claim) {
-  const identifier = String(claim?.claimId || claim?.number || '').toUpperCase()
-  if (['CLM00001084', 'CLM00001084B', 'CLM-001084'].includes(identifier)) {
-    return {
-      ...claim,
-      claimId: 'CLM00001843',
-      number: 'CLM-001843',
-      memberId: 'MBR00016',
-      diagnosisCode: 'R73.03',
-      diagnosisDescription: 'Prediabetes',
-      isHistoricalReference: false,
-      workbookFields: {},
-    }
-  }
-  return claim
-}
-
-function getNavForView(view) {
-  if (view === 'member') return 'Patient 360'
-  if (view === 'predictions') return 'Predictions'
-  if (view === 'claims') return 'Claims'
-  if (view === 'compare') return 'Patient Comparison'
-  return 'home'
-}
-
-function routeToHash(route) {
-  const params = new URLSearchParams()
-  const view = VALID_VIEWS.has(route.activeView) ? route.activeView : 'home'
-  params.set('view', view)
-
-  if (view === 'member' && route.selectedMemberId) {
-    params.set('member', route.selectedMemberId)
-  }
-  if (view === 'claims' && route.selectedClaim?.number) {
-    params.set('claim', route.selectedClaim.number)
-  }
-  if (view === 'predictions' && route.selectedPredictionClaim?.number) {
-    params.set('prediction', route.selectedPredictionClaim.number)
-  }
-
-  return `#${params.toString()}`
-}
-
-function routeFromHash(hash, claimsData) {
-  const params = new URLSearchParams(hash.replace(/^#/, ''))
-  const requestedView = params.get('view') || 'home'
-  const activeView = VALID_VIEWS.has(requestedView) ? requestedView : 'home'
-  const claimParam = params.get('claim')
-  const predictionParam = params.get('prediction')
-  const selectedClaim = activeView === 'claims' && claimParam
-    ? findClaimByNumber(claimsData, claimParam) || { claimId: claimParam, number: claimParam }
-    : null
-  const selectedPredictionClaim = activeView === 'predictions' && predictionParam
-    ? normalizePredictionClaim(findClaimByNumber(claimsData, predictionParam) || { claimId: predictionParam, number: predictionParam })
-    : null
-  const selectedMemberId = activeView === 'member' ? params.get('member') : null
-
-  return {
-    activeView,
-    activeNav: getNavForView(activeView),
-    selectedMemberId,
-    selectedClaim,
-    selectedPredictionClaim,
-  }
-}
 
 function downloadClaims(claims, filename) {
   const url = URL.createObjectURL(new Blob([claimsExportCsv(claims)], { type: 'text/csv;charset=utf-8' }))
@@ -368,95 +260,6 @@ function downloadClaims(claims, filename) {
   link.click()
   link.remove()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
-}
-
-function uniqueValues(rows, key) {
-  return [...new Set(rows.map((row) => row[key]).filter(Boolean))].sort((a, b) => a.localeCompare(b))
-}
-
-function getDateRange(rows) {
-  const dates = rows.map((row) => row.dos).filter(Boolean).sort()
-  if (!dates.length) return EMPTY_DATE_RANGE
-  return { from: dates[0], to: dates[dates.length - 1] }
-}
-
-function formatCurrency(value) {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    maximumFractionDigits: 2,
-  }).format(value || 0)
-}
-
-function formatCompactCurrency(value) {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    notation: Math.abs(value) >= 1_000_000 ? 'compact' : 'standard',
-    maximumFractionDigits: Math.abs(value) >= 1_000_000 ? 1 : 0,
-  }).format(value || 0)
-}
-
-function formatPercent(value) {
-  return `${Number.isFinite(value) ? value.toFixed(1) : '0.0'}%`
-}
-
-function formatDate(value) {
-  if (!value) return '-'
-  return new Date(`${value}T00:00:00`).toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-  })
-}
-
-function calculateAge(dob) {
-  if (!dob) return ''
-  const birthDate = new Date(`${dob}T00:00:00`)
-  const today = new Date()
-  let age = today.getFullYear() - birthDate.getFullYear()
-  const monthOffset = today.getMonth() - birthDate.getMonth()
-  if (monthOffset < 0 || (monthOffset === 0 && today.getDate() < birthDate.getDate())) {
-    age -= 1
-  }
-  return age
-}
-
-function sum(rows, key) {
-  return rows.reduce((total, row) => total + (row[key] || 0), 0)
-}
-
-function isDeniedClaimStatus(status) {
-  return String(status || '').trim().toLowerCase() === 'denied'
-}
-
-function isOpenClaimStatus(status) {
-  const normalized = String(status || '').trim().toLowerCase()
-  if (!normalized) return false
-  if (normalized.includes('processed') || normalized.includes('paid') || normalized.includes('adjudicated')) return false
-  return normalized.includes('open')
-    || normalized.includes('pending')
-    || normalized.includes('submitted')
-    || normalized.includes('review')
-    || normalized.includes('appeal')
-    || normalized.includes('rejected')
-    || normalized === 'denied'
-}
-
-function getInitials(member) {
-  return `${member.firstName?.[0] || ''}${member.lastName?.[0] || ''}`.toUpperCase()
-}
-
-function getDiagnosis(claim) {
-  return `${claim.diagnosisCode} ${claim.diagnosisDescription}`.trim()
-}
-
-function getService(claim) {
-  return `${claim.placeOfServiceCode} - ${claim.placeOfService}`.trim()
-}
-
-function getPayerContact(claim) {
-  return claim.payerContact || 'Not recorded'
 }
 
 function buildMembers(rows) {
@@ -506,14 +309,15 @@ function buildMembers(rows) {
 }
 
 function buildMemberStats(member, money, payerCohortSavings) {
-  const claimCount = member.claims.length
+  const claims = member.claims || []
+  const claimCount = claims.length
   
   // Basic calculations purely from real dataset
-  const totalAllowed = member.totalAllowed ?? member.claims.reduce((acc, c) => acc + (c.allowed || 0), 0)
-  const totalPaid = member.totalPaid ?? member.claims.reduce((acc, c) => acc + (c.paid || 0), 0)
-  const totalPatientResp = member.totalPatientResp ?? member.claims.reduce((acc, c) => acc + (c.patientResp || 0), 0)
-  const totalCharge = member.totalCharge ?? member.claims.reduce((acc, c) => acc + (c.totalCharge || 0), 0)
-  const totalAdjustment = member.totalAdjustment ?? member.claims.reduce((acc, c) => acc + (c.adjustment || 0), 0)
+  const totalAllowed = member.totalAllowed ?? claims.reduce((acc, c) => acc + (c.allowed || 0), 0)
+  const totalPaid = member.totalPaid ?? claims.reduce((acc, c) => acc + (c.paid || 0), 0)
+  const totalPatientResp = member.totalPatientResp ?? claims.reduce((acc, c) => acc + (c.patientResp || 0), 0)
+  const totalCharge = member.totalCharge ?? claims.reduce((acc, c) => acc + (c.totalCharge || 0), 0)
+  const totalAdjustment = member.totalAdjustment ?? claims.reduce((acc, c) => acc + (c.adjustment || 0), 0)
   const insuranceSavings = totalAdjustment > 0 ? totalAdjustment : Math.max(0, totalCharge - totalAllowed)
   
   const supportedAvoidableCosts = money?.potentially_avoidable_spend_supported
@@ -527,17 +331,17 @@ function buildMemberStats(member, money, payerCohortSavings) {
       : avoidableCostsPending
         ? 'Calculating opportunity'
         : 'No supported opportunity'
-  const openClaimsCount = member.claims.filter(c => isOpenClaimStatus(c.status)).length
-  const deniedClaimsCount = member.claims.filter(c => isDeniedClaimStatus(c.status)).length
+  const openClaimsCount = claims.filter(c => isOpenClaimStatus(c.status)).length
+  const deniedClaimsCount = claims.filter(c => isDeniedClaimStatus(c.status)).length
 
   return [
     { label: 'Total Allowed', value: formatCurrency(totalAllowed), note: `Across ${claimCount.toLocaleString()} claims`, iconTone: 'green', Icon: CircleDollarSign },
     { label: 'Total Paid', value: formatCurrency(totalPaid), note: 'Payer payments recorded', iconTone: 'blue', Icon: Banknote },
     { label: 'Patient Responsibility', value: formatCurrency(totalPatientResp), note: 'Out of pocket + copay + coins', iconTone: 'orange', Icon: UserRound },
     { label: 'Primary Insurance Savings', value: formatCurrency(insuranceSavings), note: 'Contracted plan discounts', iconTone: 'green', Icon: ShieldCheck },
-    { label: 'Potentially Avoidable Costs', value: avoidableCostsPending ? 'Calculating…' : formatCurrency(avoidableCosts), note: avoidableCostsNote, iconTone: 'purple', Icon: Target },
+    { label: 'Potentially Avoidable Costs', value: money?.unavailable ? 'Could not load' : avoidableCostsPending ? 'Calculating…' : formatCurrency(avoidableCosts), note: money?.unavailable ? 'Calculation could not be loaded; reopen this member to retry' : avoidableCostsNote, iconTone: 'purple', Icon: Target },
     { label: 'Open Claims', value: openClaimsCount.toString(), note: `${deniedClaimsCount} denied claims`, iconTone: openClaimsCount > 0 ? 'red' : 'green', Icon: FileText },
-    { label: 'Last Encounter', value: formatDate(member.latestClaim.dos), note: member.latestClaim.placeOfService, iconTone: 'blue', Icon: CalendarDays },
+    { label: 'Last Encounter', value: member.latestClaim?.dos ? formatDate(member.latestClaim.dos) : 'Not recorded', note: member.latestClaim?.placeOfService || 'Not recorded', iconTone: 'blue', Icon: CalendarDays },
   ]
 }
 
@@ -1595,564 +1399,6 @@ function PredictionScenarioDirectory({ scenarios, totalCount, onOpenScenario, em
   )
 }
 
-function DetailedClaimFinancialBreakdown({ scenario, facts, snapshot, summary }) {
-  const [activeTab, setActiveTab] = useState('overview')
-  const avoidable = snapshot.predicted_avoidable_spend || {}
-  const similarClaims = scenario.similar_historical_claims || []
-  const patterns = scenario.historical_patterns || {}
-  const avoidableBasis = snapshot.avoidable_prediction_basis || {}
-  const repeatEvidence = avoidableBasis.repeat_probability?.evidence || {}
-  const avoidabilityEvidence = avoidableBasis.avoidable_probability?.evidence || {}
-  const repeatCostEvidence = avoidableBasis.repeat_cost || {}
-
-  const billed = facts.charge || 0
-  const allowed = facts.allowed || 0
-  const discount = Math.max(0, billed - allowed)
-  const paid = facts.paid || 0
-  const patientResp = facts.patient_responsibility || 0
-  const patientPaid = facts.patient_payment_received || 0
-  const patientUnpaid = Math.round((patientResp - patientPaid) * 100) / 100
-  const recordedPatientBalance = facts.outstanding_patient_balance
-
-  return (
-    <div className="financial-responsibility-breakdown-card">
-      <div className="resp-breakdown-header">
-        <div className="resp-title">
-          <DollarSign size={20} className="resp-icon" />
-          <div>
-            <h3>Money for this bill</h3>
-            <span className="resp-subtitle">Who paid, what is left, and one separate future guess</span>
-          </div>
-        </div>
-        <div className="resp-tab-nav">
-          <button
-            type="button"
-            className={`resp-tab-btn ${activeTab === 'overview' ? 'active' : ''}`}
-            onClick={() => setActiveTab('overview')}
-          >
-            Who paid
-          </button>
-          <button
-            type="button"
-            className={`resp-tab-btn ${activeTab === 'avoidable_math' ? 'active' : ''}`}
-            onClick={() => setActiveTab('avoidable_math')}
-          >
-            Why we guessed {formatOptionalCurrency(avoidable.value)}
-          </button>
-          <button
-            type="button"
-            className={`resp-tab-btn ${activeTab === 'avoid_action' ? 'active' : ''}`}
-            onClick={() => setActiveTab('avoid_action')}
-          >
-            What a person should check
-          </button>
-          <button
-            type="button"
-            className={`resp-tab-btn ${activeTab === 'evidence_claims' ? 'active' : ''}`}
-            onClick={() => setActiveTab('evidence_claims')}
-          >
-            Older bills we looked at ({similarClaims.length})
-          </button>
-        </div>
-      </div>
-
-      {activeTab === 'overview' && (
-        <div className="tab-pane-content">
-          <div className="financial-waterfall-bar-wrap">
-            <div className="waterfall-header">
-              <span className="waterfall-title">How the {formatOptionalCurrency(billed)} bill was split</span>
-              <span className="waterfall-discount-pill">Price lowered by insurance: -{formatOptionalCurrency(discount)}</span>
-            </div>
-            <div className="waterfall-progress-bar">
-              <div className="bar-segment bar-payer" style={{ width: `${billed > 0 ? (paid / billed) * 100 : 0}%` }} title={`Payer Paid: ${formatOptionalCurrency(paid)}`}>
-                <span>Insurance paid: {formatOptionalCurrency(paid)}</span>
-              </div>
-              <div className="bar-segment bar-patient" style={{ width: `${billed > 0 ? (patientResp / billed) * 100 : 0}%` }} title={`Patient: ${formatOptionalCurrency(patientResp)}`}>
-                <span>Patient share: {formatOptionalCurrency(patientResp)}</span>
-              </div>
-              <div className="bar-segment bar-discount" style={{ width: `${billed > 0 ? (discount / billed) * 100 : 0}%` }} title={`Discount: ${formatOptionalCurrency(discount)}`}>
-                <span>Price lowered: -{formatOptionalCurrency(discount)}</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="resp-columns-grid">
-            <div className="resp-column-box billed-box">
-              <span className="box-kicker">1. What the hospital asked for</span>
-              <div className="box-main-num">
-                <span>First price</span>
-                <PlainTooltip text="This is the provider's starting price before insurance contract rules were applied."><strong>{formatOptionalCurrency(billed)}</strong></PlainTooltip>
-              </div>
-              <div className="box-sub-items">
-                <div className="sub-row">
-                  <span>Insurance price:</span>
-                  <PlainTooltip text="This is the amount the health plan recognizes for the service. It is often called the allowed amount."><strong>{formatOptionalCurrency(allowed)}</strong></PlainTooltip>
-                </div>
-                <div className="sub-row discount-row">
-                  <span>Price lowered by insurance:</span>
-                  <strong className="success-text">-{formatOptionalCurrency(discount)}</strong>
-                </div>
-                <div className="sub-row">
-                  <span>How much lower:</span>
-                  <span>{billed > 0 ? ((discount / billed) * 100).toFixed(1) : 0}% lower</span>
-                </div>
-              </div>
-              <details className="box-provenance-explainer">
-                <summary>Show where these numbers came from</summary>
-                <div>
-                  <p><strong>Scope:</strong> One recorded claim (Claim {scenario.claim_id}) from {facts.provider || 'the provider'} for billing code {facts.cpt_code || 'not recorded'}.</p>
-                  <p><strong>Insurance-agreed price:</strong> The allowed amount recorded on this claim.</p>
-                  <p><strong>Discount calculation:</strong> {formatOptionalCurrency(billed)} billed − {formatOptionalCurrency(allowed)} agreed price = {formatOptionalCurrency(discount)} price reduction.</p>
-                </div>
-              </details>
-            </div>
-
-            <div className="resp-column-box payer-box">
-              <span className="box-kicker">2. What insurance paid</span>
-              <div className="box-main-num">
-                <span>Money insurance paid</span>
-                <PlainTooltip text="This is the payer-paid amount stored on the claim. It is money recorded as paid, not the model's estimate."><strong className="payer-highlight">{formatOptionalCurrency(paid)}</strong></PlainTooltip>
-              </div>
-              <div className="box-sub-items">
-                <div className="sub-row">
-                  <span>Computer’s guess from older bills:</span>
-                  <strong>{formatOptionalCurrency(snapshot.predicted_provider_payment?.value)}</strong>
-                </div>
-                <div className="sub-row">
-                  <span>Insurance name:</span>
-                  <span>{facts.payer || 'Not recorded'}</span>
-                </div>
-                <div className="sub-row">
-                  <span>Part of the insurance price paid:</span>
-                  <strong className="payer-highlight">{allowed > 0 ? ((paid / allowed) * 100).toFixed(1) : 0}%</strong>
-                </div>
-              </div>
-              <details className="box-provenance-explainer">
-                <summary>Show where these numbers came from</summary>
-                <div>
-                  <p><strong>Recorded insurance payment:</strong> The paid amount stored in the workbook for this claim. In a production system, this would normally be checked against the payer remittance.</p>
-                  <p><strong>Estimated payment:</strong> Calculated from {snapshot.peer_sample_size || similarClaims.length || 0} earlier claims selected by the prediction engine. The exact matching rule is available in the technical details.</p>
-                </div>
-              </details>
-            </div>
-
-            <div className="resp-column-box patient-box">
-              <span className="box-kicker">3. What the patient may pay</span>
-              <div className="box-main-num">
-                <span>Patient share</span>
-                <PlainTooltip text="This is the amount the workbook assigns to the patient, including deductible, copay, or coinsurance components."><strong className="patient-highlight">{formatOptionalCurrency(patientResp)}</strong></PlainTooltip>
-              </div>
-              <div className="box-sub-items">
-                <div className="sub-row">
-                  <span>Already paid:</span>
-                  <strong className="paid-amount">{formatOptionalCurrency(patientPaid)} ({patientResp > 0 ? ((patientPaid / patientResp) * 100).toFixed(0) : 0}%)</strong>
-                </div>
-                <div className="sub-row unpaid-row">
-                  <span>Calculated remaining balance:</span>
-                  <PlainTooltip text="This is the recorded patient amount minus patient payments received. Staff should confirm it before contacting the patient."><strong className="warning-text">{formatOptionalCurrency(patientUnpaid)}</strong></PlainTooltip>
-                </div>
-                {Number.isFinite(recordedPatientBalance) && Math.abs(recordedPatientBalance - patientUnpaid) > 0.01 ? <p role="note">Balance reconciliation: {formatOptionalCurrency(patientResp)} − {formatOptionalCurrency(patientPaid)} = {formatOptionalCurrency(patientUnpaid)}. Review totals use the calculated amount due. The source balance of {formatOptionalCurrency(recordedPatientBalance)} is retained for audit.</p> : null}
-                <div className="sub-row">
-                  <span>How long it has been waiting:</span>
-                  <span className="badge-broken-plan">{facts.days_outstanding ?? 0} days · {facts.payment_plan_status || facts.balance_status || 'Status not recorded'}</span>
-                </div>
-              </div>
-              <details className="box-provenance-explainer">
-                <summary>Show where these numbers came from</summary>
-                <div>
-                  <p><strong>Amount assigned to the patient:</strong> Copied from the claim's recorded patient-responsibility field. It is not calculated as agreed price minus insurance payment.</p>
-                  <p><strong>Calculated balance:</strong> {formatOptionalCurrency(patientResp)} recorded patient amount − {formatOptionalCurrency(patientPaid)} patient payments = {formatOptionalCurrency(patientUnpaid)}.</p>
-                  {Number.isFinite(recordedPatientBalance) && Math.abs(recordedPatientBalance - patientUnpaid) > 0.01 ? <p><strong>Source discrepancy:</strong> The workbook separately records {formatOptionalCurrency(recordedPatientBalance)} outstanding. The calculated amount due is {formatOptionalCurrency(Math.max(0, patientUnpaid))}; this is the balance used when calculating the actionable review amount.</p> : null}
-                </div>
-              </details>
-            </div>
-
-            <div className="resp-column-box avoidable-box">
-              <span className="box-kicker">4. A possible future cost</span>
-              <div className="box-main-num">
-                <span>Possible extra money if another bill happens</span>
-                <PlainTooltip text="This is an average estimate across similar cases. It is not a confirmed saving for this patient."><strong className="avoidable-highlight">{formatOptionalCurrency(avoidable.value)}</strong></PlainTooltip>
-              </div>
-              <div className="box-sub-items">
-                <div className="sub-row formula-row">
-                  <span>Calculation using stored probabilities:</span>
-                  <code>{avoidable.repeat_probability_90d} × {avoidable.avoidable_given_repeat_probability} × {formatOptionalCurrency(avoidable.expected_extra_repeat_allowed_cost)}</code>
-                </div>
-                <div className="sub-row">
-                  <span>What this guess means:</span>
-                  <span className="avoid-tip">Another related bill might happen in the next three months. A person must decide if it would be needed.</span>
-                </div>
-              </div>
-              <details className="box-provenance-explainer">
-                <summary>Show the math and where it came from</summary>
-                <div>
-                  <p><strong>{formatProbability(avoidable.repeat_probability_90d)} chance of another related claim:</strong> Estimated from earlier claim timing.</p>
-                  <p><strong>{formatProbability(avoidable.avoidable_given_repeat_probability)} with avoidability evidence:</strong> The share of earlier repeats carrying the workbook's avoidability signals. This is not a medical-necessity decision.</p>
-                  <p><strong>{formatOptionalCurrency(avoidable.expected_extra_repeat_allowed_cost)} possible extra cost:</strong> The historical cost estimate used if such a repeat occurs.</p>
-                  <p><strong>Calculation:</strong> {avoidable.repeat_probability_90d} × {avoidable.avoidable_given_repeat_probability} × {formatOptionalCurrency(avoidable.expected_extra_repeat_allowed_cost)} = {formatOptionalCurrency(avoidable.value)} average per similar case, rounded to cents. Percentage labels elsewhere are rounded for display.</p>
-                </div>
-              </details>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {activeTab === 'avoidable_math' && (
-        <div className="tab-pane-content math-deepdive-pane">
-          <p className="math-plain-summary">The estimate combines the chance of another related claim, the share of earlier repeats with avoidability evidence, and the possible extra cost. The result is an average across similar cases, not a guaranteed saving.</p>
-          <details className="technical-detail-toggle math-detail-toggle">
-            <summary>Show the math behind the estimate</summary>
-            <div className="math-hero-banner">
-              <div className="math-equation-badge">THE MATH BEHIND THE ESTIMATE</div>
-              <div className="math-equation-row">
-                <div className="math-term-box">
-                  <PlainTooltip text="Out of 100 similar cases, this is how many would be expected to have another related claim within three months."><span className="term-name">1. Chance of another related claim within 3 months</span></PlainTooltip>
-                  <strong className="term-val">{formatProbability(avoidable.repeat_probability_90d)}</strong>
-                  <small className="term-sub">{repeatEvidence.external_numerator ?? 0} repeats in {repeatEvidence.external_denominator ?? 0} broader historical observations; blended with local evidence</small>
-                </div>
-                <span className="math-op">×</span>
-                <div className="math-term-box">
-                  <PlainTooltip text="This is the share of earlier repeat claims carrying the workbook's avoidability signals. It does not decide whether care was medically necessary."><span className="term-name">2. Repeats with avoidability evidence</span></PlainTooltip>
-                  <strong className="term-val">{formatProbability(avoidable.avoidable_given_repeat_probability)}</strong>
-                  <small className="term-sub">{avoidabilityEvidence.external_numerator ?? 0} of {avoidabilityEvidence.external_denominator ?? 0} broader repeat observations carried avoidability evidence</small>
-                </div>
-                <span className="math-op">×</span>
-                <div className="math-term-box">
-                  <PlainTooltip text="This is the historical estimate of additional health-plan allowed cost if another related claim occurs."><span className="term-name">3. Extra cost if another claim happens</span></PlainTooltip>
-                  <strong className="term-val">{formatOptionalCurrency(avoidable.expected_extra_repeat_allowed_cost)}</strong>
-                  <small className="term-sub">Expected extra allowed cost from {repeatCostEvidence.peer_level || 'available historical'} evidence</small>
-                </div>
-                <span className="math-op">=</span>
-                <div className="math-result-box">
-                  <span className="result-name">Average possible savings per similar case</span>
-                  <strong className="result-val">{formatOptionalCurrency(avoidable.value)}</strong>
-                  <small className="result-sub">Probability-weighted estimate, not confirmed savings</small>
-                </div>
-              </div>
-            </div>
-
-            <div className="math-cards-grid">
-              <div className="math-detail-card">
-                <h4>1. Chance of another related claim within three months ({formatProbability(avoidable.repeat_probability_90d)})</h4>
-                <p>The engine blends this member’s available history with broader historical observations. It uses smoothing so a small local sample does not produce an extreme result.</p>
-                <ul>
-                  <li><strong>Member history:</strong> <strong>{patterns.earlier_member_claims ?? 0} earlier claims</strong> are recorded before this claim.</li>
-                  <li><strong>Timing evidence:</strong> <strong>{patterns.within_90_days ?? 0} related claim pairs</strong> are no more than 90 days apart.</li>
-                  <li><strong>Typical gap:</strong> The median gap between related earlier claims is <strong>{patterns.median_days_between_related_claims ?? 'not available'} days</strong>.</li>
-                </ul>
-              </div>
-
-              <div className="math-detail-card">
-                <h4>2. Repeats with avoidability evidence ({formatProbability(avoidable.avoidable_given_repeat_probability)})</h4>
-                <p>This comes from historical rows carrying avoidability evidence. It is not a clinical decision about this member.</p>
-                <ul>
-                  <li><strong>Broader evidence:</strong> {avoidabilityEvidence.external_numerator ?? 0} of {avoidabilityEvidence.external_denominator ?? 0} historical repeat observations carried the workbook’s avoidability signal.</li>
-                  <li><strong>Limit:</strong> The app cannot determine medical necessity from claim codes alone.</li>
-                </ul>
-              </div>
-
-              <div className="math-detail-card">
-                <h4>3. Extra cost if another related claim happens ({formatOptionalCurrency(avoidable.expected_extra_repeat_allowed_cost)})</h4>
-                <p>The engine estimates the extra health-plan allowed amount associated with a repeat using the available historical cost evidence.</p>
-                <ul>
-                  <li><strong>Evidence level:</strong> {repeatCostEvidence.peer_level || 'Not recorded'}.</li>
-                  <li><strong>Historical episodes used:</strong> {repeatCostEvidence.peer_count ?? 0}.</li>
-                </ul>
-              </div>
-            </div>
-          </details>
-        </div>
-      )}
-
-      {activeTab === 'avoid_action' && (
-        <div className="tab-pane-content action-deepdive-pane">
-          <div className="action-plan-grid">
-            <div className="action-item-card avoid-card">
-              <div className="action-card-header">
-                <span className="card-badge red">Review signal</span>
-                <h4>Possible related repeat involving CPT {facts.cpt_code || 'not recorded'} within 90 days</h4>
-              </div>
-              <p>The historical pattern has a {patterns.median_days_between_related_claims ?? 'not available'}-day median gap between related claims. This is a reason to review timing and documentation, not proof of duplicate or unnecessary care.</p>
-              <div className="action-consequence">
-                <span>Separate forecasts:</span> <strong>{formatOptionalCurrency(avoidable.value)} possible repeat-cost exposure and {formatOptionalCurrency(summary.future_denial_exposure)} probability-weighted denial exposure.</strong>
-              </div>
-            </div>
-
-            <div className="action-item-card save-card">
-              <div className="action-card-header">
-                <span className="card-badge green">Suggested review</span>
-                <h4>Checks a person can perform before taking action</h4>
-              </div>
-              <ol className="action-steps-list">
-                <li>
-                  <strong>Review related claims:</strong> Check whether the earlier and possible repeat services differ in diagnosis details, clinical circumstances, or billed work.
-                </li>
-                <li>
-                  <strong>Check administrative requirements:</strong> Confirm authorization and referral requirements from the payer contract; an “N/A” workbook value is not proof that authorization was missing.
-                </li>
-                <li>
-                  <strong>Confirm the patient balance:</strong> Review the recorded <strong>{formatOptionalCurrency(patientUnpaid)}</strong> balance and {facts.payment_plan_status || 'payment-plan'} status before contacting the patient.
-                </li>
-              </ol>
-            </div>
-          </div>
-
-          <div className="total-savings-summary-banner">
-            <div className="summary-left">
-              <Target size={24} color="#15803d" />
-              <div>
-                <strong>Keep the amounts separate</strong>
-                <p>The current follow-up amount ({formatOptionalCurrency(summary.recoverable_now)}), possible repeat-cost forecast ({formatOptionalCurrency(avoidable.value)}), and denial exposure ({formatOptionalCurrency(summary.future_denial_exposure)}) answer different questions and should not be added together.</p>
-              </div>
-            </div>
-            <span className="savings-pill-highlight">Human review required</span>
-          </div>
-        </div>
-      )}
-
-      {activeTab === 'evidence_claims' && (
-        <div className="tab-pane-content evidence-deepdive-pane">
-          <div className="cross-member-savings-banner">
-            <div className="cross-member-badge">COMPARISON WITH EARLIER CLAIMS</div>
-            <div className="cross-member-header-row">
-              <div>
-                <h4>How this claim compares with the earlier claims selected by the model</h4>
-                <p>
-                  The model selected {similarClaims.length} earlier claims using diagnosis, procedure, payer, provider, and service-setting fields when available. The technical codes are shown in the table only so a reviewer can verify the match.
-                </p>
-              </div>
-              <div className="cross-member-kpis">
-                <div className="cross-kpi-item">
-                  <span>This claim's insurance price:</span>
-                  <strong>{formatOptionalCurrency(allowed)}</strong>
-                </div>
-                <div className="cross-kpi-item highlight">
-                  <span>Estimated insurance price from earlier claims:</span>
-                  <strong>{formatOptionalCurrency(snapshot.predicted_allowed?.value)}</strong>
-                </div>
-              </div>
-            </div>
-            <div className="cross-member-reasoning-card">
-              <strong>How to read this comparison:</strong>
-              <p>Lower earlier prices show that variation exists. They do not establish savings by themselves. Payer, provider, location, contract terms, coding, and the work performed must be checked before drawing a conclusion.</p>
-            </div>
-          </div>
-
-          <div className="evidence-table-heading">
-            <h4>Earlier claims selected for comparison ({similarClaims.length})</h4>
-            <p>These rows let a reviewer check the prices and matching fields used by the model.</p>
-          </div>
-          {similarClaims.length ? (
-            <div className="evidence-table-wrapper">
-              <table className="evidence-table-full">
-                <thead>
-                  <tr>
-                    <th>Claim ID</th>
-                    <th>Date</th>
-                    <th>Medical code</th>
-                    <th>Billing code</th>
-                    <th>Provider</th>
-                    <th>Insurance company</th>
-                    <th>Insurance price</th>
-                    <th>Difference from this claim</th>
-                    <th>How to interpret it</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {similarClaims.map((item) => {
-                    const diff = (allowed || 0) - (item.allowed || 0)
-                    const isLower = diff > 0
-                    return (
-                      <tr key={item.claim_id}>
-                        <td><strong>{item.claim_id}</strong></td>
-                        <td>{item.service_date}</td>
-                        <td><code>{item.icd10}</code></td>
-                        <td><code>{item.cpt}</code></td>
-                        <td>{item.provider}</td>
-                        <td>{item.payer}</td>
-                        <td><strong>{formatOptionalCurrency(item.allowed)}</strong></td>
-                        <td>
-                          {isLower ? (
-                            <span className="savings-diff-pill favorable">
-                              -{formatOptionalCurrency(diff)} ({((diff / (allowed || 1)) * 100).toFixed(1)}% less)
-                            </span>
-                          ) : (
-                            <span className="savings-diff-pill neutral">
-                              +{formatOptionalCurrency(Math.abs(diff))} higher
-                            </span>
-                          )}
-                        </td>
-                        <td>
-                          <small className="peer-strategy-note">
-                            {isLower
-                              ? `This earlier claim has a lower recorded insurance price. Review the matching details before treating the difference as savings.`
-                              : `This earlier claim was selected as a comparison, but its recorded insurance price is not lower.`}
-                          </small>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <p>No similar historical claims available.</p>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function PlainTooltip({ text, children }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <span className={`plain-tooltip ${open ? 'is-open' : ''}`}>
-      <span className="plain-tooltip-content">{children}</span>
-      <button
-        type="button"
-        aria-label="What does this mean?"
-        aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
-      >
-        <Info size={13} />
-      </button>
-      <span className="plain-tooltip-popover" role="tooltip">{text}</span>
-    </span>
-  )
-}
-
-function financialImpactSummaryFromBilledResult(result) {
-  if (!result?.available || !result.calculation) return ''
-  const memberId = result.member_id || result.prediction_patient?.member_id
-  const memberName = (
-    result.prediction_patient?.patient_name
-    || result.prediction_patient?.member_name
-    || result.episode_1?.source_rows?.[0]?.patient_name
-    || result.earlier_episode?.claims?.[0]?.patient_name
-    || (memberId === 'MBR00016' ? 'Karen Miller' : '')
-    || (memberId === 'MBR00006' ? 'Charles Moore' : '')
-  )
-  const memberLabel = [memberName, memberId ? `(${memberId})` : ''].filter(Boolean).join(' ')
-  const fmt = formatOptionalCurrency
-
-  if (result.calculation_type === 'reference_intervention_counterfactual') {
-    const actual = result.calculation.actual_cost
-    const proposed = result.calculation.proposed_cost
-    const savings = result.calculation.potential_savings
-    const referenceName = result.reference_patient?.patient_name || result.intervention?.source_rows?.[0]?.patient_name || 'the reference patient'
-    const referenceId = result.reference_patient?.member_id
-    const referenceLabel = [referenceName, referenceId ? `(${referenceId})` : ''].filter(Boolean).join(' ')
-    return `Financial impact for ${memberLabel}: Actual total billed cost (risk evaluation + hospital admission) = ${fmt(actual)}; proposed total billed cost (risk evaluation + diabetes self-management training, as applied for the reference patient ${referenceLabel}) = ${fmt(proposed)}; potential savings = ${fmt(savings)}. The savings represent the avoided hospital admission and are based on billed charges.`
-  }
-
-  const actual = result.calculation.actual_two_episode_billed
-  const proposed = result.calculation.proposed_earlier_episode_with_add_on_billed
-  const savings = result.calculation.potential_billed_difference
-  return `Financial impact for ${memberLabel}: Actual total billed cost = ${fmt(actual)}; proposed total billed cost = ${fmt(proposed)}; potential savings = ${fmt(savings)}. The savings represent the avoided worsening follow-up visit and are based on billed charges.`
-}
-
-function PlainLanguageClaimNarrative({ scenario, facts, summary, snapshot, historicalPeerCount, billedComparison }) {
-  const peers = scenario.similar_historical_claims || []
-  const avoidable = snapshot.predicted_avoidable_spend || {}
-  const billed = facts.charge || 0
-  const allowed = facts.allowed || 0
-  const discount = Math.max(0, billed - allowed)
-  const patientPaid = facts.patient_payment_received || 0
-  const patientBalance = facts.outstanding_patient_balance || 0
-  const lowestPeer = peers.reduce((lowest, peer) => (
-    !lowest || peer.allowed < lowest.allowed ? peer : lowest
-  ), null)
-  const lowestPeerAllowed = Number.isFinite(lowestPeer?.allowed) ? lowestPeer.allowed : null
-  const peerDifference = Number.isFinite(lowestPeerAllowed) ? Math.max(0, allowed - lowestPeerAllowed) : null
-  const serviceName = facts.cpt_description || 'a healthcare service'
-  const action = summary.best_action || {}
-  const historicalEvidence = facts.outcome_evidence || facts.outcomeEvidence || null
-  const financialImpactSummary = financialImpactSummaryFromBilledResult(billedComparison)
-
-  return (
-    <section className="plain-claim-narrative" aria-labelledby="plain-claim-narrative-title">
-      <header>
-        <span>A simple story about this visit</span>
-        {!financialImpactSummary ? (
-          <>
-            <h2 id="plain-claim-narrative-title">What this claim prediction is saying</h2>
-            <p>This section explains claim <strong>{facts.claim_id}</strong> in plain language: what happened, what the app is estimating, and which recorded claims support the recommendation. Model estimates are separate from recorded facts, so they should not be added together.</p>
-          </>
-        ) : null}
-      </header>
-
-      {financialImpactSummary ? (
-        <aside className="financial-impact-summary" role="note">
-          {financialImpactSummary}
-        </aside>
-      ) : null}
-
-      {historicalEvidence?.reference_outcome_supported === true ? (
-        <aside className="start-here-strongest-claim" role="note">
-          <strong>This claim is one of the strongest demo claims.</strong> The historical reference patient
-          received {historicalEvidence.reference_intervention} (claim {historicalEvidence.reference_intervention_claim_id || historicalEvidence.reference_claim_id})
-          . This prediction patient has the same diagnosis pattern but has not received that intervention
-          {historicalEvidence.prediction_readmission_billed_amount != null
-            ? <> and later had a related hospitalization (claim {historicalEvidence.prediction_readmission_claim_id}) billed at {formatOptionalCurrency(historicalEvidence.prediction_readmission_billed_amount)}</>
-            : null}
-          . Use the outcome evidence below to verify the claim IDs, dates, and billed amounts used in this example.
-        </aside>
-      ) : null}
-
-      <div className="claim-story-grid">
-        <article>
-          <span className="story-number">1</span>
-          <div>
-            <h3>What happened</h3>
-            <p>This was a <strong>{serviceName}</strong> visit at {facts.provider || 'the provider'} on {formatDate(facts.service_date)}. The recorded billed amount was <strong>{formatOptionalCurrency(billed)}</strong>. The insurance plan allowed <strong>{formatOptionalCurrency(allowed)}</strong>, which is {formatOptionalCurrency(discount)} below the billed amount.</p>
-            <p>The insurance company paid <strong>{formatOptionalCurrency(facts.paid)}</strong>. The patient’s share was <strong>{formatOptionalCurrency(facts.patient_responsibility)}</strong>. The record says {formatOptionalCurrency(patientPaid)} was already paid and <strong>{formatOptionalCurrency(patientBalance)} still needs to be checked</strong>.</p>
-          </div>
-        </article>
-
-        <article>
-          <span className="story-number">2</span>
-          <div>
-            <h3>What the computer is guessing</h3>
-            <p>It looked at <strong>{historicalPeerCount} older bills that look similar</strong> to estimate the provider payment: <strong>{formatOptionalCurrency(snapshot.predicted_provider_payment?.value)}</strong>. This is a prediction, not a recorded payment.</p>
-            <p>It also estimates a <strong>{formatProbability(avoidable.repeat_probability_90d)}</strong> chance of another related bill in the next three months. The possible future cost is <strong>{formatOptionalCurrency(avoidable.value)}</strong>. This is separate from the billed amount. This is only a guess, not a promise.</p>
-          </div>
-        </article>
-
-        <article>
-          <span className="story-number">3</span>
-          <div>
-            <h3>What to do next</h3>
-            <p>{action.action || 'Review the recorded claim information before taking action.'}</p>
-            <p>For a billed comparison, the application uses the same member’s earlier and later episodes only when it can show the source claims and intervention lines. The predicted difference is a review flag—not confirmed savings. A person must check the records before doing anything.</p>
-          </div>
-        </article>
-      </div>
-
-      {Number.isFinite(lowestPeerAllowed) ? (
-        <p className="plain-peer-comparison">
-          <strong>Why we looked at these {peers.length} older bills:</strong> They are the closest bills we found for the same kind of problem and visit. <strong>Why bill {lowestPeer.claim_id} is shown:</strong> {lowestPeer.match_reason || 'It was one of the closest matches.'} Its insurance price is the lowest. The difference is {formatOptionalCurrency(peerDifference)} because {formatOptionalCurrency(allowed)} minus {formatOptionalCurrency(lowestPeerAllowed)} equals {formatOptionalCurrency(peerDifference)}. This only tells us that the prices are different. It does not prove that anyone did something wrong.
-        </p>
-      ) : null}
-
-      <div className="narrative-guardrails">
-        <p><strong>Do not add these numbers together:</strong> {formatOptionalCurrency(summary.recoverable_now)} is money to check now. {formatOptionalCurrency(avoidable.value)} is a possible future cost. {formatOptionalCurrency(summary.future_denial_exposure)} is money that might be at risk.</p>
-        <p><strong>About this practice data:</strong> Some added payment and older-reference information is made-up example data. Real use needs real bills and payment records.</p>
-      </div>
-
-      <details className="plain-glossary-toggle">
-        <summary>Tap here if a word is new</summary>
-        <dl>
-          <div><dt>Insurance price</dt><dd>The price the insurance plan uses for this visit.</dd></div>
-          <div><dt>Patient share</dt><dd>The part of the bill the patient may need to pay.</dd></div>
-          <div><dt>Another bill</dt><dd>A related bill in the next three months. It may still be needed.</dd></div>
-          <div><dt>Money at risk</dt><dd>Money that could be lost if insurance does not pay. It is not lost yet.</dd></div>
-        </dl>
-      </details>
-    </section>
-  )
-}
-
 function getOrganSystemInfo(icdCode = '', description = '') {
   const code = String(icdCode || '').toUpperCase().trim()
   const desc = String(description || '').toLowerCase()
@@ -3075,24 +2321,6 @@ function OrganSystemComparativeSavingsCard({ scenario, facts }) {
   )
 }
 
-function InterventionProposal({ plan }) {
-  if (!plan) return null
-  return (
-    <section aria-label="Scenario-specific intervention proposal">
-      <span className={evidenceBadgeClass('recommendation')}>{evidenceLabel('recommendation')}</span>
-      <strong>{plan.title || 'Intervention: insufficient evidence'}</strong>
-      <p>{plan.action || plan.reason}</p>
-      {plan.available ? (
-        <>
-          <p><strong>{plan.timing_basis === 'illustrative_demo' ? 'Example follow-up' : 'Conditional reassessment'}: {plan.follow_up_days} days.</strong> {plan.timing}</p>
-          <small>Proposed for clinical review. This is not a recorded service and is not included in savings calculations.</small>
-          {plan.source_url ? <p><a href={plan.source_url} target="_blank" rel="noreferrer">Clinical guidance</a></p> : null}
-        </>
-      ) : null}
-    </section>
-  )
-}
-
 function ReviewControls({ memberId, plan, onSaved }) {
   const current = plan.review || { status: 'pending', version: 0 }
   const [status, setStatus] = useState(() => reviewStatusOptions(current.status || 'pending')[0].value)
@@ -3230,7 +2458,7 @@ function MemberInterventionReviewCard({ member, interventionReview, setIntervent
   return (
     <Card className="claim-outcome-evidence">
       <h2>Care options found from this member’s claims</h2>
-      <a href={`${CONFIGURED_API_BASE_URL}/api/members/${encodeURIComponent(member.memberId)}/intervention-plans/export`}>Export recommendations with evidence labels</a>
+      <a href={`${apiBaseUrl()}/api/members/${encodeURIComponent(member.memberId)}/intervention-plans/export`}>Export recommendations with evidence labels</a>
       {!interventionReview ? <p>Loading this member’s intervention review…</p> : interventionReview.error ? <p>Intervention review could not be loaded. Reopen this member to retry.</p> : (
         <>
           <p>The app reviewed {interventionReview.claims_reviewed} claims for this member and found possible care-review ideas. Open a row to see what evidence was used, what information is missing, and when a reviewer might follow up. These are suggestions for review; they are not recorded care and they do not prove savings.</p>
@@ -3275,119 +2503,6 @@ function MemberInterventionReviewCard({ member, interventionReview, setIntervent
         </>
       )}
     </Card>
-  )
-}
-
-function ClaimOutcomeEvidencePanel({ facts }) {
-  const raw = facts.outcome_evidence || facts.outcomeEvidence || facts.workbookFields || facts.syntheticEnrichment || {}
-  const evidence = facts.outcome_evidence || facts.outcomeEvidence ? raw : {
-    condition_resolved: raw.Condition_Resolved || raw.condition_resolved || 'Not recorded',
-    treatment_outcome: raw.Treatment_Outcome || raw.treatment_outcome || 'Not recorded',
-    follow_up_completed: raw.Follow_Up_Completed || raw.follow_up_completed || 'Not recorded',
-    outcome_claim_flag: raw.Outcome_Claim_Flag || raw.outcome_claim_flag || 'Not recorded',
-    related_claim_flag: raw.Related_Claim_Flag || raw.related_claim_flag || 'Not recorded',
-    synthetic: String(raw.Reason_Code || '').toUpperCase() === 'SYNTHETIC_PRESENTATION_CASE' || String(raw.reason_code || '').toUpperCase() === 'SYNTHETIC_PRESENTATION_CASE',
-    status: 'Not established',
-    conclusion: 'No outcome fields are recorded for this claim.',
-  }
-  const outcomeText = [evidence.condition_resolved, evidence.treatment_outcome, evidence.follow_up_completed].filter(Boolean).join(' | ').toLowerCase()
-  const positiveOutcome = /(resolved|improved|recovered|documented outcome assessment|clinical improvement)/i.test(outcomeText)
-  const historicalReference = evidence.reference_outcome_supported === true
-  const recordedOutcome = [
-    evidence.condition_resolved,
-    evidence.treatment_outcome,
-    evidence.follow_up_completed,
-    evidence.outcome_claim_flag,
-    evidence.related_claim_flag,
-  ].some((value) => value && !/^not recorded$/i.test(String(value).trim()))
-  const status = historicalReference ? 'Historical reference evidence' : positiveOutcome ? 'Recorded outcome evidence' : (evidence.status || 'Not established')
-  const conclusion = historicalReference
-    ? evidence.conclusion
-    : positiveOutcome
-    ? (evidence.conclusion || 'Recorded claim fields show a resolved or improved outcome.')
-    : recordedOutcome
-      ? 'Recorded claim fields are shown below. They do not record a resolved or improved outcome for this claim.'
-      : 'No outcome fields are recorded for this claim.'
-  const heading = historicalReference
-    ? 'Historical evidence supports this prediction'
-    : positiveOutcome
-    ? 'Recorded outcome evidence'
-    : recordedOutcome
-      ? 'Recorded outcome fields'
-      : 'Outcome not recorded'
-  const personLabel = (name, id) => [name, id ? `(${id})` : ''].filter(Boolean).join(' ') || id || name || 'Not recorded'
-  const claimWithMemberLabel = (claimId, name, memberId) => (
-    claimId ? `${claimId} · ${personLabel(name, memberId)}` : personLabel(name, memberId)
-  )
-  const fields = historicalReference ? [
-    ['Matched member', personLabel(evidence.member_name, evidence.member_id)],
-    ['Matched episode', evidence.episode_id],
-    ['Historical reference claim', claimWithMemberLabel(evidence.reference_claim_id, evidence.reference_member_name, evidence.reference_member_id)],
-    ['Matched diagnosis', evidence.reference_diagnosis],
-    ['Intervention that improved the historical outcome', evidence.reference_intervention_claim_id ? `${evidence.reference_intervention} (${evidence.reference_intervention_claim_id})` : evidence.reference_intervention],
-    ['Recorded historical outcome', evidence.reference_treatment_outcome],
-    ['Prediction claim', claimWithMemberLabel(evidence.prediction_claim_id, evidence.prediction_member_name, evidence.prediction_member_id || evidence.member_id)],
-    ['Intervention already performed', evidence.prediction_intervention_performed === 'N' ? 'No — the preventive intervention was not performed for this patient' : evidence.prediction_intervention_performed],
-    ['Later hospitalization', evidence.claim_is_later_hospitalization ? `This claim (${evidence.prediction_readmission_claim_id}) is the later hospitalization` : (evidence.prediction_readmission_claim_id || 'Not recorded')],
-    ['Time to later hospitalization', evidence.prediction_readmission_gap_days == null ? 'Not recorded' : `${evidence.prediction_readmission_gap_days} days`],
-    ['Recommended earlier intervention', evidence.reference_intervention_claim_id ? `${evidence.recommended_intervention} (${evidence.reference_intervention_claim_id})` : evidence.recommended_intervention],
-  ] : [
-    ['Preventive claim', evidence.preventive_claim_id || 'Not recorded'],
-    ['Preventive service date', evidence.preventive_service_date || 'Not recorded'],
-    ['Preventive procedure', evidence.preventive_procedure || 'Not recorded'],
-    ['Outcome claim', evidence.source_claim_id || facts.claim_id || 'Not recorded'],
-    ['Reference claim', evidence.reference_claim_id || 'Not recorded'],
-    ['Outcome service date', evidence.source_service_date || 'Not recorded'],
-    ['Outcome procedure', evidence.source_procedure || 'Not recorded'],
-    ['Condition resolved', evidence.condition_resolved],
-    ['Treatment outcome', evidence.treatment_outcome],
-    ['Follow-up completed', evidence.follow_up_completed],
-    ['Outcome claim flag', evidence.outcome_claim_flag],
-    ['Reference claim flag', evidence.reference_claim_flag],
-    ['Related claim flag', evidence.related_claim_flag],
-    ['Later related claims after outcome', evidence.no_later_related_claims === true
-      ? (evidence.historical_no_readmission_days != null
-        ? `None recorded during ${evidence.historical_no_readmission_days} observed day(s) so far`
-        : 'None recorded')
-      : evidence.later_related_claim_ids?.join(', ') || 'Not evaluated'],
-    ...(evidence.historical_no_readmission_days != null && evidence.no_later_related_claims === true
-      ? [['Observed days without a related claim/readmission', `${evidence.historical_no_readmission_days} days`]]
-      : []),
-  ]
-
-  return (
-    <aside className="claim-outcome-evidence" aria-label="Claim outcome evidence">
-      <InterventionProposal plan={evidence.intervention_plan} />
-      <div className="claim-outcome-evidence-heading">
-        <ShieldAlert size={18} />
-        <div>
-          <span>Outcome evidence for this claim</span>
-          <strong>{heading}</strong>
-        </div>
-      </div>
-      <p>{conclusion}</p>
-      {historicalReference ? (
-        <div className="outcome-evidence-traceability">
-          <strong>Where the billed amounts come from</strong>
-          <ul>
-            {[evidence.reference_source_row, evidence.prediction_readmission_source].filter(Boolean).map((row) => (
-              <li key={row.claim_id}>
-                <strong>{formatOptionalCurrency(row.billed_amount)}</strong> — recorded billed (charge) amount from claim{' '}
-                <strong>{row.claim_id}</strong> dated {row.service_date}. Why included: {row.why_included}
-              </li>
-            ))}
-          </ul>
-          <small>The later hospitalization's billed charge is the potentially avoidable amount. The historical reference claim is evidence for choosing the intervention; its billed charge is shown only for traceability and is not added to the predicted saving.</small>
-        </div>
-      ) : null}
-      <dl>
-        {fields.map(([label, value]) => (
-          <div key={label}><dt>{label}</dt><dd>{value || 'Not recorded'}</dd></div>
-        ))}
-        <div><dt>Data type</dt><dd>{evidence.synthetic ? 'Synthetic demonstration' : 'Recorded claim data'}</dd></div>
-      </dl>
-      <small>Evidence status: {status}. Clinical results, diagnosis resolution, and causal attribution require evidence outside the claim record.</small>
-    </aside>
   )
 }
 
@@ -3854,18 +2969,7 @@ function DiseaseOverviewTable({ conditions, totalClaimsCount, onOpenPrediction, 
   const riskLevel = totalAllowedSum > 50000 || totalConditions >= 4 ? 'High' : (totalAllowedSum > 15000 || totalConditions >= 2 ? 'Medium' : 'Low');
   const prediabetesDemoClaim = memberClaims.find(isPrediabetesDemoClaim);
   const featuredDemoClaim = prediabetesDemoClaim || memberClaims.find(isReferenceClaim);
-  const featuredPredictionClaim = prediabetesDemoClaim
-    ? {
-        ...prediabetesDemoClaim,
-        claimId: 'CLM00001843',
-        number: 'CLM-001843',
-        memberId: 'MBR00016',
-        diagnosisCode: 'R73.03',
-        diagnosisDescription: 'Prediabetes',
-        isHistoricalReference: false,
-        workbookFields: {},
-      }
-    : featuredDemoClaim;
+  const featuredPredictionClaim = featuredDemoClaim;
 
   // Helper for sparklines based on real claim allowed amounts
   const generateSparkline = (item) => {
@@ -3904,7 +3008,7 @@ function DiseaseOverviewTable({ conditions, totalClaimsCount, onOpenPrediction, 
           <div>
             <span>Start the demo here</span>
             <h3>{prediabetesDemoClaim ? 'Open the Prediabetes example (R73.03)' : `Open claim ${featuredDemoClaim.number || featuredDemoClaim.claimId}`}</h3>
-            <p>{prediabetesDemoClaim ? 'This opens the CLM-001843 prediction and the billed calculation using EP1 CLM00001842, EP2 CLM00001843, and intervention CLM00001084B.' : `This opens claim ${featuredDemoClaim.number || featuredDemoClaim.claimId} and its comparison evidence.`}</p>
+            <p>{`This opens claim ${featuredDemoClaim.number || featuredDemoClaim.claimId} and its comparison evidence.`}</p>
           </div>
           <button type="button" onClick={() => onOpenPrediction(featuredPredictionClaim)}>
             Open this example <ArrowRight size={16} />
@@ -4466,14 +3570,23 @@ function MemberDetail({ member, selectedClaim, onBackToEncounters, onSelectMembe
           setPayerCohortSavings(null)
         }
       })
-    fetchJson(`/api/members/${encodeURIComponent(member.memberId)}/money-summary`)
-      .then((payload) => {
-        if (active) setMemberMoney(payload.supportedMoneySummary || null)
-      })
-      .catch(() => {
-        if (active) setMemberMoney(member.supportedMoneySummary || null)
-      })
-    return () => { active = false }
+    let summaryTimer
+    const controller = new AbortController()
+    const loadSummary = async () => {
+      try {
+        const payload = await fetchJson(`/api/members/${encodeURIComponent(member.memberId)}/money-summary?async=true`, { signal: controller.signal })
+        if (!active) return
+        if (payload.status === 'calculating' || payload.status === 'busy') {
+          summaryTimer = window.setTimeout(loadSummary, Math.max(1000, payload.retry_after_ms || 1000))
+        } else {
+          setMemberMoney(payload.supportedMoneySummary || null)
+        }
+      } catch {
+        if (active) setMemberMoney(member.supportedMoneySummary || { unavailable: true })
+      }
+    }
+    loadSummary()
+    return () => { active = false; controller.abort(); window.clearTimeout(summaryTimer) }
   }, [member, member.memberId, member.supportedMoneySummary])
 
   return (
@@ -6417,7 +5530,11 @@ function ProviderPredictionChat({ result }) {
     const legacyWelcome = 'Ask me to explain any backend-calculated prediction, financial exposure, sample basis, backtest result or provider action. I cannot change the calculated values.'
     try {
       const cached = JSON.parse(window.localStorage.getItem(storageKey) || 'null')
-      if (Array.isArray(cached)) return cached.filter((message) => message?.text !== legacyWelcome && message?.text !== 'Chat cleared. Ask a question about this prediction.')
+      if (Array.isArray(cached)) return cached
+        .filter((message) => ['user', 'assistant'].includes(message?.role) && typeof message.text === 'string')
+        .filter((message) => message.text !== legacyWelcome && message.text !== 'Chat cleared. Ask a question about this prediction.')
+        .slice(-30)
+        .map((message) => ({ ...message, text: message.text.slice(0, 6000) }))
     } catch { /* start with an empty conversation */ }
     return []
   })
@@ -6430,7 +5547,25 @@ function ProviderPredictionChat({ result }) {
 
   useEffect(() => {
     if (sessionState.mode !== 'local_demo') return
-    try { window.localStorage.setItem(storageKey, JSON.stringify(messages)) } catch { /* storage optional */ }
+    try {
+      const boundedMessages = messages.slice(-30).map((message) => ({
+        ...message,
+        text: String(message.text || '').slice(0, 6000),
+        ...(message.meta?.evidence_claim_ids ? { meta: {
+          ...message.meta,
+          evidence_claim_ids: message.meta.evidence_claim_ids.slice(0, 20),
+        } } : {}),
+      }))
+      window.localStorage.setItem(storageKey, JSON.stringify(boundedMessages))
+      const chatKeys = Object.keys(window.localStorage).filter((key) => key.startsWith('payerpayee.provider-chat.'))
+      let excess = Math.max(0, chatKeys.length - 50)
+      for (const key of chatKeys) {
+        if (!excess) break
+        if (key === storageKey) continue
+        window.localStorage.removeItem(key)
+        excess -= 1
+      }
+    } catch { /* storage optional */ }
   }, [messages, storageKey])
 
   const submit = async (question = draft) => {
@@ -6639,12 +5774,13 @@ function DashboardMetric({ label, value, note, icon: Icon, tone }) {
 
 function PredictionSummary({ summary }) {
   if (!summary) return null
+  const pageScope = summary.scope === 'visible_page'
   const cards = [
-    { label: 'Selectable Claims', value: summary.totalClaims.toLocaleString(), note: 'current workbook claims', tone: 'blue' },
-    { label: 'Recoverable Now', value: formatCurrency(summary.recoverableNow), note: 'canonical claim opportunities', tone: 'green' },
-    { label: 'Predicted Avoidable Spend — 90 Days', value: formatCurrency(summary.predictedAvoidableSpend90d), note: 'latest prediction per episode', tone: 'orange' },
-    { label: 'Future Denial Exposure', value: formatCurrency(summary.futureDenialExposure), note: 'forecast kept separate', tone: 'violet' },
-    { label: 'Future Repeat Exposure', value: formatCurrency(summary.futureRepeatPaymentExposure), note: 'forecast kept separate', tone: 'orange' },
+    { label: 'Selectable Claims', value: Number(summary.totalClaims || 0).toLocaleString(), note: 'current workbook claims', tone: 'blue' },
+    { label: `Recoverable Now${pageScope ? ' · visible page' : ''}`, value: formatCurrency(summary.recoverableNow), note: pageScope ? `calculated from ${summary.visibleClaims} visible claims` : 'canonical claim opportunities', tone: 'green' },
+    { label: `Predicted Avoidable Spend — 90 Days${pageScope ? ' · visible page' : ''}`, value: formatCurrency(summary.predictedAvoidableSpend90d), note: pageScope ? 'latest prediction per visible episode' : 'latest prediction per episode', tone: 'orange' },
+    { label: `Future Denial Exposure${pageScope ? ' · visible page' : ''}`, value: formatCurrency(summary.futureDenialExposure), note: 'forecast kept separate', tone: 'violet' },
+    { label: `Future Repeat Exposure${pageScope ? ' · visible page' : ''}`, value: formatCurrency(summary.futureRepeatPaymentExposure), note: 'forecast kept separate', tone: 'orange' },
   ]
 
   return (

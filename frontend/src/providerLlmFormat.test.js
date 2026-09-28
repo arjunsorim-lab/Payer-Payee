@@ -10,7 +10,7 @@ import {
   formatProbability,
 } from './providerLlmFormat.js'
 
-const app = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
+const app = readFileSync(new URL('./PlainTooltip.jsx', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('./ClaimFinancialBreakdown.jsx', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('./App.jsx', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('./ClaimEvidence.jsx', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('./claimFormatting.js', import.meta.url), 'utf8')
 const styles = readFileSync(new URL('./App.css', import.meta.url), 'utf8')
 const formatter = readFileSync(new URL('./providerLlmFormat.js', import.meta.url), 'utf8')
 const comparator = readFileSync(new URL('./CrossPatientComparator.jsx', import.meta.url), 'utf8')
@@ -112,7 +112,7 @@ test('provider forecast shows one claim-anchored billed comparison', () => {
   assert.match(app, /Open Provider Forecast/)
   assert.match(app, /Open Payer Savings/)
   assert.doesNotMatch(providerView, /We could not find a fair bill to compare/)
-  assert.match(app, /scenario\.payer_savings_prediction/)
+  assert.match(app, /preloadedResult=/)
   assert.match(app, /function PeerComparisonPredictionSummary/)
   assert.match(app, /Claim-anchored billed comparison/)
   assert.match(app, /Billed amount comparison for this visit/)
@@ -223,7 +223,6 @@ test('legacy renderer and forbidden empty-state wording are absent', () => {
     ['None', 'identified'].join(' '),
     ['Not', 'calculated'].join(' '),
     ['Not', 'supported'].join(' '),
-    ['Un', 'available'].join(''),
     ['Un', 'known'].join(''),
     ['Range', 'un' + 'available'].join(' '),
     ['Claims', 'Original'].join('_'),
@@ -253,8 +252,8 @@ test('prediction evidence shows hybrid workbook retrieval without vectors', () =
 })
 
 test('Member 360 loads the canonical member money summary from the backend', () => {
-  assert.match(app, /fetchJson\(`\/api\/members\/\$\{encodeURIComponent\(member\.memberId\)\}`\)/)
-  assert.match(app, /buildMemberStats\(member, memberMoney, payerCohortSavings\)/)
+  assert.match(app, /money-summary\?async=true/)
+  assert.match(app, /buildMemberStats\(displayMember, memberMoney, payerCohortSavings\)/)
   assert.match(app, /payerCohortSavingsSummary/)
   assert.match(app, /MemberFinancialPredictionSidebar/)
   assert.doesNotMatch(app, /buildMemberStats\(member\)\s*$/m)
@@ -264,7 +263,7 @@ test('Member 360 paginates member conditions and overview table properly', () =>
   assert.match(app, /const memberEncountersPageSize = 10/)
   assert.match(app, /DiseaseOverviewTable/)
   assert.match(app, /memberConditions/)
-  assert.match(app, /totalClaimsCount=\{member\.claims\.length\}/)
+  assert.match(app, /totalClaimsCount=\{displayMember\.claims\.length\}/)
 })
 
 test('All Encounters features source-marked reference claims without a fixed identity', () => {

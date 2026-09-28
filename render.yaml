@@ -31,3 +31,5 @@ services:
         value: .review-data/reviews.sqlite3
       - key: MONGODB_URI
         sync: false
+      - key: LOGIN_RATE_LIMIT_REDIS_URL
+        sync: false

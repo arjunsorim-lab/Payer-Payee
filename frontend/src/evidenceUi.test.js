@@ -21,7 +21,7 @@ import {
   verifiedSavingsLabel,
 } from './evidenceUi.js'
 
-const app = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
+const app = readFileSync(new URL('./PlainTooltip.jsx', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('./ClaimFinancialBreakdown.jsx', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('./App.jsx', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('./ClaimEvidence.jsx', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('./claimFormatting.js', import.meta.url), 'utf8')
 
 test('every evidence type has a distinct label and an unknown type is flagged', () => {
   const labels = Object.values(EVIDENCE_LABELS)
@@ -124,7 +124,7 @@ test('evidence-quality rows are calculated values, never the old placeholders', 
 
 test('evidence-quality rows fall back to explicit calculated-unavailable text', () => {
   const rows = evidenceQualityRows({})
-  assert.match(String(rows.find((row) => row.label === 'Matching strength').value), /Not calculated/)
+  assert.match(String(rows.find((row) => row.label === 'Matching strength').value), /Insufficient evidence.*Missing matching data/)
   assert.equal(rows.find((row) => row.label === 'Cohort size').value, 0)
 })
 
@@ -153,8 +153,9 @@ test('uncertainty and observation-window summaries explain insufficiency', () =>
 })
 
 test('the browser sends the CSRF token and secure same-origin credentials on writes', () => {
-  assert.match(app, /credentials: 'same-origin'/)
-  assert.match(app, /headers\['X-CSRF-Token'\] = sessionState\.csrfToken/)
+  const client = readFileSync(new URL('./apiClient.js', import.meta.url), 'utf8')
+  assert.match(client, /credentials: 'include'/)
+  assert.match(client, /headers\['X-CSRF-Token'\] = csrfToken/)
   assert.match(app, /bootstrapSession/)
   assert.match(app, /\/api\/session/)
   assert.match(app, /\/api\/login/)

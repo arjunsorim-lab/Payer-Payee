@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { apiFetchJson } from './apiClient.js'
 import {
   ArrowLeftRight,
   CheckCircle2,
@@ -123,11 +124,7 @@ export function SamePatientBilledSavings({ memberId, diagnosisCode, claimId = ''
     setLoading(true)
     setError('')
     const anchor = claimId ? `&anchor_claim_id=${encodeURIComponent(claimId)}` : ''
-    fetch(`/api/claims/same-patient-billed-savings?member_id=${encodeURIComponent(memberId)}&diagnosis_family=${encodeURIComponent(family)}${anchor}`)
-      .then((response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}: Same-patient comparison failed`)
-        return response.json()
-      })
+    apiFetchJson(`/api/claims/same-patient-billed-savings?member_id=${encodeURIComponent(memberId)}&diagnosis_family=${encodeURIComponent(family)}${anchor}`)
       .then((payload) => { if (active) setResult(payload) })
       .catch((requestError) => { if (active) setError(requestError.message || 'Could not calculate the billed scenario.') })
       .finally(() => { if (active) setLoading(false) })
@@ -284,8 +281,7 @@ export function PatientWorkbookCalculation({ diagnosisCode }) {
   useEffect(() => {
     if (!['N30', 'N39'].includes(family)) return undefined
     let active = true
-    fetch('/api/predictions/uti-case-workbook')
-      .then((response) => response.json())
+    apiFetchJson('/api/predictions/uti-case-workbook')
       .then((payload) => { if (active) setResult(payload) })
       .catch(() => { if (active) setResult({ available: false }) })
     return () => { active = false }
@@ -415,11 +411,7 @@ export function CrossPatientComparatorContent({
   useEffect(() => {
     let active = true
     setLoadingPairs(true)
-    fetch('/api/claims/comparable-pairs')
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}: Failed to fetch pairs`)
-        return res.json()
-      })
+    apiFetchJson('/api/claims/comparable-pairs')
       .then((data) => {
         if (!active) return
         setPairsData(data)
@@ -454,6 +446,11 @@ export function CrossPatientComparatorContent({
               const scopedMember = sorted.find((member) => member.member_id === initialMemberId)
               const firstMember = scopedMember || sorted[0]
               const secondMember = [...sorted].reverse().find((member) => member.member_id !== firstMember.member_id)
+              if (!firstMember || !secondMember) {
+                setPairsError('A second patient with matching diagnosis evidence is not available for comparison.')
+                setLoadingPairs(false)
+                return
+              }
               setMember1(firstMember.member_id)
               setMember2(secondMember.member_id)
               // Execute initial comparison
@@ -540,11 +537,7 @@ export function CrossPatientComparatorContent({
     setComparisonResult(null)
     setLoadingComparison(true)
     setComparisonError('')
-    fetch(`/api/claims/compare-patients?member_id_1=${encodeURIComponent(m1)}&member_id_2=${encodeURIComponent(m2)}&diagnosis_family=${encodeURIComponent(fam)}`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}: Comparison request failed`)
-        return res.json()
-      })
+    apiFetchJson(`/api/claims/compare-patients?member_id_1=${encodeURIComponent(m1)}&member_id_2=${encodeURIComponent(m2)}&diagnosis_family=${encodeURIComponent(fam)}`)
       .then((data) => {
         if (requestId !== comparisonRequest.current) return
         setComparisonResult(data)

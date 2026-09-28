@@ -165,7 +165,10 @@ class PredictedAvoidableSpendTests(unittest.TestCase):
         for member in self.database.members:
             member_id = member["memberId"]
             summary = member_supported_summary(self.database, member_id)
-            claims = self.database.member_claims(member_id)
+            # Reference/history rows support predictions but are not current
+            # financial targets. Match the public member summary contract.
+            claims = [claim for claim in self.database.member_claims(member_id)
+                      if self.database.find_claim(claim["claimId"], selectable_only=True)]
             latest = {}
             for claim in claims:
                 key = claim.get("episodeId") or claim["claimId"]

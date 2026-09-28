@@ -10,6 +10,8 @@ from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 import re
+import hashlib
+import json
 
 try:
     from .bounded_cache import BoundedCache, DEFAULT_MAX_SIZE
@@ -289,6 +291,19 @@ def _counterfactual_unavailable(reason, **extra):
     }
 
 
+def _database_cache_identity(database):
+    """Content identity for test/ad-hoc sources that have no workbook hash.
+
+    Object IDs can be reused after collection, leaking results between unrelated
+    datasets. A content digest also invalidates results after source changes.
+    """
+    workbook_hash = getattr(database, "workbook_hash", None)
+    if workbook_hash:
+        return workbook_hash
+    rows = getattr(database, "claims", ()) or getattr(database, "selectable_claims", ())
+    return hashlib.sha256(json.dumps(list(rows), sort_keys=True, default=str).encode()).hexdigest()
+
+
 def build_reference_intervention_counterfactual(database, member_id, diagnosis_family, anchor_claim_id=""):
     """Build Actual = EP1 + EP2; Proposed = EP1 + one reference intervention line.
 
@@ -299,7 +314,7 @@ def build_reference_intervention_counterfactual(database, member_id, diagnosis_f
     """
     family = _text(diagnosis_family).upper()
     cache_key = (
-        getattr(database, "workbook_hash", id(database)),
+        _database_cache_identity(database),
         _text(member_id),
         family,
         _normalize_claim_identifier(anchor_claim_id),
@@ -864,7 +879,7 @@ def build_same_patient_billed_intervention_savings(database, member_id, diagnosi
     """
     family = _text(diagnosis_family).upper()
     cache_key = (
-        getattr(database, "workbook_hash", id(database)),
+        _database_cache_identity(database),
         _text(member_id),
         family,
         _normalize_claim_identifier(anchor_claim_id),

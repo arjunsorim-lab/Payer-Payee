@@ -1285,24 +1285,8 @@ def _provider_scenario_map(scenario, actual, forecast, financial_metrics, reconc
     return scenario_map
 
 
-def _build_savings_opportunity(scenario, actual, forecast, financial_metrics, reconciliation, _scenario_map):
-    """Build one evidence-gated savings view from the exact shared forecast object."""
-    recovery = scenario.get("recoveryBasis", {})
-    repeat_basis = forecast.get("repeat_service_risk", {}).get("basis", {})
-    repeat_probability = forecast.get("repeat_service_risk", {}).get("probability_90d") or 0
-    predicted_allowed = forecast.get("predicted_allowed", {}).get("value") or 0
-    predicted_paid = forecast.get("predicted_paid", {}).get("value") or 0
-    denial_probability = forecast.get("denial_risk", {}).get("probability") or 0
-    forecast_label = "Forecast exposure — not confirmed savings"
-    minimum_amount = float(os.getenv("PROVIDER_CURRENT_OPPORTUNITY_MINIMUM", CURRENT_OPPORTUNITY_MINIMUM))
-
-    match_supported = bool(recovery.get("available") and recovery.get("sample_size", 0) >= recovery.get("minimum_sample_size", DEFAULT_MIN_PEERS))
-    actual_allowed = actual.get("allowed_amount") or 0
-    actual_charge = actual.get("charge_amount") or 0
-    actual_paid = actual.get("paid_amount") or 0
-    actual_adjustment = actual.get("adjustment_amount") or 0
-    actual_patient = actual.get("patient_responsibility") or 0
-
+def _build_peer_performance(actual, recovery, match_supported, actual_allowed, actual_charge, actual_paid, actual_adjustment, actual_patient):
+    """Compare recorded rates with supported peer rates without estimating savings."""
     actual_rates = {
         "allowed": round(actual_allowed / actual_charge, 4) if actual_charge else None,
         "paid_to_allowed": round(actual_paid / actual_allowed, 4) if actual_allowed else None,
@@ -1402,6 +1386,32 @@ def _build_savings_opportunity(scenario, actual, forecast, financial_metrics, re
             "patient_share_rate": performance_metrics["patient_share"]["variance_status"],
         },
     }
+
+    return current_performance, expected_amounts, peer_rates, performance_conclusion
+
+
+def _build_savings_opportunity(scenario, actual, forecast, financial_metrics, reconciliation, _scenario_map):
+    """Build one evidence-gated savings view from the exact shared forecast object."""
+    recovery = scenario.get("recoveryBasis", {})
+    repeat_basis = forecast.get("repeat_service_risk", {}).get("basis", {})
+    repeat_probability = forecast.get("repeat_service_risk", {}).get("probability_90d") or 0
+    predicted_allowed = forecast.get("predicted_allowed", {}).get("value") or 0
+    predicted_paid = forecast.get("predicted_paid", {}).get("value") or 0
+    denial_probability = forecast.get("denial_risk", {}).get("probability") or 0
+    forecast_label = "Forecast exposure — not confirmed savings"
+    minimum_amount = float(os.getenv("PROVIDER_CURRENT_OPPORTUNITY_MINIMUM", CURRENT_OPPORTUNITY_MINIMUM))
+
+    match_supported = bool(recovery.get("available") and recovery.get("sample_size", 0) >= recovery.get("minimum_sample_size", DEFAULT_MIN_PEERS))
+    actual_allowed = actual.get("allowed_amount") or 0
+    actual_charge = actual.get("charge_amount") or 0
+    actual_paid = actual.get("paid_amount") or 0
+    actual_adjustment = actual.get("adjustment_amount") or 0
+    actual_patient = actual.get("patient_responsibility") or 0
+
+    current_performance, expected_amounts, peer_rates, performance_conclusion = _build_peer_performance(
+        actual, recovery, match_supported, actual_allowed, actual_charge,
+        actual_paid, actual_adjustment, actual_patient,
+    )
 
     source_claim = scenario.get("selectedClaim") or scenario.get("anchor") or {}
     enrichment = source_claim.get("syntheticEnrichment") or {}

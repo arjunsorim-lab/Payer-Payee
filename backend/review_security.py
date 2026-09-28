@@ -10,8 +10,10 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 try:
     from .review_store import audit, connection
+    from .login_limiter import RedisLoginLimiter
 except ImportError:
     from review_store import audit, connection
+    from login_limiter import RedisLoginLimiter
 
 
 def configure_security(app):
@@ -40,6 +42,9 @@ def configure_security(app):
         MAX_CONTENT_LENGTH=1024 * 1024,
     )
     dummy_hash = generate_password_hash(secrets.token_hex(16))
+    redis_url = os.getenv("LOGIN_RATE_LIMIT_REDIS_URL", "")
+    app.config["LOGIN_RATE_LIMITER"] = RedisLoginLimiter.from_url(redis_url) if redis_url else None
+    app.config["SHARED_LOGIN_LIMIT_REQUIRED"] = production
 
     @app.before_request
     def protect_api():
@@ -48,8 +53,13 @@ def configure_security(app):
         g.actor, g.role = "anonymous", "none"
         if request.method not in {"GET", "HEAD"}:
             origin = request.headers.get("Origin")
-            trusted = {request.host_url.rstrip("/"), *os.getenv("CORS_ORIGIN", "http://127.0.0.1:5173,http://localhost:5173").split(",")}
-            if origin and origin not in trusted:
+            trusted = {
+                request.host_url.rstrip("/"),
+                *(value.strip().rstrip("/") for value in os.getenv(
+                    "CORS_ORIGIN", "http://127.0.0.1:5173,http://localhost:5173"
+                ).split(",") if value.strip()),
+            }
+            if origin and origin.rstrip("/") not in trusted:
                 return jsonify(message="Request origin is not allowed."), 403
         public = request.path in {"/api/session", "/api/login"}
         if app.config["REVIEW_AUTH_REQUIRED"]:
@@ -90,10 +100,22 @@ def configure_security(app):
         response.headers["Referrer-Policy"] = "same-origin"
         if request.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
-            # Store route patterns rather than member IDs, queries, or request bodies.
-            with connection(app.config["REVIEW_DB"]) as db:
-                audit(db, getattr(g, "actor", "anonymous"), "api_access",
-                      str(request.url_rule or "unmatched"), {"method": request.method, "status": response.status_code})
+            # Persist writes and sensitive review/audit reads. Logging every claim
+            # fetch made the SQLite audit database a synchronous hot path.
+            audit_reads = os.getenv("AUDIT_READ_REQUESTS", "false").strip().lower() == "true"
+            sensitive_read = (
+                request.path.startswith("/api/reviews/")
+                or request.path == "/api/review-audit"
+            )
+            should_audit = (
+                request.method not in {"GET", "HEAD", "OPTIONS"}
+                or sensitive_read
+                or audit_reads
+            )
+            if should_audit:
+                with connection(app.config["REVIEW_DB"]) as db:
+                    audit(db, getattr(g, "actor", "anonymous"), "api_access",
+                          str(request.url_rule or "unmatched"), {"method": request.method, "status": response.status_code})
         return response
 
     @app.get("/api/session")
@@ -113,10 +135,21 @@ def configure_security(app):
         cutoff = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
         # IP-wide limit prevents bypass by trying different usernames.
         resource = request.remote_addr or "unknown"
+        limiter = app.config.get("LOGIN_RATE_LIMITER")
+        if app.config.get("SHARED_LOGIN_LIMIT_REQUIRED") and limiter is None:
+            return jsonify(message="Shared sign-in protection is not configured."), 503
+        if limiter is not None:
+            try:
+                allowed = limiter.allow(resource)
+            except Exception:
+                app.logger.error("Shared login limiter unavailable")
+                return jsonify(message="Sign-in is temporarily unavailable."), 503
+            if not allowed:
+                return jsonify(message="Too many sign-in attempts. Try again in 15 minutes."), 429
         with connection(app.config["REVIEW_DB"]) as db:
             db.execute("BEGIN IMMEDIATE")
             failures = db.execute("SELECT COUNT(*) FROM audit WHERE event='login_failed' AND resource=? AND at>?", (resource, cutoff)).fetchone()[0]
-            if failures >= 5:
+            if limiter is None and failures >= 5:
                 return jsonify(message="Too many sign-in attempts. Try again in 15 minutes."), 429
             user = app.config["REVIEW_USERS"].get(username)
             valid = check_password_hash(user["password_hash"] if user else dummy_hash, password)

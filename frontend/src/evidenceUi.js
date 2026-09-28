@@ -126,15 +126,15 @@ export function missingEvidenceRows(quality) {
 // Evidence-quality rows replace placeholder text such as "not assessed".
 export function evidenceQualityRows(quality) {
   if (!quality) return []
-  const formatRatio = (value) => (value === null || value === undefined ? 'Not calculated' : `${Math.round(value * 100)}%`)
-  const formatScore = (value) => (value === null || value === undefined ? 'Not calculated' : Number(value).toFixed(2))
+  const formatRatio = (value) => (value === null || value === undefined ? 'Missing follow-up data' : `${Math.round(value * 100)}%`)
+  const formatScore = (value) => (value === null || value === undefined ? 'Missing matching data' : Number(value).toFixed(2))
   return [
     { label: 'History start', value: quality.history_start || 'Not recorded' },
     { label: 'History end', value: quality.history_end || 'Not recorded' },
     { label: 'Claims reviewed', value: quality.claims_reviewed ?? quality.history_claim_count ?? 0 },
     { label: 'Cohort size', value: quality.cohort_size ?? 0 },
-    { label: 'Matching strength', value: `${quality.matching_strength_label || 'Not calculated'} (${formatScore(quality.matching_strength)})` },
-    { label: 'Follow-up completeness', value: `${formatRatio(quality.follow_up_completeness)} (${quality.follow_up_status || 'not_assessed'})` },
+    { label: 'Matching strength', value: `${quality.matching_strength_label || 'Insufficient evidence'} (${formatScore(quality.matching_strength)})` },
+    { label: 'Follow-up completeness', value: `${formatRatio(quality.follow_up_completeness)} (${quality.follow_up_status || 'missing_follow_up_data'})` },
     { label: 'Data source type', value: (quality.data_source_type || 'recorded_claim').replace(/_/g, ' ') },
     { label: 'Causal evidence', value: quality.causal_evidence_status || 'not_established' },
     { label: 'Comparison strength', value: quality.comparison_strength || 'No comparable cohort available' },

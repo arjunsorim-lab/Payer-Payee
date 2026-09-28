@@ -13,7 +13,7 @@
     "export:fallback": "python -m backend.export_fallback",
     "report:provider-llm": "python -m backend.provider_batch_report",
     "test:backend": "python -m pytest -q backend/tests",
-    "test:frontend": "node --test frontend/src/providerLlmFormat.test.js frontend/src/evidenceUi.test.js",
+    "test:frontend": "node --test frontend/src/providerLlmFormat.test.js frontend/src/evidenceUi.test.js frontend/src/routing.test.js frontend/src/financialImpactSummary.test.js",
     "test": "npm run test:backend && npm run test:frontend",
     "build": "vite build --config frontend/vite.config.js",
     "lint": "oxlint",
